@@ -1,10 +1,38 @@
 [project]
 name = "manifold-sdk"
 version = "0.1.0"
+description = "Pair a robot policy with a benchmark: the types both are described in, the compatibility check between them, and the adapters that bridge them."
 readme = "README.md"
-requires-python = ">=3.13"
-license = { file = "LICENSE" }
-dependencies = []
+requires-python = ">=3.10"
+license = "MPL-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Bifrost" }]
+keywords = ["robotics", "policy", "benchmark", "manipulation", "imitation-learning", "vla"]
+classifiers = [
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "pydantic>=2.7",
+    "msgpack>=1.0",
+    "numpy>=1.24",
+    "scipy>=1.11",
+]
+
+[project.optional-dependencies]
+# JPEG/PNG sensor encoding on the bridge. Raw framing does not require an extra
+# dependency; only the compressed image formats require Pillow.
+images = ["pillow>=10"]
+
+[project.urls]
+Homepage = "https://manifold.bifrost.ai"
 
 [build-system]
 requires = ["hatchling"]
@@ -12,3 +40,74 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/manifold"]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "ty>=0.0.32",
+    "pytest>=8",
+    "pillow>=10",  # exercises the bridge's jpeg/png image paths in the test gate
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Rules added beyond ruff's defaults, with reasons:
+#   E, F  — pycodestyle + pyflakes: the correctness/style baseline (ruff's default).
+#   I     — isort: stable import order.
+#   B     — bugbear: likely bugs (mutable defaults, loop-var capture, ...).
+#   UP    — pyupgrade: keep syntax current for the py310 target.
+#   N     — pep8-naming: consistent casing across the public API surface.
+#   SIM   — simplify: flag redundant control flow / comprehensions.
+#   RUF   — ruff's own lints (mutable class attrs, unused noqa, ...).
+#   TID   — tidy-imports: bans relative imports (absolute manifold.* only).
+#   RET   — line-of-sight returns: early-return, no else-after-return.
+#   TRY   — exception anti-patterns (raise-without-from, sprawling try bodies).
+#   C90   — mccabe: caps nesting/complexity (see max-complexity below).
+#   D     — pydocstyle: Google docstring convention (see [pydocstyle] below).
+select = ["E", "F", "I", "B", "UP", "N", "SIM", "RUF", "TID", "RET", "TRY", "C90", "D"]
+ignore = [
+    "N818",    # exception names: N818 would require ContractErrorError
+    "D105",    # docstrings not required on magic methods
+    "D107",    # __init__ documented by its class docstring
+    "TRY003",  # short f-string messages in raises are fine here
+]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"  # absolute imports only: manifold.core.adapter, not .adapter
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["manifold"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]  # tests do not need docstrings
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+# Put the repo root on sys.path so a test can import the `tests` package itself
+# (e.g. `from tests._rotation_fixtures import ...`). `manifold` resolves via the
+# editable install under `src`.
+pythonpath = ["."]
+
+[tool.ty.environment]
+# `src` holds the `manifold` package; `.` lets a test resolve the `tests`
+# package (the shared `_rotation_fixtures`).
+root = ["src", "."]
+python-version = "3.10"
+
+# IDE configuration only; `just check` type-checks with ty. Standard mode with
+# missing-stub reports off suppresses them for scipy and msgpack, which do not
+# ship type information; the wire codec is dynamically typed by design.
+[tool.basedpyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.10"
+reportMissingTypeStubs = false
