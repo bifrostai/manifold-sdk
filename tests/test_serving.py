@@ -419,3 +419,51 @@ def test_an_episode_falls_back_to_the_benchmark_name_when_no_instruction_is_publ
     result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2)
 
     assert result.records[0].task_name == "bench-1"
+
+
+# --- write_rollup ------------------------------------------------------------------
+
+
+def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
+
+    record = EpisodeRecord(
+        episode_idx=3,
+        task_name="pick up the mug",
+        success=True,
+        steps=12,
+        started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
+    )
+
+    path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="libero")
+
+    assert path == tmp_path / "results" / "libero.json"
+    assert json.loads(path.read_text()) == {
+        "records": [
+            {
+                "episode_idx": 3,
+                "task_name": "pick up the mug",
+                "success": True,
+                "steps": 12,
+                "started_at": "2026-01-01T12:00:00+00:00",
+                "ended_at": "2026-01-01T12:00:30+00:00",
+            }
+        ]
+    }
+
+
+def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, write_rollup
+
+    path = write_rollup(
+        BenchmarkResult(records=_records(2, successes=1)), tmp_path, benchmark_name="bench"
+    )
+
+    (first, second) = json.loads(path.read_text())["records"]
+    assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
+    assert datetime.fromisoformat(first["started_at"]).tzinfo is not None

@@ -25,10 +25,12 @@ plugs in. Compatibility-checking lives on the policy side (ADR-0001): `serve` ru
 
 from __future__ import annotations
 
+import json
 import socket
 import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from manifold.core.benchmark import Benchmark
@@ -582,6 +584,32 @@ class BenchmarkResult:
         )
 
 
+def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: str) -> Path:
+    """Write the run's records to ``<output-dir>/results/<benchmark>.json``, and return the path.
+
+    This is the file a runner scans a benchmark worker's output directory for: a
+    flat document keyed ``records``, one entry per episode, instants in ISO 8601.
+    The runner derives ``elapsed_sec`` from the two instants, so the rollup does
+    not carry a duration free to disagree with them.
+    """
+    records = [
+        {
+            "episode_idx": record.episode_idx,
+            "task_name": record.task_name,
+            "success": record.success,
+            "steps": record.steps,
+            "started_at": record.started_at.isoformat(),
+            "ended_at": record.ended_at.isoformat(),
+        }
+        for record in result.records
+    ]
+    results_dir = output_dir / "results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    path = results_dir / f"{benchmark_name}.json"
+    path.write_text(json.dumps({"records": records}))
+    return path
+
+
 def serve(
     endpoint: PolicyEndpoint,
     *,
@@ -901,4 +929,5 @@ __all__ = [
     "run_benchmark",
     "run_sharded_benchmark",
     "serve",
+    "write_rollup",
 ]
