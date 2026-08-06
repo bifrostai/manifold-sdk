@@ -10,6 +10,7 @@ from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
     BenchmarkResult,
     ChunkEndpoint,
+    EpisodeRecord,
     OpenLoopChunkQueue,
     PairingRejected,
     PolicyProfile,
@@ -26,6 +27,7 @@ __all__ = [
     "BenchmarkResult",
     "ChunkEndpoint",
     "EpisodeCursor",
+    "EpisodeRecord",
     "OpenLoopChunkQueue",
     "Pairing",
     "PairingRejected",

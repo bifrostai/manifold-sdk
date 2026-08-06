@@ -27,7 +27,8 @@ from __future__ import annotations
 
 import socket
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from manifold.core.benchmark import Benchmark
@@ -84,8 +85,11 @@ def _run_episode_in_process(
     reset: Callable[[], Observation],
     step: Callable[[Action], StepResult],
     max_steps: int,
-) -> bool:
-    """Drive one in-process episode, returning whether it succeeded.
+    *,
+    episode_idx: int,
+    benchmark_name: str,
+) -> EpisodeRecord:
+    """Drive one in-process episode, returning the record of what it did.
 
     The in-process twin of `_run_episode`: it resets the session and the lane's
     `PipelineState`, then loops `reset/step` against the shared `_infer_step` fold
@@ -94,14 +98,27 @@ def _run_episode_in_process(
     """
     state.reset_lane(DEFAULT_LANE)
     session.reset()
+    started_at = datetime.now(timezone.utc)
     observation = reset()
+    task_name = observation.instruction or benchmark_name
+    steps = 0
+    success = False
     for _ in range(max_steps):
         action = _infer_step(session, observation, pipeline, observation_source, signature, state)
         result = step(action)
+        steps += 1
         observation = result.observation
         if result.success or result.done:
-            return result.success
-    return False
+            success = result.success
+            break
+    return EpisodeRecord(
+        episode_idx=episode_idx,
+        task_name=task_name,
+        success=success,
+        steps=steps,
+        started_at=started_at,
+        ended_at=datetime.now(timezone.utc),
+    )
 
 
 def _serve_connection(
@@ -264,10 +281,21 @@ def _run_episode(
     step: Callable[[Action], StepResult],
     max_steps: int,
     image_format: ImageFormat,
-) -> bool:
-    """Drive one episode over the channel, returning whether it succeeded."""
+    *,
+    episode_idx: int,
+    benchmark_name: str,
+) -> EpisodeRecord:
+    """Drive one episode over the channel, returning the record of what it did.
+
+    The clock brackets the whole rollout, reset included, since an episode begins
+    when the environment is reset.
+    """
     channel.send(FrameType.RESET, {})
+    started_at = datetime.now(timezone.utc)
     observation = reset()
+    task_name = observation.instruction or benchmark_name
+    steps = 0
+    success = False
     for _ in range(max_steps):
         channel.send(
             FrameType.OBSERVATION,
@@ -278,10 +306,19 @@ def _run_episode(
             raise PairingRejected("expected an action frame from the policy")
         action = bridge.decode_action(reply["payload"])
         result = step(action)
+        steps += 1
         observation = result.observation
         if result.success or result.done:
-            return result.success
-    return False
+            success = result.success
+            break
+    return EpisodeRecord(
+        episode_idx=episode_idx,
+        task_name=task_name,
+        success=success,
+        steps=steps,
+        started_at=started_at,
+        ended_at=datetime.now(timezone.utc),
+    )
 
 
 @runtime_checkable
@@ -483,11 +520,48 @@ class StepResult:
 
 
 @dataclass(frozen=True)
-class BenchmarkResult:
-    """The tally of a finished run: how many episodes succeeded out of how many."""
+class EpisodeRecord:
+    """One finished episode, as the benchmark observed it.
 
-    successes: int
-    episodes: int
+    `started_at` and `ended_at` bracket the rollout, so `elapsed_sec` derives from
+    them rather than being measured separately and free to disagree. `task_name` is
+    the reset observation's instruction where the benchmark publishes one, and the
+    benchmark's own name otherwise. `episode_idx` is the global episode id, which a
+    sharded run partitions disjointly, so two shards never report the same one.
+    """
+
+    episode_idx: int
+    task_name: str
+    success: bool
+    steps: int
+    started_at: datetime
+    ended_at: datetime
+
+    @property
+    def elapsed_sec(self) -> float:
+        """The episode's wall-clock duration, in seconds."""
+        return (self.ended_at - self.started_at).total_seconds()
+
+
+@dataclass(frozen=True)
+class BenchmarkResult:
+    """A finished run: one record per episode it drove.
+
+    `episodes` and `successes` are views over `records`, so a tally cannot drift
+    from the episodes it counts.
+    """
+
+    records: tuple[EpisodeRecord, ...] = ()
+
+    @property
+    def episodes(self) -> int:
+        """How many episodes ran."""
+        return len(self.records)
+
+    @property
+    def successes(self) -> int:
+        """How many episodes succeeded."""
+        return sum(1 for record in self.records if record.success)
 
     @property
     def success_rate(self) -> float:
@@ -596,7 +670,7 @@ def run_benchmark(
     does not need an extra dependency.
 
     Returns:
-        The tally of successes over the episodes run.
+        A record for each episode run, and the tally over them.
 
     Raises:
         PairingRejected: If the policy closes without READY, or a frame arrives out
@@ -618,15 +692,24 @@ def run_benchmark(
             raise PairingRejected("policy rejected the pairing (no READY)")
         emit("policy confirmed the pairing (ready)")
 
-        successes = 0
+        records: list[EpisodeRecord] = []
         for episode in range(episodes):
-            success = _run_episode(channel, reset, step, max_steps, image_format)
-            successes += int(success)
-            outcome = "success" if success else "failure"
+            record = _run_episode(
+                channel,
+                reset,
+                step,
+                max_steps,
+                image_format,
+                episode_idx=episode,
+                benchmark_name=benchmark.name,
+            )
+            records.append(record)
+            outcome = "success" if record.success else "failure"
             emit(f"episode {episode + 1}/{episodes}: {outcome}")
         channel.send(FrameType.BYE, {})
-        emit(f"done — {successes}/{episodes} succeeded")
-        return BenchmarkResult(successes=successes, episodes=episodes)
+        result = BenchmarkResult(records=tuple(records))
+        emit(f"done — {result.successes}/{episodes} succeeded")
+        return result
 
 
 def run_sharded_benchmark(
@@ -657,7 +740,7 @@ def run_sharded_benchmark(
     final per-shard tally line.
 
     Returns:
-        The tally of successes over the episodes this shard ran.
+        A record for each episode this shard ran, and the tally over them.
 
     Raises:
         ValueError: If `server` is not ``host:port``, or the shard flags are invalid.
@@ -682,6 +765,14 @@ def run_sharded_benchmark(
         host=host,
         port=port,
         on_event=on_event,
+    )
+    # `run_benchmark` numbers episodes from zero, but the cursor drove them in
+    # `shard_ids` order, so the i-th record belongs to that shard id. Restamping the
+    # global id is what keeps two shards from reporting the same `episode_idx`.
+    result = BenchmarkResult(
+        records=tuple(
+            replace(record, episode_idx=shard_ids[idx]) for idx, record in enumerate(result.records)
+        )
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
@@ -713,7 +804,7 @@ def evaluate(
     `pipeline` bridges exactly as `serve` resolves it (None / callable / `Pipeline`).
 
     Returns:
-        The tally of successes over the episodes run.
+        A record for each episode run, and the tally over them.
 
     Raises:
         PairingRejected: If the policy-side gate rejects the pairing. In process there
@@ -731,16 +822,26 @@ def evaluate(
     state = PipelineState()
     session = endpoint.session()
     try:
-        successes = 0
+        records: list[EpisodeRecord] = []
         for episode in range(episodes):
-            success = _run_episode_in_process(
-                session, resolved, observation_source, signature, state, reset, step, max_steps
+            record = _run_episode_in_process(
+                session,
+                resolved,
+                observation_source,
+                signature,
+                state,
+                reset,
+                step,
+                max_steps,
+                episode_idx=episode,
+                benchmark_name=benchmark.name,
             )
-            successes += int(success)
-            outcome = "success" if success else "failure"
+            records.append(record)
+            outcome = "success" if record.success else "failure"
             emit(f"episode {episode + 1}/{episodes}: {outcome}")
-        emit(f"done — {successes}/{episodes} succeeded")
-        return BenchmarkResult(successes=successes, episodes=episodes)
+        result = BenchmarkResult(records=tuple(records))
+        emit(f"done — {result.successes}/{episodes} succeeded")
+        return result
     finally:
         # Retire the session's per-session scratch on teardown — see Session.close.
         session.close()
@@ -787,6 +888,7 @@ def launch_server(
 __all__ = [
     "BenchmarkResult",
     "ChunkEndpoint",
+    "EpisodeRecord",
     "OpenLoopChunkQueue",
     "PairingRejected",
     "PolicyEndpoint",
