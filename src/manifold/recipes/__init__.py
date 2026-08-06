@@ -10,6 +10,7 @@ from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
     BenchmarkResult,
     ChunkEndpoint,
+    EpisodeRecord,
     OpenLoopChunkQueue,
     PairingRejected,
     PolicyProfile,
@@ -19,6 +20,7 @@ from manifold.recipes.serving import (
     run_benchmark,
     run_sharded_benchmark,
     serve,
+    write_rollup,
 )
 from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
 
@@ -26,6 +28,7 @@ __all__ = [
     "BenchmarkResult",
     "ChunkEndpoint",
     "EpisodeCursor",
+    "EpisodeRecord",
     "OpenLoopChunkQueue",
     "Pairing",
     "PairingRejected",
@@ -47,4 +50,5 @@ __all__ = [
     "run_sharded_benchmark",
     "serve",
     "shard_episode_ids",
+    "write_rollup",
 ]

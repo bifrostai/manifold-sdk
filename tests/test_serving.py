@@ -8,6 +8,7 @@ torch).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 from typing import cast
 
@@ -69,6 +70,24 @@ def test_close_is_a_noop_for_the_stateless_base():
     assert q.close() is None
 
 
+def _records(episodes: int, *, successes: int):
+    """`episodes` records, of which the first `successes` succeeded."""
+    from manifold.recipes import EpisodeRecord
+
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    return tuple(
+        EpisodeRecord(
+            episode_idx=idx,
+            task_name="task",
+            success=idx < successes,
+            steps=1,
+            started_at=moment,
+            ended_at=moment,
+        )
+        for idx in range(episodes)
+    )
+
+
 # --- BenchmarkResult.format_shard -------------------------------------------------
 
 
@@ -76,7 +95,7 @@ def test_format_shard_renders_the_per_shard_tally():
     from manifold.recipes import BenchmarkResult
 
     assert (
-        BenchmarkResult(successes=3, episodes=4).format_shard(0, 2)
+        BenchmarkResult(records=_records(4, successes=3)).format_shard(0, 2)
         == "[bench shard 0/2] 3/4 succeeded (75.0%)"
     )
 
@@ -84,10 +103,7 @@ def test_format_shard_renders_the_per_shard_tally():
 def test_format_shard_handles_an_empty_run():
     from manifold.recipes import BenchmarkResult
 
-    assert (
-        BenchmarkResult(successes=0, episodes=0).format_shard(1, 1)
-        == "[bench shard 1/1] 0/0 succeeded (0.0%)"
-    )
+    assert BenchmarkResult().format_shard(1, 1) == "[bench shard 1/1] 0/0 succeeded (0.0%)"
 
 
 # --- launch_server ----------------------------------------------------------------
@@ -180,7 +196,7 @@ def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monke
         captured.update(**kw)
         for _ in range(kw["episodes"]):  # draining reset() proves the cursor seeding
             reset()
-        return BenchmarkResult(successes=2, episodes=kw["episodes"])
+        return BenchmarkResult(records=_records(kw["episodes"], successes=2))
 
     monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
 
@@ -206,6 +222,9 @@ def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monke
     assert seeded == [1, 3, 5, 7, 9]  # this shard's disjoint global ids, in order
     assert result.successes == 2
     assert events[-1] == "[bench shard 1/2] 2/5 succeeded (40.0%)"
+    # run_benchmark numbered these 0..4; the wrapper restamps the global ids, without
+    # which every shard reports episode 0 and two shards collide on one index.
+    assert [r.episode_idx for r in result.records] == [1, 3, 5, 7, 9]
 
 
 def test_run_sharded_benchmark_single_shard_walks_a_monotone_counter(monkeypatch):
@@ -218,7 +237,7 @@ def test_run_sharded_benchmark_single_shard_walks_a_monotone_counter(monkeypatch
     def fake_run_benchmark(benchmark, reset, step, **kw):
         for _ in range(kw["episodes"]):
             reset()
-        return BenchmarkResult(successes=0, episodes=kw["episodes"])
+        return BenchmarkResult(records=_records(kw["episodes"], successes=0))
 
     monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
 
@@ -261,3 +280,190 @@ def test_shard_episode_ids_rejects_bad_flags_as_a_catchable_valueerror():
         shard_episode_ids(10, 0, 0)  # num_shards < 1
     with pytest.raises(ValueError):
         shard_episode_ids(10, 2, 2)  # shard_index out of [0, num_shards)
+
+
+# --- run_benchmark's episode records ----------------------------------------------
+#
+# The run loop is what measures an episode, so these drive it over a fake transport
+# (no socket, no policy) and assert on the records it produces.
+
+
+class _ScriptedTransport:
+    """Answers the handshake with READY, then every observation with one action."""
+
+    def __init__(self) -> None:
+        self.sent: list[str] = []
+
+    def send(self, frame_type, payload) -> None:
+        self.sent.append(str(frame_type))
+
+    def recv(self):
+        from manifold.core.values import Action
+        from manifold.wire import FrameType, bridge
+
+        if self.sent[-1] == "hello":
+            return {"type": FrameType.READY, "payload": {}}
+        return {
+            "type": FrameType.ACTION,
+            "payload": bridge.encode_action(Action.from_array([0.0])),
+        }
+
+
+def _run_over_fake_transport(monkeypatch, *, step, episodes, max_steps, instruction=None):
+    """Drive `run_benchmark` against a scripted transport, returning its result."""
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.values import Observation
+    from manifold.embodiments import FRANKA_EE
+    from manifold.recipes import run_benchmark, serving
+
+    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
+    monkeypatch.setattr(
+        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _ScriptedTransport())
+    )
+    return run_benchmark(
+        Benchmark(name="bench-1", embodiment=FRANKA_EE, instruction=instruction is not None),
+        lambda: Observation(instruction=instruction),
+        step,
+        episodes=episodes,
+        max_steps=max_steps,
+        port=9000,
+        on_event=lambda _m: None,
+    )
+
+
+class _FakeSocket:
+    """A context-manager stand-in for the socket `run_benchmark` dials out on."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
+
+    def connect(self, _address) -> None:
+        return None
+
+
+def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    # Succeed on the third step of every episode.
+    taken = {"steps": 0}
+
+    def step(_action) -> StepResult:
+        taken["steps"] += 1
+        done = taken["steps"] % 3 == 0
+        return StepResult(observation=Observation(), success=done, done=done)
+
+    result = _run_over_fake_transport(monkeypatch, step=step, episodes=2, max_steps=10)
+
+    assert [r.episode_idx for r in result.records] == [0, 1]
+    assert [r.steps for r in result.records] == [3, 3]
+    assert [r.success for r in result.records] == [True, True]
+    assert (result.episodes, result.successes) == (2, 2)
+
+
+def test_run_benchmark_records_an_episode_that_exhausts_its_steps_as_a_failure(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=False, done=False)
+
+    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=4)
+
+    record = result.records[0]
+    assert (record.success, record.steps) == (False, 4)
+    assert result.success_rate == 0.0
+
+
+def test_an_episode_record_brackets_the_rollout_and_derives_its_duration(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=True, done=True)
+
+    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2)
+
+    record = result.records[0]
+    assert record.started_at <= record.ended_at
+    # The duration is a view over the two instants, so the three cannot disagree.
+    assert record.elapsed_sec == (record.ended_at - record.started_at).total_seconds()
+
+
+def test_an_episode_takes_its_task_name_from_the_instruction_it_was_reset_with(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=True, done=True)
+
+    result = _run_over_fake_transport(
+        monkeypatch, step=step, episodes=1, max_steps=2, instruction="pick up the mug"
+    )
+
+    assert result.records[0].task_name == "pick up the mug"
+
+
+def test_an_episode_falls_back_to_the_benchmark_name_when_no_instruction_is_published(
+    monkeypatch,
+):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=True, done=True)
+
+    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2)
+
+    assert result.records[0].task_name == "bench-1"
+
+
+# --- write_rollup ------------------------------------------------------------------
+
+
+def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
+
+    record = EpisodeRecord(
+        episode_idx=3,
+        task_name="pick up the mug",
+        success=True,
+        steps=12,
+        started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
+    )
+
+    path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="libero")
+
+    assert path == tmp_path / "results" / "libero.json"
+    assert json.loads(path.read_text()) == {
+        "records": [
+            {
+                "episode_idx": 3,
+                "task_name": "pick up the mug",
+                "success": True,
+                "steps": 12,
+                "started_at": "2026-01-01T12:00:00+00:00",
+                "ended_at": "2026-01-01T12:00:30+00:00",
+            }
+        ]
+    }
+
+
+def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, write_rollup
+
+    path = write_rollup(
+        BenchmarkResult(records=_records(2, successes=1)), tmp_path, benchmark_name="bench"
+    )
+
+    (first, second) = json.loads(path.read_text())["records"]
+    assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
+    assert datetime.fromisoformat(first["started_at"]).tzinfo is not None
