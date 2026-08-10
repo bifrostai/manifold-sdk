@@ -7,6 +7,11 @@ concerns — the same layer as `run_benchmark` — so they live here in
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
 
 def shard_episode_ids(episodes: int, num_shards: int, shard_index: int) -> list[int]:
     """Return the global episode ids this shard owns, validating the shard flags.
@@ -35,27 +40,20 @@ class EpisodeCursor:
 
     Every runner seeds its env with a global episode id so shards drive disjoint,
     reproducible subsets. The id sequencing is identical across runners, so it lives
-    here in the recipes layer: in sharding mode (``episode_ids`` supplied) it walks
-    the caller's ordered ids; otherwise it advances a monotone counter from zero.
-    What each runner does with the id (seed numpy, seed the env, pick a grid cell)
-    stays in the runner.
+    here in the recipes layer: it walks the caller's ordered ids, handing out one per
+    reset. What each runner does with the id (seed numpy, seed the env, pick a grid
+    cell) stays in the runner.
     """
 
-    def __init__(self, episode_ids: list[int] | None = None) -> None:
-        # The ordered global ids this runner owns (sharding mode), or None for the
-        # single-shard monotone counter.
-        self._episode_ids: list[int] | None = list(episode_ids) if episode_ids is not None else None
-        self._cursor = 0  # index into _episode_ids (sharding mode only)
-        self._counter = 0  # monotone id source (single-shard mode)
+    def __init__(self, episode_ids: Sequence[int]) -> None:
+        # The ordered global ids this runner owns, one handed out per reset.
+        self._episode_ids = list(episode_ids)
+        self._cursor = 0
 
     def next_id(self) -> int:
-        """The global episode id for this reset, advancing the cursor/counter."""
-        if self._episode_ids is not None:
-            global_id = self._episode_ids[self._cursor]
-            self._cursor += 1
-        else:
-            global_id = self._counter
-        self._counter += 1
+        """The global episode id for this reset, advancing the cursor."""
+        global_id = self._episode_ids[self._cursor]
+        self._cursor += 1
         return global_id
 
 
