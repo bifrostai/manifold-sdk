@@ -173,15 +173,76 @@ def test_launch_server_rejects_pairings_that_do_not_share_one_profile(monkeypatc
         launch_server([_pairing(profile_a), _pairing(profile_b)], port=9000)
 
 
-# --- run_sharded_benchmark --------------------------------------------------------
+# --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
-# The sharded-run wrapper owns the run-mechanics (server parse + sharding + cursor)
-# so a runner doesn't, then delegates to the unchanged run_benchmark. These stub
+# The dispatch wrappers own the run-mechanics (server parse + cursor + id stamping)
+# so a runner doesn't, then delegate to the unchanged run_benchmark. These stub
 # run_benchmark to capture what the wrapper forwards and to exhaust the seeding closure.
 
 
 def _step(_action) -> StepResult:
     return cast(StepResult, None)  # opaque: the wrapper forwards step untouched
+
+
+def test_run_episodes_drives_the_ids_it_is_given_in_order(monkeypatch):
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.values import Observation
+    from manifold.recipes import BenchmarkResult, run_episodes, serving
+
+    captured: dict = {}
+    seeded: list[int] = []
+
+    def fake_run_benchmark(benchmark, reset, step, **kw):
+        captured.update(**kw)
+        for _ in range(kw["episodes"]):  # draining reset() proves the cursor seeding
+            reset()
+        return BenchmarkResult(records=_records(kw["episodes"], successes=1))
+
+    monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
+
+    def reset_episode(episode_id: int) -> Observation:
+        seeded.append(episode_id)
+        return cast(Observation, object())
+
+    events: list[str] = []
+    result = run_episodes(
+        cast(Benchmark, object()),
+        reset_episode,
+        _step,
+        server="host.example:9000",
+        episode_ids=[7, 2, 5],  # arbitrary: not a stride, and not sorted
+        max_steps=50,
+        on_event=events.append,
+    )
+
+    assert (captured["host"], captured["port"]) == ("host.example", 9000)
+    assert captured["episodes"] == 3
+    assert seeded == [7, 2, 5]
+    assert [r.episode_idx for r in result.records] == [7, 2, 5]
+    # The shard tally belongs to the shard wrapper; a bare id list has no shard to
+    # name, so this emits only what run_benchmark itself does.
+    assert not any(event.startswith("[bench shard") for event in events)
+
+
+def test_run_episodes_rejects_ids_that_cannot_identify_an_episode():
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.values import Observation
+    from manifold.recipes import run_episodes
+
+    def dispatch(episode_ids: list[int]) -> None:
+        run_episodes(
+            cast(Benchmark, object()),
+            lambda _id: cast(Observation, object()),
+            _step,
+            server="h:1",
+            episode_ids=episode_ids,
+            max_steps=1,
+        )
+
+    with pytest.raises(ValueError):
+        dispatch([0, 1, 0])  # a repeat would report one episode_idx twice
+    with pytest.raises(ValueError):
+        dispatch([-1])
 
 
 def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monkeypatch):
@@ -227,7 +288,7 @@ def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monke
     assert [r.episode_idx for r in result.records] == [1, 3, 5, 7, 9]
 
 
-def test_run_sharded_benchmark_single_shard_walks_a_monotone_counter(monkeypatch):
+def test_run_sharded_benchmark_single_shard_runs_every_global_episode(monkeypatch):
     from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
     from manifold.recipes import BenchmarkResult, run_sharded_benchmark, serving
@@ -254,7 +315,7 @@ def test_run_sharded_benchmark_single_shard_walks_a_monotone_counter(monkeypatch
         max_steps=1,
     )
 
-    assert seeded == [0, 1, 2]  # unsharded -> monotone 0,1,2 over all total_episodes
+    assert seeded == [0, 1, 2]  # unsharded -> the whole global set, in order
 
 
 def test_run_sharded_benchmark_rejects_a_malformed_server():

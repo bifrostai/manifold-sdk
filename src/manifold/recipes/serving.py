@@ -740,6 +740,77 @@ def run_benchmark(
         return result
 
 
+def run_episodes(
+    benchmark: Benchmark,
+    reset_episode: Callable[[int], Observation],
+    step: Callable[[Action], StepResult],
+    *,
+    server: str,
+    episode_ids: Sequence[int],
+    max_steps: int,
+    image_format: ImageFormat = "raw",
+    on_event: Callable[[str], None] = _emit,
+) -> BenchmarkResult:
+    """Run the named global episodes of a benchmark against a remote policy.
+
+    The dispatch contract is a list of episodes: the caller passes the ids to run, and
+    this drives exactly those, in the given order. A stride shard is one such list,
+    and the set an interrupted attempt never reached is another. This owns the
+    run-mechanics around `run_benchmark`: it parses the server string, drives an
+    `EpisodeCursor` over the ids so each episode is seeded by the id it runs, and
+    stamps each record with that id.
+
+    `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
+    grid cell) — the only shape difference from `run_benchmark`'s nullary `reset`,
+    since the caller chooses WHICH episode each reset runs. `server` is the policy as
+    a ``host:port`` string.
+
+    The ids must be distinct: `episode_idx` identifies an episode within a run, so a
+    repeat would report one index twice. An empty list runs nothing, which is the
+    result when there is nothing outstanding.
+
+    Returns:
+        A record for each episode run, stamped with its global id, and the tally.
+
+    Raises:
+        ValueError: If `server` is not ``host:port``, or `episode_ids` holds a
+            negative or a repeated id.
+        PairingRejected: Propagated from `run_benchmark`.
+    """
+    host, port = _parse_server(server)
+    ids = list(episode_ids)
+    if any(episode_id < 0 for episode_id in ids):
+        raise ValueError("episode ids must be >= 0")
+    if len(set(ids)) != len(ids):
+        raise ValueError("episode ids must be distinct")
+    cursor = EpisodeCursor(ids)
+
+    def reset() -> Observation:
+        # `run_benchmark` drives a nullary reset(); the cursor turns each into the
+        # next global episode id, which seeds the episode it begins.
+        return reset_episode(cursor.next_id())
+
+    result = run_benchmark(
+        benchmark,
+        reset,
+        step,
+        episodes=len(ids),
+        max_steps=max_steps,
+        image_format=image_format,
+        host=host,
+        port=port,
+        on_event=on_event,
+    )
+    # `run_benchmark` numbers episodes from zero, but the cursor drove them in `ids`
+    # order, so the i-th record belongs to that id. Restamping the global id is what
+    # keeps two shards from reporting the same `episode_idx`.
+    return BenchmarkResult(
+        records=tuple(
+            replace(record, episode_idx=ids[idx]) for idx, record in enumerate(result.records)
+        )
+    )
+
+
 def run_sharded_benchmark(
     benchmark: Benchmark,
     reset_episode: Callable[[int], Observation],
@@ -755,17 +826,14 @@ def run_sharded_benchmark(
 ) -> BenchmarkResult:
     """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
 
-    The sharded-run convenience over `run_benchmark`: it parses the server string,
-    partitions the global episode set into this shard's ids (`shard_episode_ids`),
-    and drives an `EpisodeCursor` so each episode is seeded by its global id — then
-    delegates to the unchanged `run_benchmark` and emits the per-shard tally.
+    The stride-shard spelling of `run_episodes`: it partitions the global episode set
+    into this shard's ids (`shard_episode_ids`), dispatches them, and emits the
+    per-shard tally.
 
-    `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
-    grid cell) — the only shape difference from `run_benchmark`'s nullary `reset`,
-    since sharding must choose WHICH episode each reset runs. `total_episodes` is the
-    global count partitioned disjointly across shards; this shard runs `len(shard_ids)`.
-    `server` is the policy as a ``host:port`` string; `on_event` also receives the
-    final per-shard tally line.
+    `reset_episode` takes the GLOBAL episode id it begins, as `run_episodes` does.
+    `total_episodes` is the global count partitioned disjointly across shards; this
+    shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
+    `on_event` also receives the final per-shard tally line.
 
     Returns:
         A record for each episode this shard ran, and the tally over them.
@@ -774,33 +842,16 @@ def run_sharded_benchmark(
         ValueError: If `server` is not ``host:port``, or the shard flags are invalid.
         PairingRejected: Propagated from `run_benchmark`.
     """
-    host, port = _parse_server(server)
     shard_ids = shard_episode_ids(total_episodes, num_shards, shard_index)
-    cursor = EpisodeCursor(shard_ids if num_shards > 1 else None)
-
-    def reset() -> Observation:
-        # `run_benchmark` drives a nullary reset(); the cursor turns each into this
-        # shard's next global episode id, which seeds the episode it begins.
-        return reset_episode(cursor.next_id())
-
-    result = run_benchmark(
+    result = run_episodes(
         benchmark,
-        reset,
+        reset_episode,
         step,
-        episodes=len(shard_ids),
+        server=server,
+        episode_ids=shard_ids,
         max_steps=max_steps,
         image_format=image_format,
-        host=host,
-        port=port,
         on_event=on_event,
-    )
-    # `run_benchmark` numbers episodes from zero, but the cursor drove them in
-    # `shard_ids` order, so the i-th record belongs to that shard id. Restamping the
-    # global id is what keeps two shards from reporting the same `episode_idx`.
-    result = BenchmarkResult(
-        records=tuple(
-            replace(record, episode_idx=shard_ids[idx]) for idx, record in enumerate(result.records)
-        )
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
@@ -927,6 +978,7 @@ __all__ = [
     "evaluate",
     "launch_server",
     "run_benchmark",
+    "run_episodes",
     "run_sharded_benchmark",
     "serve",
     "write_rollup",
