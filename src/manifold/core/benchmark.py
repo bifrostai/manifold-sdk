@@ -1,9 +1,9 @@
 """A task suite a policy is run against.
 
-A Benchmark is an embodiment placed in a task, plus the sensors and per-step task
-signals it publishes. It defines what a policy receives each step (proprioception
-from the embodiment, the published sensors, and an instruction) and the canonical
-action space the policy must drive (the embodiment's `action`).
+A Benchmark is an embodiment placed in a task, plus the sensors it publishes. It
+defines what a policy receives each step (proprioception from the embodiment, the
+published sensors, and an instruction) and the canonical action space the policy
+must drive (the embodiment's `action`).
 """
 
 from __future__ import annotations
@@ -24,11 +24,10 @@ from manifold.lib.compat import assert_never
 
 
 class Benchmark(BaseModel):
-    """An embodiment in a task, with the sensors and signals it publishes.
+    """An embodiment in a task, with the sensors it publishes.
 
-    `instruction` and `success_signal` record whether the benchmark publishes a
-    language instruction and a per-step success flag. A policy that needs an
-    instruction is incompatible with a benchmark that publishes none.
+    `instruction` records whether the benchmark publishes a language instruction.
+    A policy that needs one is incompatible with a benchmark that publishes none.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -37,7 +36,6 @@ class Benchmark(BaseModel):
     embodiment: Embodiment
     sensors: list[Camera] = Field(default_factory=list)
     instruction: bool = True
-    success_signal: bool = True
 
     @property
     def observation_space(self) -> ObservationSpace:

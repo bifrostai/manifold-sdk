@@ -24,7 +24,8 @@ the arm's links and the gripper's fingers as well as the objects and fixtures,
 because nothing reading a log distinguishes them. See ADR 0004.
 _Avoid_: link, geom, entity
 
-**success signal** - the per-step flag saying the benchmark's task is satisfied,
-declared by `Benchmark.success_signal`. Distinct from an episode's recorded
-`success`, which is the rollup's verdict once the episode ends.
+**success signal** - the per-step flag saying the benchmark's task is satisfied.
+Replay data rather than a contract channel, since no policy consumes it, so a
+replay log declares it and `Benchmark` does not. Distinct from an episode's
+recorded `success`, which is the rollup's verdict once the episode ends.
 _Avoid_: reward, done, terminated
