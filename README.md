@@ -57,6 +57,10 @@ manifold/
 ├── sensors/      catalog: camera constructors keyed on name and mount
 ├── benchmarks/   catalog: one task suite per file, importing its embodiment
 ├── adapters/     one transform per file, grouped by the side it acts on
+├── wire/         the bridge protocol a benchmark and a policy exchange: the
+│                 msgpack codec and the framed stream over it
+├── replay/       the replay log a benchmark writes per episode, for a rendered
+│                 replay — off the bridge entirely
 └── recipes/      swappable pairing strategies: resolver, serving harness,
                   inspect — built on the core, not part of it
 ```
