@@ -34,10 +34,12 @@ ImageFormat = Literal["raw", "jpeg", "png"]
 # The little-endian dtypes accepted off the wire. This is the gate: a dtype
 # string from an untrusted frame decodes only if it is one of these.
 _WIRE_DTYPES: dict[str, np.dtype[Any]] = {
+    "<f2": np.dtype("<f2"),
     "<f4": np.dtype("<f4"),
     "<f8": np.dtype("<f8"),
     "<i4": np.dtype("<i4"),
     "<i8": np.dtype("<i8"),
+    "<u4": np.dtype("<u4"),
 }
 
 # The single implicit lane every frame on the current synchronous loop carries.
@@ -136,12 +138,17 @@ def unpack_frame(buf: bytes) -> dict[str, Any] | None:
 
 
 def pack_ndarray(
-    values: list[float] | tuple[float, ...],
+    values: np.ndarray | list[float] | tuple[float, ...],
     *,
     dtype: str = "<f4",
     shape: list[int] | None = None,
 ) -> dict[str, Any]:
-    """Encode a flat float sequence as a `__ndarray__` wrapper."""
+    """Encode a flat sequence or array as a `__ndarray__` wrapper.
+
+    An array is accepted alongside a list so a large payload never round-trips
+    through Python floats. It must already be flat: `shape` declares the layout
+    the reader restores.
+    """
     np_dtype = _WIRE_DTYPES.get(dtype)
     if np_dtype is None:
         raise ValueError(f"unsupported dtype {dtype!r}")
