@@ -17,6 +17,12 @@ so it is never part of the stream the two sides exchange, and no policy signatur
 declares it. See ADR 0003.
 _Avoid_: telemetry, info, sidecar, trace
 
+**scene body** - one named rigid body in a replay log, carrying a visual mesh and
+a pose per step. The unit a replay's rendered scene is assembled from, covering
+the arm's links and the gripper's fingers as well as the objects and fixtures,
+because nothing reading a log distinguishes them. See ADR 0004.
+_Avoid_: link, geom, entity
+
 **success signal** - the per-step flag saying the benchmark's task is satisfied,
 declared by `Benchmark.success_signal`. Distinct from an episode's recorded
 `success`, which is the rollup's verdict once the episode ends.
