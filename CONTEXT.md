@@ -14,7 +14,8 @@ _Avoid_: recording, rollout video, trace
 for the replay, holding scene geometry, per-step body poses and contacts.
 Written beside the rollup in the results directory, and read there by the runner,
 so it is never part of the stream the two sides exchange, and no policy signature
-declares it. See ADR 0003.
+declares it. Reuses the wire's framing: length-prefixed msgpack frames, appended
+as the episode runs. See ADR 0003 and ADR 0005.
 _Avoid_: telemetry, info, sidecar, trace
 
 **scene body** - one named rigid body in a replay log, carrying a visual mesh and
