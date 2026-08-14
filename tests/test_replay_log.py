@@ -83,6 +83,53 @@ def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
     np.testing.assert_allclose(last.poses["robot0_link0"].position, [0.02, 0.0, 0.1], atol=1e-6)
 
 
+def test_an_overview_group_round_trips(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(
+        path, episode_idx=0, channels=CHANNELS, image_format="raw", overview_group="Task"
+    ) as log:
+        log.write_scene(())
+
+    assert read_replay_log(path).overview_group == "Task"
+
+
+def test_a_log_without_an_overview_group_reads_back_without_one(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_scene(())
+
+    assert read_replay_log(path).overview_group is None
+
+
+def test_the_writer_rejects_an_overview_group_without_a_scalar_channel(tmp_path):
+    with pytest.raises(ValueError, match="does not identify a scalar group"):
+        ReplayLogWriter(
+            tmp_path / "episode.replay",
+            episode_idx=0,
+            channels=CHANNELS,
+            image_format="raw",
+            overview_group="Robot",
+        )
+
+
+def test_an_overview_group_may_use_the_default_channel_group(tmp_path):
+    """`Channel.group` defaults to the first segment of the channel name.
+
+    An overview group may use that default.
+    """
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(
+        path,
+        episode_idx=0,
+        channels=(Channel(name="joints/0", kind=ChannelKind.SCALAR),),
+        image_format="raw",
+        overview_group="joints",
+    ) as log:
+        log.write_scene(())
+
+    assert read_replay_log(path).overview_group == "joints"
+
+
 def test_a_boxs_geometry_survives_the_float16_vertices(tmp_path):
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=(), image_format="raw") as log:

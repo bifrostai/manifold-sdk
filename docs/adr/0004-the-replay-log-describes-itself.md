@@ -60,8 +60,7 @@ declares a channel as an image without saying which kind. uint8 is colour and
 floating-point is depth, and the writer refuses anything else rather than storing
 one kind as the other: a uint16 depth in millimetres would otherwise decode as
 float16 metres. A per-channel kind in the header would settle it outright, but it
-is a format change, so the writer's refusal is what closes the hazard for
-version 1.
+is a format change, so the writer's refusal is what closes the hazard instead.
 
 We accept a reader that cannot special-case a benchmark. A model
 held per benchmark family is additive in the wrong direction: the second

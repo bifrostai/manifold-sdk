@@ -22,9 +22,13 @@ change here leaves the wire alone.
 A log describes itself (ADR 0004). The header declares every channel the steps
 carry, with a kind the reader dispatches on and a group the runner renders as one
 tab, so nothing downstream holds a kinematic model, a joint-name list or a
-camera quirk for the benchmark that wrote it. Geometry is triangles only:
-`Mesh.box` and `Mesh.cylinder` tessellate the primitives a tabletop scene holds
-beside its meshes, which keeps a single geometry case in every reader.
+camera quirk for the benchmark that wrote it. The header also declares one of
+those groups the overview group, which the runner draws beside the scene rather
+than in a tab of its own: a benchmark declares which of its scalars are worth
+watching while the episode plays, and nothing reading the log could derive it.
+Geometry is triangles only: `Mesh.box` and `Mesh.cylinder` tessellate the
+primitives a tabletop scene holds beside its meshes, which keeps a single
+geometry case in every reader.
 
 Conventions the log fixes, so a reader assumes rather than asks: an orientation
 is a quaternion in `xyzw` order, a position is metres, and a depth image is
@@ -57,7 +61,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 # The log's own contract version, independent of the bridge protocol's.
-REPLAY_LOG_VERSION = 1
+REPLAY_LOG_VERSION = 2
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -238,13 +242,19 @@ class ReplayStep:
 
 @dataclass(frozen=True, eq=False)
 class ReplayLog:
-    """A log read back: its episode, its channels, its scene and its steps."""
+    """A log read back: its episode, its channels, its scene and its steps.
+
+    `overview_group` is the scalar group the header asked to have drawn beside the
+    scene. If it is `None`, the overview contains the scene, images and text. Each
+    scalar group remains in its own tab.
+    """
 
     version: int
     episode_idx: int
     channels: tuple[Channel, ...]
     bodies: tuple[SceneBody, ...]
     steps: tuple[ReplayStep, ...]
+    overview_group: str | None
 
 
 class ReplayLogWriter:
@@ -268,6 +278,7 @@ class ReplayLogWriter:
         episode_idx: int,
         channels: Iterable[Channel],
         image_format: ImageFormat = "jpeg",
+        overview_group: str | None = None,
     ) -> None:
         """Open `path` for writing and emit the header.
 
@@ -275,10 +286,18 @@ class ReplayLogWriter:
         a reader identifies the episode from the log alone, without a filename
         convention. `image_format` applies to uint8 channel images; "jpeg" and
         "png" need the `images` extra, and depth is float16 regardless.
+
+        `overview_group` is the scalar group drawn beside the scene rather than
+        in a tab of its own. It must match the group of at least one scalar channel.
+        Otherwise the overview would omit the requested plots.
+
+        Raises:
+            ValueError: If `overview_group` does not identify a scalar group.
         """
         self._channels = tuple(channels)
         self._kinds = {channel.name: channel.kind for channel in self._channels}
         self._image_format = image_format
+        _check_overview_group(overview_group, self._channels)
         self._steps = 0
         self._seq = 0
         self._file = path.open("wb")
@@ -287,6 +306,7 @@ class ReplayLogWriter:
             {
                 "version": REPLAY_LOG_VERSION,
                 "episode_idx": episode_idx,
+                "overview_group": overview_group,
                 "channels": [
                     {"name": c.name, "kind": str(c.kind), "group": c.group} for c in self._channels
                 ],
@@ -419,7 +439,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         header = next(frames, None)
         if header is None or header.get("type") != ReplayFrameType.HEADER:
             raise ValueError("a replay log opens with a header frame")
-        version, episode_idx, channels = _read_header(header.get("payload", {}))
+        version, episode_idx, overview_group, channels = _read_header(header.get("payload", {}))
         bodies: tuple[SceneBody, ...] = ()
         steps: list[ReplayStep] = []
         for frame in frames:
@@ -435,6 +455,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         channels=channels,
         bodies=bodies,
         steps=tuple(steps),
+        overview_group=overview_group,
     )
 
 
@@ -532,6 +553,30 @@ def _depth_metres(array: np.ndarray, name: str) -> np.ndarray:
     return array
 
 
+def _check_overview_group(group: str | None, channels: tuple[Channel, ...]) -> None:
+    """Check that the overview group identifies a scalar group.
+
+    A typo or a removed group would omit requested plots from the overview. Check
+    the name when the writer receives it, before rendering.
+
+    Raises:
+        ValueError: If `group` does not identify a scalar group.
+    """
+    if group is None:
+        return
+    groups = {_group_of(c) for c in channels if c.kind is ChannelKind.SCALAR}
+    if group not in groups:
+        known = ", ".join(sorted(groups)) if len(groups) > 0 else "none"
+        raise ValueError(
+            f"overview group {group!r} does not identify a scalar group: the groups are {known}"
+        )
+
+
+def _group_of(channel: Channel) -> str:
+    """The group a scalar channel is plotted in, declared or fallen back to."""
+    return channel.group or channel.name.split("/")[0]
+
+
 def _pack_array(array: np.ndarray, dtype: str) -> dict[str, Any]:
     contiguous = np.ascontiguousarray(array)
     return pack_ndarray(
@@ -571,13 +616,15 @@ def _iter_frames(handle: Any) -> Iterator[dict[str, Any]]:
         yield frame
 
 
-def _read_header(payload: dict[str, Any]) -> tuple[int, int, tuple[Channel, ...]]:
+def _read_header(payload: dict[str, Any]) -> tuple[int, int, str | None, tuple[Channel, ...]]:
     version = payload.get("version")
     if version != REPLAY_LOG_VERSION:
         raise ValueError(f"unsupported replay log version {version!r}")
     episode_idx = payload.get("episode_idx")
     if not isinstance(episode_idx, int):
         raise ValueError("header 'episode_idx' must be an int")  # noqa: TRY004
+    overview = payload.get("overview_group")
+    overview_group = overview if isinstance(overview, str) else None
     raw_channels = payload.get("channels")
     if not isinstance(raw_channels, list):
         raise ValueError("header 'channels' must be a list")  # noqa: TRY004
@@ -597,7 +644,7 @@ def _read_header(payload: dict[str, Any]) -> tuple[int, int, tuple[Channel, ...]
                 group=group if isinstance(group, str) else None,
             )
         )
-    return version, episode_idx, tuple(channels)
+    return version, episode_idx, overview_group, tuple(channels)
 
 
 def _read_scene(payload: dict[str, Any]) -> tuple[SceneBody, ...]:
