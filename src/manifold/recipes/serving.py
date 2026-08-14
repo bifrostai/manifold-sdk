@@ -105,8 +105,11 @@ def _run_episode_in_process(
     task_name = observation.instruction or benchmark_name
     steps = 0
     success = False
+    initialization_sec = 0.0
     for _ in range(max_steps):
         action = _infer_step(session, observation, pipeline, observation_source, signature, state)
+        if steps == 0:
+            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
         result = step(action)
         steps += 1
         observation = result.observation
@@ -118,6 +121,7 @@ def _run_episode_in_process(
         task_name=task_name,
         success=success,
         steps=steps,
+        initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
     )
@@ -298,6 +302,7 @@ def _run_episode(
     task_name = observation.instruction or benchmark_name
     steps = 0
     success = False
+    initialization_sec = 0.0
     for _ in range(max_steps):
         channel.send(
             FrameType.OBSERVATION,
@@ -307,6 +312,8 @@ def _run_episode(
         if reply is None or reply.get("type") != FrameType.ACTION:
             raise PairingRejected("expected an action frame from the policy")
         action = bridge.decode_action(reply["payload"])
+        if steps == 0:
+            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
         result = step(action)
         steps += 1
         observation = result.observation
@@ -318,6 +325,7 @@ def _run_episode(
         task_name=task_name,
         success=success,
         steps=steps,
+        initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
     )
@@ -536,6 +544,7 @@ class EpisodeRecord:
     task_name: str
     success: bool
     steps: int
+    initialization_sec: float
     started_at: datetime
     ended_at: datetime
 
@@ -598,6 +607,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
             "task_name": record.task_name,
             "success": record.success,
             "steps": record.steps,
+            "initialization_sec": record.initialization_sec,
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
         }
