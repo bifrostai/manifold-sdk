@@ -81,6 +81,7 @@ def _records(episodes: int, *, successes: int):
             task_name="task",
             success=idx < successes,
             steps=1,
+            initialization_sec=0.0,
             started_at=moment,
             ended_at=moment,
         )
@@ -452,6 +453,7 @@ def test_an_episode_record_brackets_the_rollout_and_derives_its_duration(monkeyp
     assert record.started_at <= record.ended_at
     # The duration is a view over the two instants, so the three cannot disagree.
     assert record.elapsed_sec == (record.ended_at - record.started_at).total_seconds()
+    assert 0.0 <= record.initialization_sec <= record.elapsed_sec
 
 
 def test_an_episode_takes_its_task_name_from_the_instruction_it_was_reset_with(monkeypatch):
@@ -495,6 +497,7 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
         task_name="pick up the mug",
         success=True,
         steps=12,
+        initialization_sec=3.0,
         started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
         ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
     )
@@ -509,6 +512,7 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
                 "task_name": "pick up the mug",
                 "success": True,
                 "steps": 12,
+                "initialization_sec": 3.0,
                 "started_at": "2026-01-01T12:00:00+00:00",
                 "ended_at": "2026-01-01T12:00:30+00:00",
             }
