@@ -497,6 +497,126 @@ def test_an_episode_falls_back_to_the_benchmark_name_when_no_instruction_is_publ
     assert result.records[0].task_name == "bench-1"
 
 
+# --- the episode recorder ----------------------------------------------------------
+#
+# The loop owns the episode lifecycle, so these assert on what it tells a recorder:
+# which id began, which step was the last, and that an episode is ended once whatever
+# happened inside it.
+
+
+class _FakeRecorder:
+    """Notes every lifecycle call the loop makes, in order."""
+
+    def __init__(self) -> None:
+        self.begun: list[int] = []
+        self.steps: list[tuple[bool, bool]] = []
+        self.ended = 0
+
+    def begin(self, episode_id: int) -> None:
+        self.begun.append(episode_id)
+
+    def record(self, action, *, success: bool, done: bool) -> None:
+        self.steps.append((success, done))
+
+    def end(self) -> None:
+        self.ended += 1
+
+
+def test_a_recorder_is_begun_with_the_global_episode_id_of_each_episode(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import run_sharded_benchmark
+
+    _install_fake_transport(monkeypatch)
+    recorder = _FakeRecorder()
+
+    run_sharded_benchmark(
+        _fake_benchmark(),
+        lambda _id: Observation(),
+        _one_step_episodes(succeeding=0),
+        server="h:1",
+        total_episodes=10,
+        num_shards=2,
+        shard_index=1,
+        max_steps=4,
+        recorder=recorder,
+    )
+
+    # A shard writing a file per episode collides with its sibling unless it is told
+    # the global id rather than its own position.
+    assert recorder.begun == [1, 3, 5, 7, 9]
+    assert recorder.ended == 5
+
+
+def test_a_recorder_is_told_the_last_step_when_the_step_budget_runs_out(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=False, done=False)
+
+    recorder = _FakeRecorder()
+    _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=3, recorder=recorder)
+
+    # The driver never reports done, so the budget is what ends this episode - and the
+    # recorder is told, which it could not work out for itself.
+    assert recorder.steps == [(False, False), (False, False), (False, True)]
+    assert recorder.ended == 1
+
+
+def test_a_recorder_is_told_the_last_step_when_the_driver_reports_done(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    taken = {"steps": 0}
+
+    def step(_action) -> StepResult:
+        taken["steps"] += 1
+        finished = taken["steps"] == 2
+        return StepResult(observation=Observation(), success=finished, done=finished)
+
+    recorder = _FakeRecorder()
+    _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=9, recorder=recorder)
+
+    assert recorder.steps == [(False, False), (True, True)]
+
+
+def test_a_recorder_is_ended_when_a_step_raises(monkeypatch):
+    def step(_action) -> StepResult:
+        raise RuntimeError("the sim fell over")
+
+    recorder = _FakeRecorder()
+    with pytest.raises(RuntimeError):
+        _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2, recorder=recorder)
+
+    # Whatever the recorder opened is closed, which is why the benchmark no longer
+    # needs a `finally` of its own.
+    assert (recorder.begun, recorder.ended) == ([0], 1)
+
+
+def test_a_recorder_is_ended_when_its_own_begin_raises(monkeypatch):
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    class _FailingRecorder(_FakeRecorder):
+        def begin(self, episode_id: int) -> None:
+            super().begin(episode_id)
+            raise RuntimeError("the log would not open")
+
+    recorder = _FailingRecorder()
+    with pytest.raises(RuntimeError):
+        _run_over_fake_transport(
+            monkeypatch,
+            step=lambda _a: StepResult(observation=Observation(), success=True, done=True),
+            episodes=1,
+            max_steps=2,
+            recorder=recorder,
+        )
+
+    # `begin` is where a recorder opens things, so a `begin` that raises part-way is
+    # the path with most to release - it has to be inside the `finally`, not before it.
+    assert recorder.ended == 1
+
+
 # --- write_rollup ------------------------------------------------------------------
 
 

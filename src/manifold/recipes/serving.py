@@ -39,6 +39,7 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
+from manifold.recipes.recording import NO_RECORDER
 from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
 
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from manifold.core.policy import PolicySignature
     from manifold.core.values import Action, Observation
     from manifold.recipes.pairing import Pairing
+    from manifold.recipes.recording import EpisodeRecorder
     from manifold.wire import ImageFormat
 
 
@@ -90,13 +92,14 @@ def _run_episode_in_process(
     *,
     episode_idx: int,
     benchmark_name: str,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> EpisodeRecord:
     """Drive one in-process episode, returning the record of what it did.
 
     The in-process twin of `_run_episode`: it resets the session and the lane's
     `PipelineState`, then loops `reset/step` against the shared `_infer_step` fold
     — the same observation->infer->action kernel `_serve_session` runs per frame,
-    just without the wire in between.
+    just without the wire in between. `recorder` is driven exactly as it is there.
     """
     state.reset_lane(DEFAULT_LANE)
     session.reset()
@@ -106,16 +109,24 @@ def _run_episode_in_process(
     steps = 0
     success = False
     initialization_sec = 0.0
-    for _ in range(max_steps):
-        action = _infer_step(session, observation, pipeline, observation_source, signature, state)
-        if steps == 0:
-            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-        result = step(action)
-        steps += 1
-        observation = result.observation
-        if result.success or result.done:
-            success = result.success
-            break
+    try:
+        recorder.begin(episode_idx)
+        for _ in range(max_steps):
+            action = _infer_step(
+                session, observation, pipeline, observation_source, signature, state
+            )
+            if steps == 0:
+                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+            result = step(action)
+            steps += 1
+            observation = result.observation
+            ended = result.success or result.done or steps == max_steps
+            recorder.record(action, success=result.success, done=ended)
+            if result.success or result.done:
+                success = result.success
+                break
+    finally:
+        recorder.end()
     return EpisodeRecord(
         episode_idx=episode_idx,
         task_name=task_name,
@@ -290,11 +301,16 @@ def _run_episode(
     *,
     episode_idx: int,
     benchmark_name: str,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> EpisodeRecord:
     """Drive one episode over the channel, returning the record of what it did.
 
     The clock brackets the whole rollout, reset included, since an episode begins
     when the environment is reset.
+
+    `recorder` is driven around the same loop: begun once the reset is through, told
+    of each step, and ended however the episode leaves - the budget running out, the
+    driver reporting done, or `step` raising.
     """
     channel.send(FrameType.RESET, {})
     started_at = datetime.now(timezone.utc)
@@ -303,23 +319,31 @@ def _run_episode(
     steps = 0
     success = False
     initialization_sec = 0.0
-    for _ in range(max_steps):
-        channel.send(
-            FrameType.OBSERVATION,
-            bridge.encode_observation(observation, image_format=image_format),
-        )
-        reply = channel.recv()
-        if reply is None or reply.get("type") != FrameType.ACTION:
-            raise PairingRejected("expected an action frame from the policy")
-        action = bridge.decode_action(reply["payload"])
-        if steps == 0:
-            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-        result = step(action)
-        steps += 1
-        observation = result.observation
-        if result.success or result.done:
-            success = result.success
-            break
+    try:
+        recorder.begin(episode_idx)
+        for _ in range(max_steps):
+            channel.send(
+                FrameType.OBSERVATION,
+                bridge.encode_observation(observation, image_format=image_format),
+            )
+            reply = channel.recv()
+            if reply is None or reply.get("type") != FrameType.ACTION:
+                raise PairingRejected("expected an action frame from the policy")
+            action = bridge.decode_action(reply["payload"])
+            if steps == 0:
+                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+            result = step(action)
+            steps += 1
+            observation = result.observation
+            # The budget is the third way an episode ends, and the only one a
+            # recorder cannot see for itself.
+            ended = result.success or result.done or steps == max_steps
+            recorder.record(action, success=result.success, done=ended)
+            if result.success or result.done:
+                success = result.success
+                break
+    finally:
+        recorder.end()
     return EpisodeRecord(
         episode_idx=episode_idx,
         task_name=task_name,
@@ -696,6 +720,7 @@ def run_benchmark(
     host: str = "127.0.0.1",
     port: int,
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run a benchmark against a remote policy over the bridge, in native form.
 
@@ -705,7 +730,8 @@ def run_benchmark(
     policy side owns all conversion (ADR-0001). This is one runner shard; several
     against the same served `PolicyEndpoint` run concurrently, each on its own session.
     `image_format` is the sensor encoding for frames ("raw", "jpeg", "png"); "raw"
-    does not need an extra dependency.
+    does not need an extra dependency. `recorder` is driven per episode; see
+    `recipes.recording`.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -724,6 +750,7 @@ def run_benchmark(
         host=host,
         port=port,
         on_event=on_event,
+        recorder=recorder,
     )
 
 
@@ -738,6 +765,7 @@ def _run_connected(
     host: str,
     port: int,
     on_event: Callable[[str], None],
+    recorder: EpisodeRecorder,
 ) -> BenchmarkResult:
     """Hold one connection open and drive the named episodes down it, in order.
 
@@ -774,6 +802,7 @@ def _run_connected(
                 image_format,
                 episode_idx=episode_id,
                 benchmark_name=benchmark.name,
+                recorder=recorder,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"
@@ -794,6 +823,7 @@ def run_episodes(
     max_steps: int,
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run the named global episodes of a benchmark against a remote policy.
 
@@ -837,6 +867,7 @@ def run_episodes(
         host=host,
         port=port,
         on_event=on_event,
+        recorder=recorder,
     )
 
 
@@ -852,6 +883,7 @@ def run_sharded_benchmark(
     max_steps: int,
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
 
@@ -862,7 +894,8 @@ def run_sharded_benchmark(
     `reset_episode` takes the GLOBAL episode id it begins, as `run_episodes` does.
     `total_episodes` is the global count partitioned disjointly across shards; this
     shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
-    `on_event` also receives the final per-shard tally line.
+    `on_event` also receives the final per-shard tally line. `recorder` is driven per
+    episode, and is given the global id each one begins.
 
     Returns:
         A record for each episode this shard ran, and the tally over them.
@@ -881,6 +914,7 @@ def run_sharded_benchmark(
         max_steps=max_steps,
         image_format=image_format,
         on_event=on_event,
+        recorder=recorder,
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
@@ -896,6 +930,7 @@ def evaluate(
     episodes: int,
     max_steps: int,
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run a benchmark against a policy *in process*: no server, no bridge, no threads.
 
@@ -910,6 +945,7 @@ def evaluate(
     per-session scratch deterministically. `reset`/`step` are the same callables
     `run_benchmark` takes, so a caller swaps recipes without rewriting its environment.
     `pipeline` bridges exactly as `serve` resolves it (None / callable / `Pipeline`).
+    `recorder` is driven per episode, as it is on the served path.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -943,6 +979,7 @@ def evaluate(
                 max_steps,
                 episode_idx=episode,
                 benchmark_name=benchmark.name,
+                recorder=recorder,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"

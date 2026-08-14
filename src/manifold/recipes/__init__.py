@@ -6,6 +6,7 @@ from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipel
 from manifold.recipes.inspect import Recorder, describe, dump, load
 from manifold.recipes.lerobot import SignatureSuggestion, from_lerobot_checkpoint
 from manifold.recipes.pairing import Pairing, read_pairing
+from manifold.recipes.recording import NO_RECORDER, EpisodeRecorder
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
     BenchmarkResult,
@@ -26,10 +27,12 @@ from manifold.recipes.serving import (
 from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
 
 __all__ = [
+    "NO_RECORDER",
     "BenchmarkResult",
     "ChunkEndpoint",
     "EpisodeCursor",
     "EpisodeRecord",
+    "EpisodeRecorder",
     "OpenLoopChunkQueue",
     "Pairing",
     "PairingRejected",
