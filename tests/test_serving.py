@@ -176,52 +176,42 @@ def test_launch_server_rejects_pairings_that_do_not_share_one_profile(monkeypatc
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
-# The dispatch wrappers own the run-mechanics (server parse + cursor + id stamping)
-# so a runner doesn't, then delegate to the unchanged run_benchmark. These stub
-# run_benchmark to capture what the wrapper forwards and to exhaust the seeding closure.
+# The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so
+# a runner doesn't. These drive the real loop over the scripted transport further
+# down, since the ids reach the records through it.
 
 
 def _step(_action) -> StepResult:
-    return cast(StepResult, None)  # opaque: the wrapper forwards step untouched
+    return cast(StepResult, None)  # opaque: the id validation refuses before any step
 
 
 def test_run_episodes_drives_the_ids_it_is_given_in_order(monkeypatch):
-    from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
-    from manifold.recipes import BenchmarkResult, run_episodes, serving
+    from manifold.recipes import run_episodes
 
-    captured: dict = {}
+    sock = _install_fake_transport(monkeypatch)
     seeded: list[int] = []
-
-    def fake_run_benchmark(benchmark, reset, step, **kw):
-        captured.update(**kw)
-        for _ in range(kw["episodes"]):  # draining reset() proves the cursor seeding
-            reset()
-        return BenchmarkResult(records=_records(kw["episodes"], successes=1))
-
-    monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
 
     def reset_episode(episode_id: int) -> Observation:
         seeded.append(episode_id)
-        return cast(Observation, object())
+        return Observation()
 
     events: list[str] = []
     result = run_episodes(
-        cast(Benchmark, object()),
+        _fake_benchmark(),
         reset_episode,
-        _step,
+        _one_step_episodes(succeeding=1),
         server="host.example:9000",
         episode_ids=[7, 2, 5],  # arbitrary: not a stride, and not sorted
         max_steps=50,
         on_event=events.append,
     )
 
-    assert (captured["host"], captured["port"]) == ("host.example", 9000)
-    assert captured["episodes"] == 3
+    assert sock.address == ("host.example", 9000)
     assert seeded == [7, 2, 5]
     assert [r.episode_idx for r in result.records] == [7, 2, 5]
     # The shard tally belongs to the shard wrapper; a bare id list has no shard to
-    # name, so this emits only what run_benchmark itself does.
+    # name, so this emits only what one connection's run does.
     assert not any(event.startswith("[bench shard") for event in events)
 
 
@@ -247,30 +237,21 @@ def test_run_episodes_rejects_ids_that_cannot_identify_an_episode():
 
 
 def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monkeypatch):
-    from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
-    from manifold.recipes import BenchmarkResult, run_sharded_benchmark, serving
+    from manifold.recipes import run_sharded_benchmark
 
-    captured: dict = {}
+    sock = _install_fake_transport(monkeypatch)
     seeded: list[int] = []
-
-    def fake_run_benchmark(benchmark, reset, step, **kw):
-        captured.update(**kw)
-        for _ in range(kw["episodes"]):  # draining reset() proves the cursor seeding
-            reset()
-        return BenchmarkResult(records=_records(kw["episodes"], successes=2))
-
-    monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
 
     def reset_episode(episode_id: int) -> Observation:
         seeded.append(episode_id)
-        return cast(Observation, object())
+        return Observation()
 
     events: list[str] = []
     result = run_sharded_benchmark(
-        cast(Benchmark, object()),
+        _fake_benchmark(),
         reset_episode,
-        _step,
+        _one_step_episodes(succeeding=2),
         server="host.example:9000",
         total_episodes=10,
         num_shards=2,
@@ -279,38 +260,30 @@ def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monke
         on_event=events.append,
     )
 
-    assert (captured["host"], captured["port"]) == ("host.example", 9000)
-    assert captured["episodes"] == 5  # shard 1 of 2 over 10 global episodes
+    assert sock.address == ("host.example", 9000)
     assert seeded == [1, 3, 5, 7, 9]  # this shard's disjoint global ids, in order
     assert result.successes == 2
     assert events[-1] == "[bench shard 1/2] 2/5 succeeded (40.0%)"
-    # run_benchmark numbered these 0..4; the wrapper restamps the global ids, without
-    # which every shard reports episode 0 and two shards collide on one index.
+    # Each record carries the id its episode ran, not this shard's position in its own
+    # list: numbering by position would have every shard report episode 0.
     assert [r.episode_idx for r in result.records] == [1, 3, 5, 7, 9]
 
 
 def test_run_sharded_benchmark_single_shard_runs_every_global_episode(monkeypatch):
-    from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
-    from manifold.recipes import BenchmarkResult, run_sharded_benchmark, serving
+    from manifold.recipes import run_sharded_benchmark
 
+    _install_fake_transport(monkeypatch)
     seeded: list[int] = []
-
-    def fake_run_benchmark(benchmark, reset, step, **kw):
-        for _ in range(kw["episodes"]):
-            reset()
-        return BenchmarkResult(records=_records(kw["episodes"], successes=0))
-
-    monkeypatch.setattr(serving, "run_benchmark", fake_run_benchmark)
 
     def reset_episode(episode_id: int) -> Observation:
         seeded.append(episode_id)
-        return cast(Observation, object())
+        return Observation()
 
     run_sharded_benchmark(
-        cast(Benchmark, object()),
+        _fake_benchmark(),
         reset_episode,
-        _step,
+        _one_step_episodes(succeeding=0),
         server="h:1",
         total_episodes=3,
         max_steps=1,
@@ -371,30 +344,70 @@ class _ScriptedTransport:
         }
 
 
-def _run_over_fake_transport(monkeypatch, *, step, episodes, max_steps, instruction=None):
+def _run_over_fake_transport(monkeypatch, *, step, episodes, max_steps, instruction=None, **kw):
     """Drive `run_benchmark` against a scripted transport, returning its result."""
-    from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE
-    from manifold.recipes import run_benchmark, serving
+    from manifold.recipes import run_benchmark
 
-    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
-    monkeypatch.setattr(
-        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _ScriptedTransport())
-    )
+    _install_fake_transport(monkeypatch)
     return run_benchmark(
-        Benchmark(name="bench-1", embodiment=FRANKA_EE, instruction=instruction is not None),
+        _fake_benchmark(instruction=instruction),
         lambda: Observation(instruction=instruction),
         step,
         episodes=episodes,
         max_steps=max_steps,
         port=9000,
         on_event=lambda _m: None,
+        **kw,
     )
 
 
+def _install_fake_transport(monkeypatch) -> _FakeSocket:
+    """Answer the dial-out with a scripted transport; return the socket it dialled on.
+
+    Every run path in this module ends at one connection, so patching here drives the
+    real episode loop - the numbering, the tally and the recorder included - with no
+    socket and no policy behind it.
+    """
+    from manifold.recipes import serving
+
+    sock = _FakeSocket()
+    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: sock)
+    monkeypatch.setattr(
+        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _ScriptedTransport())
+    )
+    return sock
+
+
+def _fake_benchmark(*, instruction: str | None = None):
+    """The benchmark advertised in HELLO; only its name and instruction flag are read."""
+    from manifold.core.benchmark import Benchmark
+    from manifold.embodiments import FRANKA_EE
+
+    return Benchmark(name="bench-1", embodiment=FRANKA_EE, instruction=instruction is not None)
+
+
+def _one_step_episodes(*, succeeding: int):
+    """A step ending every episode on its first, of which the first `succeeding` succeed."""
+    from manifold.core.values import Observation
+    from manifold.recipes import StepResult
+
+    taken = {"steps": 0}
+
+    def step(_action) -> StepResult:
+        taken["steps"] += 1
+        return StepResult(
+            observation=Observation(), success=taken["steps"] <= succeeding, done=True
+        )
+
+    return step
+
+
 class _FakeSocket:
-    """A context-manager stand-in for the socket `run_benchmark` dials out on."""
+    """A context-manager stand-in for the socket a run dials out on."""
+
+    def __init__(self) -> None:
+        self.address: tuple[str, int] | None = None
 
     def __enter__(self):
         return self
@@ -402,8 +415,8 @@ class _FakeSocket:
     def __exit__(self, *_exc) -> None:
         return None
 
-    def connect(self, _address) -> None:
-        return None
+    def connect(self, address) -> None:
+        self.address = address
 
 
 def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch):

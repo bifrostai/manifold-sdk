@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -39,7 +39,7 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
-from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
+from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
 
 if TYPE_CHECKING:
@@ -714,7 +714,41 @@ def run_benchmark(
         PairingRejected: If the policy closes without READY, or a frame arrives out
             of the expected order.
     """
+    return _run_connected(
+        benchmark,
+        lambda _episode_id: reset(),
+        step,
+        episode_ids=range(episodes),
+        max_steps=max_steps,
+        image_format=image_format,
+        host=host,
+        port=port,
+        on_event=on_event,
+    )
+
+
+def _run_connected(
+    benchmark: Benchmark,
+    reset_episode: Callable[[int], Observation],
+    step: Callable[[Action], StepResult],
+    *,
+    episode_ids: Sequence[int],
+    max_steps: int,
+    image_format: ImageFormat,
+    host: str,
+    port: int,
+    on_event: Callable[[str], None],
+) -> BenchmarkResult:
+    """Hold one connection open and drive the named episodes down it, in order.
+
+    The shared body of `run_benchmark` and `run_episodes`: they differ only in where
+    the ids come from, and each episode is stamped with the id it ran rather than
+    with its position here, so two shards of one run never report the same
+    `episode_idx`. The progress line counts position, since what an operator watching
+    one shard wants is how far through its own list it is.
+    """
     emit = on_event
+    ids = list(episode_ids)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((host, port))
         channel = FrameChannel.from_socket(sock)
@@ -731,22 +765,22 @@ def run_benchmark(
         emit("policy confirmed the pairing (ready)")
 
         records: list[EpisodeRecord] = []
-        for episode in range(episodes):
+        for position, episode_id in enumerate(ids):
             record = _run_episode(
                 channel,
-                reset,
+                lambda episode_id=episode_id: reset_episode(episode_id),
                 step,
                 max_steps,
                 image_format,
-                episode_idx=episode,
+                episode_idx=episode_id,
                 benchmark_name=benchmark.name,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"
-            emit(f"episode {episode + 1}/{episodes}: {outcome}")
+            emit(f"episode {position + 1}/{len(ids)}: {outcome}")
         channel.send(FrameType.BYE, {})
         result = BenchmarkResult(records=tuple(records))
-        emit(f"done — {result.successes}/{episodes} succeeded")
+        emit(f"done — {result.successes}/{len(ids)} succeeded")
         return result
 
 
@@ -766,14 +800,14 @@ def run_episodes(
     The dispatch contract is a list of episodes: the caller passes the ids to run, and
     this drives exactly those, in the given order. A stride shard is one such list,
     and the set an interrupted attempt never reached is another. This owns the
-    run-mechanics around `run_benchmark`: it parses the server string, drives an
-    `EpisodeCursor` over the ids so each episode is seeded by the id it runs, and
-    stamps each record with that id.
+    run-mechanics around one connection: it parses the server string and hands the
+    ids down, so each episode is seeded by the id it runs and each record is stamped
+    with it.
 
     `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
-    grid cell) — the only shape difference from `run_benchmark`'s nullary `reset`,
-    since the caller chooses WHICH episode each reset runs. `server` is the policy as
-    a ``host:port`` string.
+    grid cell) — the only shape difference from `run_benchmark`'s no-argument
+    `reset`, since the caller chooses WHICH episode each reset runs. `server` is the
+    policy as a ``host:port`` string.
 
     The ids must be distinct: `episode_idx` identifies an episode within a run, so a
     repeat would report one index twice. An empty list runs nothing, which is the
@@ -793,31 +827,16 @@ def run_episodes(
         raise ValueError("episode ids must be >= 0")
     if len(set(ids)) != len(ids):
         raise ValueError("episode ids must be distinct")
-    cursor = EpisodeCursor(ids)
-
-    def reset() -> Observation:
-        # `run_benchmark` drives a nullary reset(); the cursor turns each into the
-        # next global episode id, which seeds the episode it begins.
-        return reset_episode(cursor.next_id())
-
-    result = run_benchmark(
+    return _run_connected(
         benchmark,
-        reset,
+        reset_episode,
         step,
-        episodes=len(ids),
+        episode_ids=ids,
         max_steps=max_steps,
         image_format=image_format,
         host=host,
         port=port,
         on_event=on_event,
-    )
-    # `run_benchmark` numbers episodes from zero, but the cursor drove them in `ids`
-    # order, so the i-th record belongs to that id. Restamping the global id is what
-    # keeps two shards from reporting the same `episode_idx`.
-    return BenchmarkResult(
-        records=tuple(
-            replace(record, episode_idx=ids[idx]) for idx, record in enumerate(result.records)
-        )
     )
 
 
