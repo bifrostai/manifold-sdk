@@ -26,6 +26,8 @@ camera quirk for the benchmark that wrote it. The header also declares one of
 those groups the overview group, which the runner draws beside the scene rather
 than in a tab of its own: a benchmark declares which of its scalars are worth
 watching while the episode plays, and nothing reading the log could derive it.
+A scalar channel may also declare the row it is plotted in, which is how a group
+puts its three position axes side by side and its gripper on a line of its own.
 Geometry is triangles only: `Mesh.box` and `Mesh.cylinder` tessellate the
 primitives a tabletop scene holds beside its meshes, which keeps a single
 geometry case in every reader.
@@ -61,7 +63,7 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 # The log's own contract version, independent of the bridge protocol's.
-REPLAY_LOG_VERSION = 2
+REPLAY_LOG_VERSION = 3
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -109,11 +111,20 @@ class Channel:
 
     `group` is the tab a scalar is rendered in; a channel that declares none
     is grouped by the first segment of its name.
+
+    `row` is which line of its group's grid the plot sits on, counted from the
+    top. Channels sharing a row are drawn side by side, so a group numbers its
+    rows to put a triple of axes on one line and a lone series on another. Every
+    channel in a group must declare a row, or every channel must omit it. The
+    reader lays out a group when every channel omits `row`.
+
+    The other channel kinds ignore both fields.
     """
 
     name: str
     kind: ChannelKind
     group: str | None = None
+    row: int | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -291,13 +302,19 @@ class ReplayLogWriter:
         in a tab of its own. It must match the group of at least one scalar channel.
         Otherwise the overview would omit the requested plots.
 
+        A scalar channel's `row` is checked per group. Every channel in a group
+        must declare a row, or every channel must omit it. This prevents the reader
+        from combining explicit rows with its default layout.
+
         Raises:
-            ValueError: If `overview_group` does not identify a scalar group.
+            ValueError: If `overview_group` does not identify a scalar group, or if
+                a group numbers some channel rows but leaves others unnumbered.
         """
         self._channels = tuple(channels)
         self._kinds = {channel.name: channel.kind for channel in self._channels}
         self._image_format = image_format
         _check_overview_group(overview_group, self._channels)
+        _check_rows(self._channels)
         self._steps = 0
         self._seq = 0
         self._file = path.open("wb")
@@ -308,7 +325,8 @@ class ReplayLogWriter:
                 "episode_idx": episode_idx,
                 "overview_group": overview_group,
                 "channels": [
-                    {"name": c.name, "kind": str(c.kind), "group": c.group} for c in self._channels
+                    {"name": c.name, "kind": str(c.kind), "group": c.group, "row": c.row}
+                    for c in self._channels
                 ],
             },
         )
@@ -572,6 +590,29 @@ def _check_overview_group(group: str | None, channels: tuple[Channel, ...]) -> N
         )
 
 
+def _check_rows(channels: tuple[Channel, ...]) -> None:
+    """Check that each group either numbers all channel rows or leaves all unnumbered.
+
+    The reader chooses the layout when every row is unnumbered. Reject a mixture
+    of numbered and unnumbered rows. Reject negative rows because row numbers are
+    counted from the top.
+
+    Raises:
+        ValueError: If a group mixes numbered and unnumbered channel rows, or if
+            a row is negative.
+    """
+    numbered: dict[str, set[bool]] = {}
+    for channel in channels:
+        if channel.kind is not ChannelKind.SCALAR:
+            continue
+        if channel.row is not None and channel.row < 0:
+            raise ValueError(f"channel {channel.name!r} declares a negative row {channel.row}")
+        numbered.setdefault(_group_of(channel), set()).add(channel.row is not None)
+    partial = sorted(group for group, seen in numbered.items() if len(seen) > 1)
+    if len(partial) > 0:
+        raise ValueError(f"groups mix numbered and unnumbered channel rows: {', '.join(partial)}")
+
+
 def _group_of(channel: Channel) -> str:
     """The group a scalar channel is plotted in, declared or fallen back to."""
     return channel.group or channel.name.split("/")[0]
@@ -635,6 +676,7 @@ def _read_header(payload: dict[str, Any]) -> tuple[int, int, str | None, tuple[C
         name = node.get("name")
         kind = node.get("kind")
         group = node.get("group")
+        row = node.get("row")
         if not isinstance(name, str) or kind not in set(ChannelKind):
             raise ValueError(f"malformed header channel {node!r}")
         channels.append(
@@ -642,6 +684,7 @@ def _read_header(payload: dict[str, Any]) -> tuple[int, int, str | None, tuple[C
                 name=name,
                 kind=ChannelKind(kind),
                 group=group if isinstance(group, str) else None,
+                row=row if isinstance(row, int) else None,
             )
         )
     return version, episode_idx, overview_group, tuple(channels)

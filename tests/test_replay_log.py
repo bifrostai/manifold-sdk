@@ -130,6 +130,63 @@ def test_an_overview_group_may_use_the_default_channel_group(tmp_path):
     assert read_replay_log(path).overview_group == "joints"
 
 
+def test_a_channel_row_round_trips(tmp_path):
+    path = tmp_path / "episode.replay"
+    channels = (
+        Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
+        Channel(name="ee_pos_x", kind=ChannelKind.SCALAR, group="Action", row=1),
+    )
+    with ReplayLogWriter(path, episode_idx=0, channels=channels, image_format="raw") as log:
+        log.write_scene(())
+
+    assert [c.row for c in read_replay_log(path).channels] == [0, 1]
+
+
+def test_a_channel_without_a_row_reads_back_without_one(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_scene(())
+
+    assert all(channel.row is None for channel in read_replay_log(path).channels)
+
+
+def test_the_writer_rejects_partially_numbered_channel_rows(tmp_path):
+    with pytest.raises(ValueError, match="mix numbered and unnumbered channel rows: Action"):
+        ReplayLogWriter(
+            tmp_path / "episode.replay",
+            episode_idx=0,
+            channels=(
+                Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
+                Channel(name="ee_pos_x", kind=ChannelKind.SCALAR, group="Action"),
+            ),
+            image_format="raw",
+        )
+
+
+def test_one_group_may_number_its_rows_while_another_does_not(tmp_path):
+    """The check is per group, so a benchmark may number the rows of one group and
+    leave the rest to the reader."""
+    path = tmp_path / "episode.replay"
+    channels = (
+        Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
+        Channel(name="success", kind=ChannelKind.SCALAR, group="Task"),
+    )
+    with ReplayLogWriter(path, episode_idx=0, channels=channels, image_format="raw") as log:
+        log.write_scene(())
+
+    assert [c.row for c in read_replay_log(path).channels] == [0, None]
+
+
+def test_a_negative_row_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="negative row"):
+        ReplayLogWriter(
+            tmp_path / "episode.replay",
+            episode_idx=0,
+            channels=(Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=-1),),
+            image_format="raw",
+        )
+
+
 def test_a_boxs_geometry_survives_the_float16_vertices(tmp_path):
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=(), image_format="raw") as log:
