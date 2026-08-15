@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
@@ -39,7 +39,8 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
-from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
+from manifold.recipes.recording import NO_RECORDER
+from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
 
 if TYPE_CHECKING:
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from manifold.core.policy import PolicySignature
     from manifold.core.values import Action, Observation
     from manifold.recipes.pairing import Pairing
+    from manifold.recipes.recording import EpisodeRecorder
     from manifold.wire import ImageFormat
 
 
@@ -90,13 +92,14 @@ def _run_episode_in_process(
     *,
     episode_idx: int,
     benchmark_name: str,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> EpisodeRecord:
     """Drive one in-process episode, returning the record of what it did.
 
     The in-process twin of `_run_episode`: it resets the session and the lane's
     `PipelineState`, then loops `reset/step` against the shared `_infer_step` fold
     — the same observation->infer->action kernel `_serve_session` runs per frame,
-    just without the wire in between.
+    just without the wire in between. `recorder` is driven exactly as it is there.
     """
     state.reset_lane(DEFAULT_LANE)
     session.reset()
@@ -106,16 +109,24 @@ def _run_episode_in_process(
     steps = 0
     success = False
     initialization_sec = 0.0
-    for _ in range(max_steps):
-        action = _infer_step(session, observation, pipeline, observation_source, signature, state)
-        if steps == 0:
-            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-        result = step(action)
-        steps += 1
-        observation = result.observation
-        if result.success or result.done:
-            success = result.success
-            break
+    try:
+        recorder.begin(episode_idx)
+        for _ in range(max_steps):
+            action = _infer_step(
+                session, observation, pipeline, observation_source, signature, state
+            )
+            if steps == 0:
+                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+            result = step(action)
+            steps += 1
+            observation = result.observation
+            ended = result.success or result.done or steps == max_steps
+            recorder.record(action, success=result.success, done=ended)
+            if result.success or result.done:
+                success = result.success
+                break
+    finally:
+        recorder.end()
     return EpisodeRecord(
         episode_idx=episode_idx,
         task_name=task_name,
@@ -290,11 +301,16 @@ def _run_episode(
     *,
     episode_idx: int,
     benchmark_name: str,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> EpisodeRecord:
     """Drive one episode over the channel, returning the record of what it did.
 
     The clock brackets the whole rollout, reset included, since an episode begins
     when the environment is reset.
+
+    `recorder` is driven around the same loop: begun once the reset is through, told
+    of each step, and ended however the episode leaves - the budget running out, the
+    driver reporting done, or `step` raising.
     """
     channel.send(FrameType.RESET, {})
     started_at = datetime.now(timezone.utc)
@@ -303,23 +319,31 @@ def _run_episode(
     steps = 0
     success = False
     initialization_sec = 0.0
-    for _ in range(max_steps):
-        channel.send(
-            FrameType.OBSERVATION,
-            bridge.encode_observation(observation, image_format=image_format),
-        )
-        reply = channel.recv()
-        if reply is None or reply.get("type") != FrameType.ACTION:
-            raise PairingRejected("expected an action frame from the policy")
-        action = bridge.decode_action(reply["payload"])
-        if steps == 0:
-            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-        result = step(action)
-        steps += 1
-        observation = result.observation
-        if result.success or result.done:
-            success = result.success
-            break
+    try:
+        recorder.begin(episode_idx)
+        for _ in range(max_steps):
+            channel.send(
+                FrameType.OBSERVATION,
+                bridge.encode_observation(observation, image_format=image_format),
+            )
+            reply = channel.recv()
+            if reply is None or reply.get("type") != FrameType.ACTION:
+                raise PairingRejected("expected an action frame from the policy")
+            action = bridge.decode_action(reply["payload"])
+            if steps == 0:
+                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+            result = step(action)
+            steps += 1
+            observation = result.observation
+            # The budget is the third way an episode ends, and the only one a
+            # recorder cannot see for itself.
+            ended = result.success or result.done or steps == max_steps
+            recorder.record(action, success=result.success, done=ended)
+            if result.success or result.done:
+                success = result.success
+                break
+    finally:
+        recorder.end()
     return EpisodeRecord(
         episode_idx=episode_idx,
         task_name=task_name,
@@ -696,6 +720,7 @@ def run_benchmark(
     host: str = "127.0.0.1",
     port: int,
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run a benchmark against a remote policy over the bridge, in native form.
 
@@ -705,7 +730,8 @@ def run_benchmark(
     policy side owns all conversion (ADR-0001). This is one runner shard; several
     against the same served `PolicyEndpoint` run concurrently, each on its own session.
     `image_format` is the sensor encoding for frames ("raw", "jpeg", "png"); "raw"
-    does not need an extra dependency.
+    does not need an extra dependency. `recorder` is driven per episode; see
+    `recipes.recording`.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -714,7 +740,43 @@ def run_benchmark(
         PairingRejected: If the policy closes without READY, or a frame arrives out
             of the expected order.
     """
+    return _run_connected(
+        benchmark,
+        lambda _episode_id: reset(),
+        step,
+        episode_ids=range(episodes),
+        max_steps=max_steps,
+        image_format=image_format,
+        host=host,
+        port=port,
+        on_event=on_event,
+        recorder=recorder,
+    )
+
+
+def _run_connected(
+    benchmark: Benchmark,
+    reset_episode: Callable[[int], Observation],
+    step: Callable[[Action], StepResult],
+    *,
+    episode_ids: Sequence[int],
+    max_steps: int,
+    image_format: ImageFormat,
+    host: str,
+    port: int,
+    on_event: Callable[[str], None],
+    recorder: EpisodeRecorder,
+) -> BenchmarkResult:
+    """Hold one connection open and drive the named episodes down it, in order.
+
+    The shared body of `run_benchmark` and `run_episodes`: they differ only in where
+    the ids come from, and each episode is stamped with the id it ran rather than
+    with its position here, so two shards of one run never report the same
+    `episode_idx`. The progress line counts position, since what an operator watching
+    one shard wants is how far through its own list it is.
+    """
     emit = on_event
+    ids = list(episode_ids)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((host, port))
         channel = FrameChannel.from_socket(sock)
@@ -731,22 +793,23 @@ def run_benchmark(
         emit("policy confirmed the pairing (ready)")
 
         records: list[EpisodeRecord] = []
-        for episode in range(episodes):
+        for position, episode_id in enumerate(ids):
             record = _run_episode(
                 channel,
-                reset,
+                lambda episode_id=episode_id: reset_episode(episode_id),
                 step,
                 max_steps,
                 image_format,
-                episode_idx=episode,
+                episode_idx=episode_id,
                 benchmark_name=benchmark.name,
+                recorder=recorder,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"
-            emit(f"episode {episode + 1}/{episodes}: {outcome}")
+            emit(f"episode {position + 1}/{len(ids)}: {outcome}")
         channel.send(FrameType.BYE, {})
         result = BenchmarkResult(records=tuple(records))
-        emit(f"done — {result.successes}/{episodes} succeeded")
+        emit(f"done — {result.successes}/{len(ids)} succeeded")
         return result
 
 
@@ -760,20 +823,21 @@ def run_episodes(
     max_steps: int,
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run the named global episodes of a benchmark against a remote policy.
 
     The dispatch contract is a list of episodes: the caller passes the ids to run, and
     this drives exactly those, in the given order. A stride shard is one such list,
     and the set an interrupted attempt never reached is another. This owns the
-    run-mechanics around `run_benchmark`: it parses the server string, drives an
-    `EpisodeCursor` over the ids so each episode is seeded by the id it runs, and
-    stamps each record with that id.
+    run-mechanics around one connection: it parses the server string and hands the
+    ids down, so each episode is seeded by the id it runs and each record is stamped
+    with it.
 
     `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
-    grid cell) — the only shape difference from `run_benchmark`'s nullary `reset`,
-    since the caller chooses WHICH episode each reset runs. `server` is the policy as
-    a ``host:port`` string.
+    grid cell) — the only shape difference from `run_benchmark`'s no-argument
+    `reset`, since the caller chooses WHICH episode each reset runs. `server` is the
+    policy as a ``host:port`` string.
 
     The ids must be distinct: `episode_idx` identifies an episode within a run, so a
     repeat would report one index twice. An empty list runs nothing, which is the
@@ -793,31 +857,17 @@ def run_episodes(
         raise ValueError("episode ids must be >= 0")
     if len(set(ids)) != len(ids):
         raise ValueError("episode ids must be distinct")
-    cursor = EpisodeCursor(ids)
-
-    def reset() -> Observation:
-        # `run_benchmark` drives a nullary reset(); the cursor turns each into the
-        # next global episode id, which seeds the episode it begins.
-        return reset_episode(cursor.next_id())
-
-    result = run_benchmark(
+    return _run_connected(
         benchmark,
-        reset,
+        reset_episode,
         step,
-        episodes=len(ids),
+        episode_ids=ids,
         max_steps=max_steps,
         image_format=image_format,
         host=host,
         port=port,
         on_event=on_event,
-    )
-    # `run_benchmark` numbers episodes from zero, but the cursor drove them in `ids`
-    # order, so the i-th record belongs to that id. Restamping the global id is what
-    # keeps two shards from reporting the same `episode_idx`.
-    return BenchmarkResult(
-        records=tuple(
-            replace(record, episode_idx=ids[idx]) for idx, record in enumerate(result.records)
-        )
+        recorder=recorder,
     )
 
 
@@ -833,6 +883,7 @@ def run_sharded_benchmark(
     max_steps: int,
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
 
@@ -843,7 +894,8 @@ def run_sharded_benchmark(
     `reset_episode` takes the GLOBAL episode id it begins, as `run_episodes` does.
     `total_episodes` is the global count partitioned disjointly across shards; this
     shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
-    `on_event` also receives the final per-shard tally line.
+    `on_event` also receives the final per-shard tally line. `recorder` is driven per
+    episode, and is given the global id each one begins.
 
     Returns:
         A record for each episode this shard ran, and the tally over them.
@@ -862,6 +914,7 @@ def run_sharded_benchmark(
         max_steps=max_steps,
         image_format=image_format,
         on_event=on_event,
+        recorder=recorder,
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
@@ -877,6 +930,7 @@ def evaluate(
     episodes: int,
     max_steps: int,
     on_event: Callable[[str], None] = _emit,
+    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
     """Run a benchmark against a policy *in process*: no server, no bridge, no threads.
 
@@ -891,6 +945,7 @@ def evaluate(
     per-session scratch deterministically. `reset`/`step` are the same callables
     `run_benchmark` takes, so a caller swaps recipes without rewriting its environment.
     `pipeline` bridges exactly as `serve` resolves it (None / callable / `Pipeline`).
+    `recorder` is driven per episode, as it is on the served path.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -924,6 +979,7 @@ def evaluate(
                 max_steps,
                 episode_idx=episode,
                 benchmark_name=benchmark.name,
+                recorder=recorder,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"
