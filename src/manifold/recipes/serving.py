@@ -640,7 +640,9 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
     results_dir = output_dir / "results"
     results_dir.mkdir(parents=True, exist_ok=True)
     path = results_dir / f"{benchmark_name}.json"
-    path.write_text(json.dumps({"records": records}))
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps({"records": records}))
+    temporary.replace(path)
     return path
 
 
@@ -721,6 +723,7 @@ def run_benchmark(
     port: int,
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
+    on_episode: Callable[[EpisodeRecord], None] | None = None,
 ) -> BenchmarkResult:
     """Run a benchmark against a remote policy over the bridge, in native form.
 
@@ -730,8 +733,9 @@ def run_benchmark(
     policy side owns all conversion (ADR-0001). This is one runner shard; several
     against the same served `PolicyEndpoint` run concurrently, each on its own session.
     `image_format` is the sensor encoding for frames ("raw", "jpeg", "png"); "raw"
-    does not need an extra dependency. `recorder` is driven per episode; see
-    `recipes.recording`.
+    does not need an extra dependency. `recorder` is driven within each episode;
+    see `recipes.recording`. `on_episode` receives its finished record before the
+    next episode begins.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -751,6 +755,7 @@ def run_benchmark(
         port=port,
         on_event=on_event,
         recorder=recorder,
+        on_episode=on_episode,
     )
 
 
@@ -766,6 +771,7 @@ def _run_connected(
     port: int,
     on_event: Callable[[str], None],
     recorder: EpisodeRecorder,
+    on_episode: Callable[[EpisodeRecord], None] | None,
 ) -> BenchmarkResult:
     """Hold one connection open and drive the named episodes down it, in order.
 
@@ -805,6 +811,8 @@ def _run_connected(
                 recorder=recorder,
             )
             records.append(record)
+            if on_episode is not None:
+                on_episode(record)
             outcome = "success" if record.success else "failure"
             emit(f"episode {position + 1}/{len(ids)}: {outcome}")
         channel.send(FrameType.BYE, {})
@@ -824,6 +832,7 @@ def run_episodes(
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
+    on_episode: Callable[[EpisodeRecord], None] | None = None,
 ) -> BenchmarkResult:
     """Run the named global episodes of a benchmark against a remote policy.
 
@@ -837,7 +846,8 @@ def run_episodes(
     `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
     grid cell) — the only shape difference from `run_benchmark`'s no-argument
     `reset`, since the caller chooses WHICH episode each reset runs. `server` is the
-    policy as a ``host:port`` string.
+    policy as a ``host:port`` string. `on_episode` receives each finished record
+    before the next episode begins.
 
     The ids must be distinct: `episode_idx` identifies an episode within a run, so a
     repeat would report one index twice. An empty list runs nothing, which is the
@@ -868,6 +878,7 @@ def run_episodes(
         port=port,
         on_event=on_event,
         recorder=recorder,
+        on_episode=on_episode,
     )
 
 
@@ -884,6 +895,7 @@ def run_sharded_benchmark(
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
+    output_dir: Path | None = None,
 ) -> BenchmarkResult:
     """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
 
@@ -895,7 +907,8 @@ def run_sharded_benchmark(
     `total_episodes` is the global count partitioned disjointly across shards; this
     shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
     `on_event` also receives the final per-shard tally line. `recorder` is driven per
-    episode, and is given the global id each one begins.
+    episode, and is given the global id each one begins. When `output_dir` is set,
+    the rollup is updated after each episode.
 
     Returns:
         A record for each episode this shard ran, and the tally over them.
@@ -905,6 +918,18 @@ def run_sharded_benchmark(
         PairingRejected: Propagated from `run_benchmark`.
     """
     shard_ids = shard_episode_ids(total_episodes, num_shards, shard_index)
+    records: list[EpisodeRecord] = []
+
+    def write_episode(record: EpisodeRecord) -> None:
+        if output_dir is None:
+            return
+        records.append(record)
+        write_rollup(
+            BenchmarkResult(records=tuple(records)),
+            output_dir,
+            benchmark_name=benchmark.name,
+        )
+
     result = run_episodes(
         benchmark,
         reset_episode,
@@ -915,6 +940,7 @@ def run_sharded_benchmark(
         image_format=image_format,
         on_event=on_event,
         recorder=recorder,
+        on_episode=write_episode,
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
