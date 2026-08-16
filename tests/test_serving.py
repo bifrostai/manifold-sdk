@@ -292,6 +292,36 @@ def test_run_sharded_benchmark_single_shard_runs_every_global_episode(monkeypatc
     assert seeded == [0, 1, 2]  # unsharded -> the whole global set, in order
 
 
+def test_run_sharded_benchmark_updates_the_rollup_after_each_episode(monkeypatch, tmp_path):
+    from manifold.core.values import Observation
+    from manifold.recipes import run_sharded_benchmark, serving
+
+    _install_fake_transport(monkeypatch)
+    writes: list[list[int]] = []
+
+    def capture(result, output_dir, *, benchmark_name):
+        assert output_dir == tmp_path
+        assert benchmark_name == "bench-1"
+        writes.append([record.episode_idx for record in result.records])
+        return tmp_path / "results" / "bench-1.json"
+
+    monkeypatch.setattr(serving, "write_rollup", capture)
+
+    run_sharded_benchmark(
+        _fake_benchmark(),
+        lambda _id: Observation(),
+        _one_step_episodes(succeeding=1),
+        server="h:1",
+        total_episodes=6,
+        num_shards=2,
+        shard_index=1,
+        max_steps=1,
+        output_dir=tmp_path,
+    )
+
+    assert writes == [[1], [1, 3], [1, 3, 5]]
+
+
 def test_run_sharded_benchmark_rejects_a_malformed_server():
     from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
@@ -665,3 +695,4 @@ def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
     (first, second) = json.loads(path.read_text())["records"]
     assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
     assert datetime.fromisoformat(first["started_at"]).tzinfo is not None
+    assert not (tmp_path / "results" / "bench.json.tmp").exists()
