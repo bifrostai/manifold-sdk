@@ -241,12 +241,33 @@ class Pose:
 
 
 @dataclass(frozen=True, eq=False)
+class EncodedImage:
+    """A colour frame as the compressed bytes a log stored, and their format.
+
+    The bytes are the writer's own encode, handed back unaltered, so whatever
+    stores a frame elsewhere can store these rather than re-encode the pixels a
+    reader decoded from them.
+    """
+
+    data: bytes
+    format: ImageFormat
+
+
+@dataclass(frozen=True, eq=False)
 class ReplayStep:
-    """One step of an episode: where every body is, and what each channel said."""
+    """One step of an episode: where every body is, and what each channel said.
+
+    `encoded_images` carries the stored bytes of the colour frames that were
+    written compressed, under the same names as `images`, which decodes every
+    frame as it always has. A raw colour frame and a depth frame have no entry:
+    the first stored its pixels and the second its float16 array, so neither
+    holds bytes a consumer could pass on in place of the decoded values.
+    """
 
     index: int
     poses: dict[str, Pose] = field(default_factory=dict)
     images: dict[str, np.ndarray] = field(default_factory=dict)
+    encoded_images: dict[str, EncodedImage] = field(default_factory=dict)
     scalars: dict[str, float] = field(default_factory=dict)
     text: dict[str, str] = field(default_factory=dict)
 
@@ -723,6 +744,25 @@ def _read_part(node: Any) -> ScenePart:
     )
 
 
+def _compressed_image(node: Any) -> EncodedImage | None:
+    """The stored bytes of a colour frame that was written compressed, or None.
+
+    None covers everything with no compressed bytes to hand on: a raw colour
+    frame, whose stored bytes are the pixels themselves, a depth frame, which is
+    an array wrapper rather than an image, and a format this reader does not
+    name, which is a value read off a file rather than a case to enumerate.
+    """
+    encoded = find_encoded_image(node)
+    if encoded is None:
+        return None
+    data, image_format = encoded
+    if image_format == "jpeg":
+        return EncodedImage(data=data, format="jpeg")
+    if image_format == "png":
+        return EncodedImage(data=data, format="png")
+    return None
+
+
 def _read_step(payload: dict[str, Any]) -> ReplayStep:
     index = payload.get("index")
     if not isinstance(index, int):
@@ -733,10 +773,12 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
     raw_text = payload.get("text", {})
     if not all(isinstance(node, dict) for node in (raw_poses, raw_images, raw_scalars, raw_text)):
         raise ValueError("a step's poses, images, scalars and text must be dicts")
+    encoded = {name: _compressed_image(node) for name, node in raw_images.items()}
     return ReplayStep(
         index=index,
         poses={name: _read_pose(node) for name, node in raw_poses.items()},
         images={name: _unpack_image(node, name) for name, node in raw_images.items()},
+        encoded_images={name: found for name, found in encoded.items() if found is not None},
         scalars={name: float(value) for name, value in raw_scalars.items()},
         text={name: str(value) for name, value in raw_text.items()},
     )
@@ -803,6 +845,7 @@ __all__ = [
     "REPLAY_LOG_VERSION",
     "Channel",
     "ChannelKind",
+    "EncodedImage",
     "Mesh",
     "Pose",
     "ReplayFrameType",

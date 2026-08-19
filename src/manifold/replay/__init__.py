@@ -31,6 +31,7 @@ __all__ = [
     "REPLAY_LOG_VERSION",
     "Channel",
     "ChannelKind",
+    "EncodedImage",
     "Mesh",
     "Pose",
     "ReplayFrameType",

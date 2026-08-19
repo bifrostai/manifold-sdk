@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import io
+
 import numpy as np
 import pytest
 
@@ -366,6 +368,62 @@ def test_a_png_channel_image_round_trips(tmp_path):
     decoded = read_replay_log(path).steps[0].images["agentview"]
     assert decoded.shape == (8, 8, 4)
     assert decoded[0, 0, 1] == 128
+
+
+@pytest.mark.parametrize(("image_format", "shape"), [("jpeg", (8, 8, 3)), ("png", (8, 8, 4))])
+def test_a_compressed_frame_reads_back_as_the_bytes_that_were_stored(tmp_path, image_format, shape):
+    pillow = pytest.importorskip("PIL.Image")
+    path = tmp_path / "episode.replay"
+    frame = np.zeros(shape, dtype=np.uint8)
+    frame[:, :, 1] = 128
+    frame[:, :, -1] = 255
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format=image_format) as log:
+        log.write_step({}, images={"agentview": frame})
+
+    stored = read_replay_log(path).steps[0].encoded_images["agentview"]
+    buffer = io.BytesIO()
+    pillow.fromarray(frame).save(buffer, format=image_format.upper())
+    # The writer's own encode, handed back byte for byte: whatever stores the
+    # frame downstream stores these rather than re-encoding the decoded pixels.
+    assert stored.format == image_format
+    assert stored.data == buffer.getvalue()
+
+
+def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_step(
+            {},
+            images={
+                "agentview": np.full((4, 4, 3), 200, dtype=np.uint8),
+                "agentview_depth": np.full((4, 4), 1.5, dtype=np.float32),
+            },
+        )
+
+    step = read_replay_log(path).steps[0]
+    # A raw frame stored its pixels and a depth frame its float16 array, so
+    # neither offers bytes in place of what `images` decoded.
+    assert step.encoded_images == {}
+    assert step.images["agentview"].shape == (4, 4, 3)
+    np.testing.assert_allclose(step.images["agentview_depth"], 1.5)
+
+
+def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
+    pytest.importorskip("PIL")
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="jpeg") as log:
+        log.write_step(
+            {},
+            images={
+                "agentview": np.full((8, 8, 3), 120, dtype=np.uint8),
+                "agentview_depth": np.full((8, 8), 2.0, dtype=np.float32),
+            },
+        )
+
+    step = read_replay_log(path).steps[0]
+    assert step.images["agentview"].shape == (8, 8, 3)
+    np.testing.assert_allclose(step.images["agentview_depth"], 2.0)
+    assert set(step.encoded_images) == {"agentview"}
 
 
 @pytest.mark.parametrize("image_format", ["raw", "jpeg"])
