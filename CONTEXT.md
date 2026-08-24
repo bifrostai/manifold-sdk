@@ -29,3 +29,11 @@ Replay data rather than a contract channel, since no policy consumes it, so a
 replay log declares it and `Benchmark` does not. Distinct from an episode's
 recorded `success`, which is the rollup's verdict once the episode ends.
 _Avoid_: reward, done, terminated
+
+## Serving
+
+**remote driver** - a driver whose endpoint does not hold a model and answers each
+forward by calling an inference server it dials over the network. The signature,
+the native layouts and the session are unchanged, so a policy served this way is
+not a distinct kind of version: only `forward` differs.
+_Avoid_: proxy policy, hosted policy, remote policy
