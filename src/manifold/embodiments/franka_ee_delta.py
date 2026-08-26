@@ -17,8 +17,8 @@ from manifold.core.embodiment import (
     Proprioception,
 )
 
-FRANKA_EE = Embodiment(
-    name="franka_ee",
+FRANKA_EE_DELTA = Embodiment(
+    name="franka_ee_delta",
     action=EEActionSpace(
         rotation=RotationFormat.AXIS_ANGLE,
         gripper=GripperFormat.SIGNED_OPEN_LOW,

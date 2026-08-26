@@ -17,8 +17,8 @@ from manifold.core.embodiment import (
     Proprioception,
 )
 
-WIDOWX = Embodiment(
-    name="widowx",
+WIDOWX_EE_DELTA = Embodiment(
+    name="widowx_ee_delta",
     action=EEActionSpace(
         rotation=RotationFormat.EULER_XYZ,
         gripper=GripperFormat.SIGNED,

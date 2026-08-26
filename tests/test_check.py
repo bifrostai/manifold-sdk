@@ -21,7 +21,7 @@ from manifold.core import (
     UnifiedActionSpace,
     check_compatibility,
 )
-from manifold.embodiments.panda_omron import PANDA_OMRON
+from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 
 
 def _ee(gripper: GripperFormat = GripperFormat.SIGNED) -> EEActionSpace:
@@ -183,7 +183,7 @@ def test_first_unmet_ignores_mount_provenance() -> None:
 
 
 def test_franka_ee_nests_gripper_in_ee_pose_and_a_gripper_contract_pairs_with_libero() -> None:
-    # FRANKA_EE/LIBERO now publishes the parallel-jaw gripper qpos nested in its
+    # FRANKA_EE_DELTA/LIBERO now publishes the parallel-jaw gripper qpos nested in its
     # ee_pose, so its EE value is 9-D — the native rotation is the (x, y, z, w)
     # QUATERNION robosuite emits (ADR-0001, decision 7: the embodiment records the env's TRUE
     # native form; the pairing pipeline bridges it to whatever the policy consumes).
@@ -245,9 +245,9 @@ def test_frame_history_is_the_spec_edge_for_a_clip_consuming_policy() -> None:
 
 
 def _panda_omron_arm() -> EEActionSpace:
-    # The 7-D arm payload PANDA_OMRON's 12-D whole-body action carries, declared
+    # The 7-D arm payload PANDA_OMRON_WHOLE_BODY's 12-D whole-body action carries, declared
     # standalone — the action a 7-D arm-only policy (Cosmos RoboCasa) emits.
-    action = PANDA_OMRON.action
+    action = PANDA_OMRON_WHOLE_BODY.action
     assert isinstance(action, UnifiedActionSpace)
     arm = action.payload
     assert isinstance(arm, EEActionSpace)
@@ -255,22 +255,22 @@ def _panda_omron_arm() -> EEActionSpace:
 
 
 def _robocasa_benchmark() -> Benchmark:
-    # A PANDA_OMRON benchmark whose action is the 12-D whole-body UnifiedActionSpace.
+    # A PANDA_OMRON_WHOLE_BODY benchmark whose action is the 12-D whole-body UnifiedActionSpace.
     return Benchmark(
         name="robocasa",
-        embodiment=PANDA_OMRON,
+        embodiment=PANDA_OMRON_WHOLE_BODY,
         sensors=[Camera(name="agentview_left", shape=(224, 224, 3))],
         instruction=True,
     )
 
 
 def test_base_pin_widen_bridges_a_7d_arm_action_to_the_12d_whole_body_space() -> None:
-    # A 7-D arm-only policy (the Cosmos RoboCasa case) emits the PANDA_OMRON arm
+    # A 7-D arm-only policy (the Cosmos RoboCasa case) emits the PANDA_OMRON_WHOLE_BODY arm
     # payload; BasePinWiden widens it to the benchmark's 12-D UnifiedActionSpace by
     # appending the base-pin tail, so the action chain reaches the benchmark's space.
     policy = PolicySignature(
         action_space=_panda_omron_arm(),
-        proprioception=PANDA_OMRON.proprioception,
+        proprioception=PANDA_OMRON_WHOLE_BODY.proprioception,
         cameras=[Camera(name="agentview_left", shape=(224, 224, 3))],
         instruction=True,
     )
@@ -286,7 +286,7 @@ def test_base_pin_widen_produces_the_exact_benchmark_action_space() -> None:
     adapter = BasePinWiden(width=12)
     arm = _panda_omron_arm()
     assert adapter.applies(arm)
-    assert adapter.produce(arm) == PANDA_OMRON.action
+    assert adapter.produce(arm) == PANDA_OMRON_WHOLE_BODY.action
 
 
 def test_base_pin_widen_appends_the_pin_tail_per_step() -> None:
