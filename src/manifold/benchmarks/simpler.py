@@ -8,12 +8,12 @@ instruction; the policy resizes the frame to 256x256 on its own side.
 from __future__ import annotations
 
 from manifold.core.benchmark import Benchmark
-from manifold.embodiments.widowx import WIDOWX
+from manifold.embodiments.widowx_ee_delta import WIDOWX_EE_DELTA
 from manifold.sensors.cameras import agentview
 
 SIMPLER = Benchmark(
     name="simpler",
-    embodiment=WIDOWX,
+    embodiment=WIDOWX_EE_DELTA,
     sensors=[agentview((480, 640, 3))],
     instruction=True,
 )

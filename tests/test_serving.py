@@ -412,9 +412,11 @@ def _install_fake_transport(monkeypatch) -> _FakeSocket:
 def _fake_benchmark(*, instruction: str | None = None):
     """The benchmark advertised in HELLO; only its name and instruction flag are read."""
     from manifold.core.benchmark import Benchmark
-    from manifold.embodiments import FRANKA_EE
+    from manifold.embodiments import FRANKA_EE_DELTA
 
-    return Benchmark(name="bench-1", embodiment=FRANKA_EE, instruction=instruction is not None)
+    return Benchmark(
+        name="bench-1", embodiment=FRANKA_EE_DELTA, instruction=instruction is not None
+    )
 
 
 def _one_step_episodes(*, succeeding: int):

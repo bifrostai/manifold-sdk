@@ -6,11 +6,11 @@ action drives the whole body:
     [ EE pos delta (3) | EE rot delta (3, axis-angle) | gripper (1)
       | base motion (4) | control mode (1) ]
 
-The leading 7 floats are exactly the FRANKA_EE end-effector-delta action; the
+The leading 7 floats are exactly the FRANKA_EE_DELTA end-effector-delta action; the
 trailing 5 are 4 mobile-base DOFs plus a control-mode selector, all driven (the
 base is not pinned) since the kitchen tasks involve whole-body motion.
 
-Modeled as a `UnifiedActionSpace(width=12)` with the FRANKA_EE arm action as its
+Modeled as a `UnifiedActionSpace(width=12)` with the FRANKA_EE_DELTA arm action as its
 payload rather than an extended `EEActionSpace`: the EE layout fixes the gripper as
 the last element of each step (indexed via `ee_step_layout`), so appending base DOFs
 would push it off the end. The trailing 5 dims are real action, not padding, so a
@@ -18,7 +18,7 @@ pairing matches the identical UnifiedActionSpace directly (no `UnifiedSliceAdapt
 which would discard them).
 
 Proprioception is the base-relative EE pose with the 2-D parallel-jaw gripper qpos
-nested in it, mirroring FRANKA_EE. The env reports the EE orientation as a
+nested in it, mirroring FRANKA_EE_DELTA. The env reports the EE orientation as a
 scalar-last (x, y, z, w) QUATERNION natively (robocasa/robosuite's
 robot0_base_to_eef_quat), so the embodiment declares QUATERNION here — the
 rotation re-encode to whatever a policy consumes moved off the runner and onto the
@@ -39,9 +39,9 @@ from manifold.core.embodiment import (
 )
 
 # The gripper is SIGNED ([-1, 1], +1 = closed for the PandaOmron), the polarity
-# the env applies — note this differs from FRANKA_EE's open-low convention.
-PANDA_OMRON = Embodiment(
-    name="panda_omron",
+# the env applies — note this differs from FRANKA_EE_DELTA's open-low convention.
+PANDA_OMRON_WHOLE_BODY = Embodiment(
+    name="panda_omron_whole_body",
     action=UnifiedActionSpace(
         width=12,
         payload=EEActionSpace(
@@ -53,7 +53,7 @@ PANDA_OMRON = Embodiment(
     ),
     proprioception=Proprioception(
         # The base-relative EE pose, with the 2-D parallel-jaw finger qpos nested in
-        # the EE value (mirroring FRANKA_EE). The env reports the orientation as a
+        # the EE value (mirroring FRANKA_EE_DELTA). The env reports the orientation as a
         # scalar-last (x, y, z, w) QUATERNION (robot0_base_to_eef_quat), so the
         # embodiment declares QUATERNION here (ADR-0001, decision 7: the embodiment records the
         # env's TRUE native form; the pairing pipeline bridges it to whatever the

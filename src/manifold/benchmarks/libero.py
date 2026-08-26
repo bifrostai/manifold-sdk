@@ -9,12 +9,12 @@ instruction.
 from __future__ import annotations
 
 from manifold.core.benchmark import Benchmark
-from manifold.embodiments.franka_ee import FRANKA_EE
+from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.sensors.cameras import agentview, wrist
 
 LIBERO = Benchmark(
     name="libero",
-    embodiment=FRANKA_EE,
+    embodiment=FRANKA_EE_DELTA,
     sensors=[agentview((256, 256, 3)), wrist((256, 256, 3))],
     instruction=True,
 )
