@@ -19,12 +19,19 @@ and `CONTROL_MODES` is the suffix vocabulary above, for the check that enforces 
 
 from __future__ import annotations
 
+from manifold.embodiments.droid_joint_absolute import DROID_JOINT_ABSOLUTE
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.embodiments.franka_joint_absolute import FRANKA_JOINT_ABSOLUTE
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 from manifold.embodiments.widowx_ee_delta import WIDOWX_EE_DELTA
 
-ALL = (FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE, PANDA_OMRON_WHOLE_BODY, WIDOWX_EE_DELTA)
+ALL = (
+    DROID_JOINT_ABSOLUTE,
+    FRANKA_EE_DELTA,
+    FRANKA_JOINT_ABSOLUTE,
+    PANDA_OMRON_WHOLE_BODY,
+    WIDOWX_EE_DELTA,
+)
 
 # Every name ends in one of these; the two not yet shipped are the reserved words.
 CONTROL_MODES = ("ee_absolute", "ee_delta", "joint_absolute", "joint_delta", "whole_body")
@@ -32,6 +39,7 @@ CONTROL_MODES = ("ee_absolute", "ee_delta", "joint_absolute", "joint_delta", "wh
 __all__ = [
     "ALL",
     "CONTROL_MODES",
+    "DROID_JOINT_ABSOLUTE",
     "FRANKA_EE_DELTA",
     "FRANKA_JOINT_ABSOLUTE",
     "PANDA_OMRON_WHOLE_BODY",

@@ -34,6 +34,19 @@ def agentview_right(shape: tuple[int, ...]) -> Camera:
     return Camera(name="agentview_right", shape=shape, mount=Mount.SCENE)
 
 
+def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
+    """The over-the-shoulder scene camera on the left, at the given shape.
+
+    RoboLab's `OverShoulderLeftCameraCfg` — a fixed third-person view set behind
+    and to the left of the arm. It gets its own name rather than reusing
+    `agentview` because the name is the only viewpoint semantics the contract
+    carries (a camera declares name, mount, and shape — never extrinsics), so
+    folding a behind-the-shoulder view into the front-facing `agentview` would
+    let a LIBERO-trained policy pair against a viewpoint it never saw.
+    """
+    return Camera(name="over_shoulder_left", shape=shape, mount=Mount.SCENE)
+
+
 def wrist(shape: tuple[int, ...]) -> Camera:
     """The wrist-mounted camera, at the given shape."""
     return Camera(name="wrist", shape=shape, mount=Mount.WRIST)
@@ -43,5 +56,6 @@ __all__ = [
     "agentview",
     "agentview_left",
     "agentview_right",
+    "over_shoulder_left",
     "wrist",
 ]
