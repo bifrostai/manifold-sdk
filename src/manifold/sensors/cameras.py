@@ -4,6 +4,17 @@
 end-effector. A policy declares these camera names for the views it consumes,
 and a check matches on the name.
 
+`calibration` is optional on every one of these: a benchmark that can say where its
+camera is and how it projects passes one, and a benchmark that cannot omits it. It is
+the same calibration for a colour view and the depth view beside it — one physical
+camera, one pinhole — so both are passed the same value.
+
+A `*_depth` constructor is the metric-depth view from the same viewpoint as the
+colour camera it is named for, published as a separate channel so a colour-only
+policy still pairs (ADR 0007). It carries the same orientation as its sibling,
+which is why neither sets one here: a renderer hands both frames back from one
+read, so a pairing that reorients one reorients both.
+
 These are constructors, not constants, because a camera is not a complete value
 until a benchmark sets its resolution: the name and mount are fixed and shared,
 the shape is benchmark-specific. (Embodiments and benchmarks, which have no such
@@ -12,12 +23,24 @@ free parameter, are module constants.) The benchmark passes the shape.
 
 from __future__ import annotations
 
-from manifold.core.sensor import Camera, Mount
+from manifold.core.sensor import Camera, CameraCalibration, Modality, Mount
 
 
-def agentview(shape: tuple[int, ...]) -> Camera:
+def agentview(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
     """The third-person scene camera, at the given shape."""
-    return Camera(name="agentview", shape=shape, mount=Mount.SCENE)
+    return Camera(name="agentview", shape=shape, mount=Mount.SCENE, calibration=calibration)
+
+
+def agentview_depth(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+    """The third-person scene camera's metric depth, at the given shape."""
+    return Camera(
+        name="agentview_depth",
+        shape=shape,
+        dtype="float32",
+        mount=Mount.SCENE,
+        modality=Modality.DEPTH,
+        calibration=calibration,
+    )
 
 
 def agentview_left(shape: tuple[int, ...]) -> Camera:
@@ -47,15 +70,29 @@ def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
     return Camera(name="over_shoulder_left", shape=shape, mount=Mount.SCENE)
 
 
-def wrist(shape: tuple[int, ...]) -> Camera:
+def wrist(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
     """The wrist-mounted camera, at the given shape."""
-    return Camera(name="wrist", shape=shape, mount=Mount.WRIST)
+    return Camera(name="wrist", shape=shape, mount=Mount.WRIST, calibration=calibration)
+
+
+def wrist_depth(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+    """The wrist-mounted camera's metric depth, at the given shape."""
+    return Camera(
+        name="wrist_depth",
+        shape=shape,
+        dtype="float32",
+        mount=Mount.WRIST,
+        modality=Modality.DEPTH,
+        calibration=calibration,
+    )
 
 
 __all__ = [
     "agentview",
+    "agentview_depth",
     "agentview_left",
     "agentview_right",
     "over_shoulder_left",
     "wrist",
+    "wrist_depth",
 ]

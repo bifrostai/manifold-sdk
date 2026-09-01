@@ -18,6 +18,7 @@ from manifold.core import (
     GripperFormat,
     GripperObservationSpec,
     JointActionSpace,
+    Modality,
     Mount,
     ObservationSpace,
     Pipeline,
@@ -341,6 +342,32 @@ def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
 
+def test_an_rgbd_policy_pairs_with_libero() -> None:
+    policy = _libero_policy(
+        cameras=[
+            Camera(name="agentview", shape=(256, 256, 3)),
+            Camera(
+                name="agentview_depth",
+                shape=(256, 256, 1),
+                dtype="float32",
+                modality=Modality.DEPTH,
+            ),
+        ]
+    )
+    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+
+
+def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
+    # Modality is a compared convention, so a policy asking for `agentview_depth` as a
+    # uint8 colour frame does not silently pair with the float32 metres published under
+    # that name. Without that comparison this is the first failure class: a plausible
+    # array a name check cannot reject.
+    policy = _libero_policy(cameras=[Camera(name="agentview_depth", shape=(256, 256, 3))])
+    report = check_compatibility(policy, LIBERO)
+    assert report.status is Compatibility.INCOMPATIBLE
+    assert any("agentview_depth" in reason and "conventions" in reason for reason in report.reasons)
+
+
 def _calibration(
     *, fovy: float = 45.0, axes: CameraAxes = CameraAxes.OPENCV, frame: Frame = Frame.WORLD
 ) -> CameraCalibration:
@@ -355,6 +382,13 @@ def test_a_policy_wanting_no_calibration_pairs_with_a_benchmark_publishing_it() 
     # Asymmetric, like every other channel comparison: LIBERO declares calibration on
     # all four cameras and a policy that declares none is unaffected (ADR 0008).
     policy = _libero_policy(cameras=[Camera(name="agentview", shape=(256, 256, 3))])
+    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+
+
+def test_a_policy_consuming_libero_calibration_pairs() -> None:
+    policy = _libero_policy(
+        cameras=[Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration())]
+    )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
 
