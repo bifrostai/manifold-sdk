@@ -9,6 +9,7 @@ import pytest
 
 from manifold.replay import (
     REPLAY_LOG_VERSION,
+    CameraPinhole,
     Channel,
     ChannelKind,
     Mesh,
@@ -477,3 +478,136 @@ def test_a_log_goes_beside_the_rollup(tmp_path):
     assert path.parent == tmp_path / "results"
     assert path.name == "episode-00004.replay"
     assert path.parent.is_dir()
+
+
+# --- camera calibration and extrinsics (ADR 0008) -----------------------------
+
+_CAMERAS = (
+    CameraPinhole(name="agentview", fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256),
+    CameraPinhole(name="wrist", fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256),
+)
+
+
+def _extrinsic(z: float) -> Pose:
+    return Pose(position=np.array([0.5, 0.0, z]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+
+
+def test_header_camera_intrinsics_round_trip(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(
+        path, episode_idx=0, channels=CHANNELS, image_format="raw", cameras=_CAMERAS
+    ) as log:
+        log.write_step({"robot0_link0": _pose(0.0)})
+    log = read_replay_log(path)
+    assert [c.name for c in log.cameras] == ["agentview", "wrist"]
+    assert log.cameras[0].fx == pytest.approx(101.4)
+    assert (log.cameras[0].width, log.cameras[0].height) == (256, 256)
+
+
+def test_a_log_without_cameras_reads_back_without_any(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_step({"robot0_link0": _pose(0.0)})
+    assert read_replay_log(path).cameras == ()
+
+
+def test_every_step_carries_every_cameras_extrinsic(tmp_path):
+    """A pose written once is filled forward, so no step is missing a camera."""
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for i in range(4):
+            log.write_step(
+                {"robot0_link0": _pose(0.0)},
+                # The scene camera never moves; the wrist camera moves every step.
+                extrinsics={"agentview": _extrinsic(1.6), "wrist": _extrinsic(1.0 + 0.1 * i)},
+            )
+    steps = read_replay_log(path).steps
+    assert len(steps) == 4
+    for i, step in enumerate(steps):
+        assert sorted(step.extrinsics) == ["agentview", "wrist"]
+        assert step.extrinsics["agentview"].position[2] == pytest.approx(1.6)
+        assert step.extrinsics["wrist"].position[2] == pytest.approx(1.0 + 0.1 * i, abs=1e-6)
+
+
+def test_an_unmoved_camera_is_stored_once(tmp_path):
+    """The saving this encoding exists for: a static camera stores one row, not one per step."""
+    still = tmp_path / "still.replay"
+    with ReplayLogWriter(still, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for _ in range(50):
+            log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+    moving = tmp_path / "moving.replay"
+    with ReplayLogWriter(moving, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for i in range(50):
+            log.write_step(
+                {"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6 + 0.01 * i)}
+            )
+    # Both read back with a pose on all 50 steps, but only one stored all 50.
+    assert all(s.extrinsics["agentview"] is not None for s in read_replay_log(still).steps)
+    assert still.stat().st_size < moving.stat().st_size
+
+
+def test_a_step_with_no_camera_movement_omits_the_key(tmp_path):
+    """A publisher that passes no extrinsics writes what it wrote before the field existed."""
+    without = tmp_path / "without.replay"
+    with ReplayLogWriter(without, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_step({"robot0_link0": _pose(0.0)})
+    assert read_replay_log(without).steps[0].extrinsics == {}
+
+
+def test_a_change_float32_cannot_hold_is_not_written(tmp_path):
+    """Quantised before comparison: a difference the log cannot store is not a change."""
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+        first = path.stat().st_size
+        # Far below float32's resolution at 1.6, so it rounds to the stored value.
+        log.write_step(
+            {"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6 + 1e-12)}
+        )
+        second = path.stat().st_size
+    grew = second - first
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+        base = path.stat().st_size
+        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.7)})
+        real = path.stat().st_size - base
+    assert grew < real
+
+
+def test_a_malformed_header_camera_is_refused(tmp_path):
+    """A camera missing its focal length is corruption, not an absent field."""
+    path = tmp_path / "episode.replay"
+    path.write_bytes(
+        pack_stream_frame(
+            str(ReplayFrameType.HEADER),
+            {
+                "version": REPLAY_LOG_VERSION,
+                "episode_idx": 0,
+                "overview_group": None,
+                "channels": [],
+                "cameras": [{"name": "agentview"}],
+            },
+            seq=0,
+        )
+    )
+    with pytest.raises(ValueError, match="malformed header camera"):
+        read_replay_log(path)
+
+
+def test_a_header_camera_list_that_is_not_a_list_is_refused(tmp_path):
+    path = tmp_path / "episode.replay"
+    path.write_bytes(
+        pack_stream_frame(
+            str(ReplayFrameType.HEADER),
+            {
+                "version": REPLAY_LOG_VERSION,
+                "episode_idx": 0,
+                "overview_group": None,
+                "channels": [],
+                "cameras": {"agentview": {}},
+            },
+            seq=0,
+        )
+    )
+    with pytest.raises(ValueError, match="'cameras' must be a list"):
+        read_replay_log(path)
