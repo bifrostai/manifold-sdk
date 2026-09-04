@@ -9,11 +9,21 @@ import pytest
 
 from manifold.adapters import ActionTap, ObservationTap
 from manifold.adapters.action import GripperThresholdAdapter
-from manifold.adapters.observation import FrameRebaseAdapter, ResizeCameras, SwapChannelOrder
+from manifold.adapters.observation import (
+    FlipVerticalCameras,
+    FrameRebaseAdapter,
+    ResizeCameras,
+    Rotate180Cameras,
+    SwapChannelOrder,
+)
 from manifold.core import (
     Action,
     Benchmark,
     Camera,
+    CameraAxes,
+    CameraCalibration,
+    CameraIntrinsics,
+    CameraOrientation,
     ChannelOrder,
     Compatibility,
     EEActionSpace,
@@ -22,6 +32,7 @@ from manifold.core import (
     Frame,
     GripperFormat,
     GripperObservationSpec,
+    Modality,
     Observation,
     ObservationSpace,
     Pipeline,
@@ -201,6 +212,56 @@ def test_resize_cameras_resizes_the_image_plane_of_a_rank4_clip() -> None:
     assert result.sensors["agentview"].dtype == np.uint8
 
 
+def _depth_space(shape: tuple[int, ...]) -> ObservationSpace:
+    return ObservationSpace(
+        cameras=(
+            Camera(name="agentview_depth", shape=shape, dtype="float32", modality=Modality.DEPTH),
+        )
+    )
+
+
+def test_resize_cameras_resamples_a_depth_frame_without_interpolating() -> None:
+    # A depth camera resamples nearest-neighbour whatever the adapter's order says. A
+    # combining kernel would return distances between two surfaces, and would evaluate
+    # `inf - inf` through the spline filter and hand back NaN — replacing the no-hit
+    # marker the SDK uses with one it does not (ADR 0007).
+    depth = np.array(
+        [
+            [1.0, 1.0, 5.0, 5.0],
+            [1.0, 1.0, 5.0, 5.0],
+            [1.0, 1.0, np.inf, np.inf],
+            [1.0, 1.0, np.inf, np.inf],
+        ],
+        dtype=np.float32,
+    ).reshape(4, 4, 1)
+    observation = Observation(sensors={"agentview_depth": depth})
+
+    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(2, 2))
+    out = adapter.adapt(observation, source=_depth_space((4, 4, 1))).sensors["agentview_depth"]
+
+    assert out.shape == (2, 2, 1)
+    assert out.dtype == np.float32
+    assert not np.isnan(out).any()
+    assert np.isinf(out).sum() == 1
+    # Every reading is one that was in the input: nothing between the two surfaces.
+    finite = out[np.isfinite(out)]
+    assert np.all((finite == 1.0) | (finite == 5.0))
+
+
+def test_resize_cameras_pads_a_depth_frame_with_inf() -> None:
+    # Aspect-preserving pad on depth fills with `inf`, not zero: a zero pad is a
+    # surface at the lens, which is a distance, where `inf` says there is no reading.
+    depth = np.full((4, 2, 1), 2.0, dtype=np.float32)
+    observation = Observation(sensors={"agentview_depth": depth})
+
+    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(4, 4), pad=True)
+    out = adapter.adapt(observation, source=_depth_space((4, 2, 1))).sensors["agentview_depth"]
+
+    assert out.shape == (4, 4, 1)
+    assert np.isinf(out[:, 0, 0]).all()
+    assert not (out == 0.0).any()
+
+
 # --- GripperThresholdAdapter --------------------------------------------------
 
 
@@ -370,3 +431,112 @@ def test_a_tap_is_transparent_in_a_pipeline() -> None:
     plain_act = plain.apply_action(action, source=action_source)
     tapped_act = tapped.apply_action(action, source=action_source)
     assert np.array_equal(plain_act.values, tapped_act.values)
+
+
+# --- calibration through the geometry adapters --------------------------------
+
+
+def _calibrated(shape: tuple[int, ...], fovy: float = 45.0) -> Camera:
+    return Camera(
+        name="agentview",
+        shape=shape,
+        calibration=CameraCalibration(
+            intrinsics=CameraIntrinsics.from_fov(
+                fovy_degrees=fovy, height=shape[-3], width=shape[-2]
+            ),
+            axes=CameraAxes.OPENCV,
+            frame=Frame.WORLD,
+        ),
+    )
+
+
+def test_resize_scales_the_intrinsics_with_the_image() -> None:
+    # Resampling moves the pixel grid the pinhole is measured in, so all four values
+    # scale. Leaving them behind would keep claiming the old field of view (ADR 0008).
+    source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
+    produced = ResizeCameras(cameras=("agentview",), shape=(128, 128)).produce(source)
+
+    camera = produced.camera("agentview")
+    assert camera is not None and camera.calibration is not None
+    k = camera.calibration.intrinsics
+    assert k.fx == pytest.approx(309.019336 / 2, rel=1e-6)
+    assert k.cx == pytest.approx(64.0) and k.cy == pytest.approx(64.0)
+
+
+def test_padded_resize_shifts_the_principal_point_by_the_centring_offset() -> None:
+    # Aspect-preserving pad scales by one factor and then centres, so the principal
+    # point moves by the pad rather than staying at the middle of the old image.
+    source = ObservationSpace(cameras=(_calibrated((128, 64, 3)),))
+    produced = ResizeCameras(cameras=("agentview",), shape=(128, 128), pad=True).produce(source)
+
+    camera = produced.camera("agentview")
+    assert camera is not None and camera.calibration is not None
+    # scale = min(128/128, 128/64) = 1.0; the 64-wide image is centred in 128 -> +32.
+    assert camera.calibration.intrinsics.cx == pytest.approx(32.0 + 32.0)
+    assert camera.calibration.intrinsics.cy == pytest.approx(64.0)
+
+
+def test_rotate180_leaves_the_calibration_alone() -> None:
+    # Rearranging an array re-labels which row is row 0; it does not move the camera. So
+    # the intrinsics and the pose pass through untouched and only `orientation` advances.
+    # "Correcting" either one would put the scene underground (ADR 0008).
+    source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
+    adapter = Rotate180Cameras(cameras=("agentview",))
+
+    produced = adapter.produce(source).camera("agentview")
+    assert produced is not None and produced.calibration is not None
+    assert produced.orientation is CameraOrientation.ROTATED_180
+    assert produced.calibration == _calibrated((256, 256, 3)).calibration
+
+    pose = np.eye(4)
+    pose[:3, 3] = (1.0, 2.0, 3.0)
+    result = adapter.adapt(
+        Observation(
+            sensors={"agentview": np.zeros((256, 256, 3), dtype=np.uint8)},
+            extrinsics={"agentview": pose},
+        ),
+        source=source,
+    )
+    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+
+
+def test_a_pose_passes_through_an_adapter_that_does_not_touch_geometry() -> None:
+    # The hazard a fourth aggregate introduces: an adapter that rebuilds the
+    # observation must not drop it. Channel order is not geometry, so it passes through.
+    source = ObservationSpace(cameras=(_calibrated((4, 4, 3)),))
+    pose = np.eye(4)
+    result = SwapChannelOrder(ChannelOrder.BGR, cameras=("agentview",)).adapt(
+        Observation(
+            sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
+            extrinsics={"agentview": pose},
+        ),
+        source=source,
+    )
+    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+
+
+def test_a_vertical_flip_keeps_the_calibration() -> None:
+    # The flip is what MAKES an OpenCV calibration valid for a bottom-up renderer: the
+    # intrinsics assume row 0 is the top, and this is the adapter that makes that true.
+    # So it carries the calibration rather than dropping it.
+    source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
+    adapter = FlipVerticalCameras(cameras=("agentview",))
+
+    assert adapter.applies(source) is True
+    produced = adapter.produce(source).camera("agentview")
+    assert produced is not None
+    assert produced.orientation is CameraOrientation.FLIPPED_VERTICAL
+    assert produced.calibration == _calibrated((256, 256, 3)).calibration
+
+
+def test_a_vertical_flip_keeps_the_pose_too() -> None:
+    source = ObservationSpace(cameras=(_calibrated((4, 4, 3)),))
+    pose = np.eye(4)
+    result = FlipVerticalCameras(cameras=("agentview",)).adapt(
+        Observation(
+            sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
+            extrinsics={"agentview": pose},
+        ),
+        source=source,
+    )
+    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)

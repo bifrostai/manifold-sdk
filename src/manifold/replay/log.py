@@ -62,8 +62,16 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import TracebackType
 
-# The log's own contract version, independent of the bridge protocol's.
-REPLAY_LOG_VERSION = 3
+# The log's own contract version, independent of the bridge protocol's. This is what
+# a writer stamps.
+REPLAY_LOG_VERSION = 4
+
+# The versions a reader accepts, which is more than the one it writes.
+# Every field 4 added over 3 — the header's `cameras` and a step's `extrinsics` — is
+# absent-means-empty, so a reader treats a 3 as a log without camera calibration and
+# without camera poses, which is exactly what it is. Refusing it instead would strand every log
+# already on disk over a field they could not have carried.
+_READABLE_LOG_VERSIONS = frozenset({3, 4})
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -234,10 +242,83 @@ class SceneBody:
 
 @dataclass(frozen=True, eq=False)
 class Pose:
-    """A body's world pose: metres, and a quaternion in `xyzw` order."""
+    """A body's world pose: metres, and a quaternion in `xyzw` order.
+
+    Also a camera's, under a step's `extrinsics`: a camera-to-world pose is the
+    same seven numbers as a body's, so it does not need a second type. The 4x4 the
+    simulator returns carries a bottom row that is `[0, 0, 0, 1]` in every frame
+    and a 3x3 rotation using nine numbers for three degrees of freedom; a
+    publisher converts once, before logging.
+    """
 
     position: np.ndarray
     orientation: np.ndarray
+
+
+@dataclass(frozen=True, eq=False)
+class CameraPinhole:
+    """One camera's pinhole intrinsics, in pixels, declared in the header.
+
+    Static for a run, so the header carries it rather than every step (ADR 0008:
+    intrinsics on the spec, a pose per step). `width` and `height` are carried
+    because a focal length in pixels means nothing without the pixel count it was
+    derived for.
+
+    The pose these belong to is camera-to-world in OpenCV axes. That is fixed by
+    convention rather than declared per camera, exactly as this log fixes `xyzw`
+    orientation and metric position: fixing it by convention removes a field every
+    writer would have to set correctly. A publisher whose simulator uses other
+    axes converts before logging, as `benchmarks.libero` does via robosuite's
+    `get_camera_extrinsic_matrix`.
+
+    A record of its own rather than `core.sensor.CameraIntrinsics`:
+    a log describes itself (ADR 0004) and this module does not import from
+    `manifold.core`, so a reader needs the log and nothing else. It is also not
+    `core.sensor.CameraCalibration`, which pairs intrinsics with the axes and frame
+    a pairing negotiates; a log has no pairing to negotiate with.
+
+    REGENERATING A DEPTH FRAME. These intrinsics with a step's `extrinsics` are
+    enough to re-render depth from the log's own geometry, without the simulator.
+    Cast one ray per pixel and take the distance along the camera's forward axis:
+
+        R, t = rotation(extrinsic.orientation), extrinsic.position
+        # OpenCV axes: x right, y down, z forward.
+        d_cam = [(u + 0.5 - cx) / fx, (v + 0.5 - cy) / fy, 1.0]
+        origin, direction = t, R @ d_cam
+        depth[v, u] = (hit_point - t) @ R[:, 2]
+
+    The scene to cast against is `log.bodies`: put each part's vertices through its
+    own static pose, then through its body's pose for that step, and the result is
+    world space. It is the same composition the sealer relies on when it writes a
+    part once and its body per step.
+
+    Do not treat the result as the stored frame. It agrees with the stored depth
+    closely across most of a frame, but the worst disagreements are large rather
+    than marginal. Three reasons, worth knowing before relying on it:
+
+    - **Silhouettes.** A ray that grazes an edge hits the object in one render and
+      the wall behind it in the other, so the error there is not a slightly wrong
+      distance but the wrong surface. The disagreement concentrates on exactly the
+      depth discontinuities that matter most to a consumer.
+    - **Visual geometry only.** A log carries what is drawn, not what collides, and
+      a geom that will not tessellate is dropped with a line in the runner's log
+      (see `mujoco_replay._report_skipped`). Around 0.3% of scene-camera rays hit
+      nothing while the stored frame reads a distance there.
+    - **`_VERTEX_DTYPE` is float16.** Fine for object-scale parts, about 2 mm at the
+      3 m magnitudes a room shell reaches. This is the floor under the median above.
+
+    So it is a way to visualise or sanity-check geometry, not a substitute for
+    storing depth: it is lossy where depth is most informative, and it re-renders a
+    ray per pixel where reading the stored frame is a copy.
+    """
+
+    name: str
+    fx: float
+    fy: float
+    cx: float
+    cy: float
+    width: int
+    height: int
 
 
 @dataclass(frozen=True, eq=False)
@@ -266,6 +347,11 @@ class ReplayStep:
 
     index: int
     poses: dict[str, Pose] = field(default_factory=dict)
+    # Every camera the log declares, on every step, even where the stored frame
+    # omitted an unchanged one: the reader fills those forward (see
+    # `read_replay_log`), so a consumer reads one pose per camera per step and
+    # never has to look backwards for the last one written.
+    extrinsics: dict[str, Pose] = field(default_factory=dict)
     images: dict[str, np.ndarray] = field(default_factory=dict)
     encoded_images: dict[str, EncodedImage] = field(default_factory=dict)
     scalars: dict[str, float] = field(default_factory=dict)
@@ -287,6 +373,10 @@ class ReplayLog:
     bodies: tuple[SceneBody, ...]
     steps: tuple[ReplayStep, ...]
     overview_group: str | None
+    # The cameras whose intrinsics the header declared, empty for a log whose
+    # publisher had none to give. A step's `extrinsics` may include a camera absent
+    # here: a pose is useful on its own, intrinsics are what a projection needs.
+    cameras: tuple[CameraPinhole, ...] = ()
 
 
 class ReplayLogWriter:
@@ -311,6 +401,7 @@ class ReplayLogWriter:
         channels: Iterable[Channel],
         image_format: ImageFormat = "jpeg",
         overview_group: str | None = None,
+        cameras: Iterable[CameraPinhole] = (),
     ) -> None:
         """Open `path` for writing and emit the header.
 
@@ -322,6 +413,11 @@ class ReplayLogWriter:
         `overview_group` is the scalar group drawn beside the scene rather than
         in a tab of its own. It must match the group of at least one scalar channel.
         Otherwise the overview would omit the requested plots.
+
+        `cameras` declares the pinhole intrinsics of the cameras whose poses the
+        steps carry. They are static for a run, so the header carries them once
+        rather than every step (ADR 0008). Without them a consumer cannot project a
+        depth frame, though the poses are still readable.
 
         A scalar channel's `row` is checked per group. Every channel in a group
         must declare a row, or every channel must omit it. This prevents the reader
@@ -338,6 +434,12 @@ class ReplayLogWriter:
         _check_rows(self._channels)
         self._steps = 0
         self._seq = 0
+        # The last extrinsic written per camera, at the precision it was stored at,
+        # so `write_step` can omit one that has not moved. Quantised before the
+        # comparison because a difference float32 cannot hold is not a difference
+        # the log can record, and writing it anyway would store a row that reads
+        # back identical to the one before it.
+        self._last_extrinsics: dict[str, tuple[bytes, bytes]] = {}
         self._file = path.open("wb")
         self._write(
             ReplayFrameType.HEADER,
@@ -348,6 +450,18 @@ class ReplayLogWriter:
                 "channels": [
                     {"name": c.name, "kind": str(c.kind), "group": c.group, "row": c.row}
                     for c in self._channels
+                ],
+                "cameras": [
+                    {
+                        "name": c.name,
+                        "fx": float(c.fx),
+                        "fy": float(c.fy),
+                        "cx": float(c.cx),
+                        "cy": float(c.cy),
+                        "width": int(c.width),
+                        "height": int(c.height),
+                    }
+                    for c in tuple(cameras)
                 ],
             },
         )
@@ -391,11 +505,21 @@ class ReplayLogWriter:
         self,
         poses: Mapping[str, Pose],
         *,
+        extrinsics: Mapping[str, Pose] | None = None,
         images: Mapping[str, np.ndarray] | None = None,
         scalars: Mapping[str, float] | None = None,
         text: Mapping[str, str] | None = None,
     ) -> None:
         """Write one step frame, numbering it after the steps already written.
+
+        `extrinsics` is each camera's camera-to-world pose for this step. Pass the
+        full set every step; only the cameras whose pose CHANGED are stored, and
+        the reader fills the rest forward. A scene camera bolted to the world
+        therefore stores one row per episode while a wrist camera stores one per
+        step, matching how the scene separates a body's static parts from its
+        per-step pose. The key is omitted entirely when nothing
+        moved, so a log from a publisher that passes none is byte-for-byte what it
+        was before this field existed.
 
         Raises:
             ValueError: If a value is given for a name the header did not declare,
@@ -415,8 +539,29 @@ class ReplayLogWriter:
             "scalars": {name: float(value) for name, value in (scalars or {}).items()},
             "text": dict(text or {}),
         }
+        moved = self._moved_extrinsics(extrinsics or {})
+        if moved:
+            payload["extrinsics"] = {name: _pack_pose(pose) for name, pose in moved.items()}
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
+
+    def _moved_extrinsics(self, extrinsics: Mapping[str, Pose]) -> dict[str, Pose]:
+        """The subset whose stored form differs from the one last written.
+
+        Compared at `_POSE_DTYPE`, not as given: the quantised bytes are what the
+        log holds, so two poses that round to the same float32 are the same row and
+        writing the second would grow the file without telling a reader anything.
+        """
+        moved: dict[str, Pose] = {}
+        for name, pose in extrinsics.items():
+            key = (
+                np.asarray(pose.position, dtype=_POSE_DTYPE).tobytes(),
+                np.asarray(pose.orientation, dtype=_POSE_DTYPE).tobytes(),
+            )
+            if self._last_extrinsics.get(name) != key:
+                self._last_extrinsics[name] = key
+                moved[name] = pose
+        return moved
 
     def close(self) -> None:
         """Close the file. Writing after this raises."""
@@ -469,6 +614,11 @@ def read_replay_log(path: Path) -> ReplayLog:
     is complete but malformed is an error, since that is corruption rather than a
     short tail.
 
+    A step's `extrinsics` are stored only where a camera moved (see
+    `ReplayLogWriter.write_step`), and this fills them forward: every step a
+    reader gets carries a pose for every camera seen so far, so a consumer never
+    walks backwards to find the last one written.
+
     Raises:
         ValueError: If the first frame is not a header, the version is one this
             reader does not accept, or a complete frame is malformed.
@@ -478,16 +628,24 @@ def read_replay_log(path: Path) -> ReplayLog:
         header = next(frames, None)
         if header is None or header.get("type") != ReplayFrameType.HEADER:
             raise ValueError("a replay log opens with a header frame")
-        version, episode_idx, overview_group, channels = _read_header(header.get("payload", {}))
+        version, episode_idx, overview_group, channels, cameras = _read_header(
+            header.get("payload", {})
+        )
         bodies: tuple[SceneBody, ...] = ()
         steps: list[ReplayStep] = []
+        carried: dict[str, Pose] = {}
         for frame in frames:
             kind = frame.get("type")
             payload = frame.get("payload", {})
             if kind == ReplayFrameType.SCENE:
                 bodies = _read_scene(payload)
             elif kind == ReplayFrameType.STEP:
-                steps.append(_read_step(payload))
+                step = _read_step(payload)
+                carried.update(step.extrinsics)
+                # A copy per step, not the shared dict: a consumer that mutates one
+                # step's extrinsics must not rewrite every later step's too.
+                step.extrinsics.update(carried)
+                steps.append(step)
     return ReplayLog(
         version=version,
         episode_idx=episode_idx,
@@ -495,6 +653,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         bodies=bodies,
         steps=tuple(steps),
         overview_group=overview_group,
+        cameras=cameras,
     )
 
 
@@ -678,9 +837,11 @@ def _iter_frames(handle: Any) -> Iterator[dict[str, Any]]:
         yield frame
 
 
-def _read_header(payload: dict[str, Any]) -> tuple[int, int, str | None, tuple[Channel, ...]]:
+def _read_header(
+    payload: dict[str, Any],
+) -> tuple[int, int, str | None, tuple[Channel, ...], tuple[CameraPinhole, ...]]:
     version = payload.get("version")
-    if version != REPLAY_LOG_VERSION:
+    if version not in _READABLE_LOG_VERSIONS:
         raise ValueError(f"unsupported replay log version {version!r}")
     episode_idx = payload.get("episode_idx")
     if not isinstance(episode_idx, int):
@@ -708,7 +869,38 @@ def _read_header(payload: dict[str, Any]) -> tuple[int, int, str | None, tuple[C
                 row=row if isinstance(row, int) else None,
             )
         )
-    return version, episode_idx, overview_group, tuple(channels)
+    return version, episode_idx, overview_group, tuple(channels), _read_cameras(payload)
+
+
+def _read_cameras(payload: dict[str, Any]) -> tuple[CameraPinhole, ...]:
+    """The header's camera intrinsics, absent for a log whose publisher gave none."""
+    raw = payload.get("cameras", [])
+    if not isinstance(raw, list):
+        raise ValueError("header 'cameras' must be a list")  # noqa: TRY004
+    cameras = []
+    for node in raw:
+        if not isinstance(node, dict):
+            raise ValueError("a header camera must be a dict")  # noqa: TRY004
+        name = node.get("name")
+        if not isinstance(name, str):
+            # A malformed frame value is a ValueError by contract, not a TypeError
+            # (see the module docstring), as everywhere else in this reader.
+            raise ValueError(f"malformed header camera {node!r}")  # noqa: TRY004
+        try:
+            cameras.append(
+                CameraPinhole(
+                    name=name,
+                    fx=float(node["fx"]),
+                    fy=float(node["fy"]),
+                    cx=float(node["cx"]),
+                    cy=float(node["cy"]),
+                    width=int(node["width"]),
+                    height=int(node["height"]),
+                )
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"malformed header camera {node!r}") from exc
+    return tuple(cameras)
 
 
 def _read_scene(payload: dict[str, Any]) -> tuple[SceneBody, ...]:
@@ -771,12 +963,19 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
     raw_images = payload.get("images", {})
     raw_scalars = payload.get("scalars", {})
     raw_text = payload.get("text", {})
-    if not all(isinstance(node, dict) for node in (raw_poses, raw_images, raw_scalars, raw_text)):
-        raise ValueError("a step's poses, images, scalars and text must be dicts")
+    # Absent on a step where no camera moved, and on every step of a log written
+    # before the field existed.
+    raw_extrinsics = payload.get("extrinsics", {})
+    if not all(
+        isinstance(node, dict)
+        for node in (raw_poses, raw_images, raw_scalars, raw_text, raw_extrinsics)
+    ):
+        raise ValueError("a step's poses, extrinsics, images, scalars and text must be dicts")
     encoded = {name: _compressed_image(node) for name, node in raw_images.items()}
     return ReplayStep(
         index=index,
         poses={name: _read_pose(node) for name, node in raw_poses.items()},
+        extrinsics={name: _read_pose(node) for name, node in raw_extrinsics.items()},
         images={name: _unpack_image(node, name) for name, node in raw_images.items()},
         encoded_images={name: found for name, found in encoded.items() if found is not None},
         scalars={name: float(value) for name, value in raw_scalars.items()},

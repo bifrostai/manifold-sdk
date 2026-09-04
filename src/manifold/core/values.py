@@ -8,9 +8,9 @@ check reads those.
 
 The observation is decomposed, not a single flat bag: proprioception under
 `state` keyed by role ("ee_pose", "joint_pos"), exteroception under `sensors`
-keyed by sensor name ("agentview", "wrist"), and the instruction on its own. This
-mirrors the primitives: the embodiment owns the state, the benchmark owns the
-sensors.
+keyed by sensor name ("agentview", "wrist"), camera poses under `extrinsics` keyed
+by that same sensor name, and the instruction on its own. This mirrors the
+primitives: the embodiment owns the state, the benchmark owns the sensors.
 """
 
 from __future__ import annotations
@@ -30,10 +30,18 @@ class Observation:
     `state` holds proprioception by role, `sensors` holds camera arrays by sensor
     name, and `instruction` is the language task instruction if the benchmark
     publishes one.
+
+    `extrinsics` holds one 4x4 camera-to-frame pose per camera, under the same key
+    the camera's frame has in `sensors`. It is a value rather than a spec field
+    because a wrist camera's pose changes every step; what that pose MEANS — the
+    axis convention and the frame it maps into — is on the camera's
+    `CameraCalibration`, where a check reads it (ADR 0008). Empty for a benchmark
+    without calibration, which is every benchmark without depth.
     """
 
     state: dict[str, np.ndarray] = field(default_factory=dict)
     sensors: dict[str, np.ndarray] = field(default_factory=dict)
+    extrinsics: dict[str, np.ndarray] = field(default_factory=dict)
     instruction: str | None = None
 
     @classmethod

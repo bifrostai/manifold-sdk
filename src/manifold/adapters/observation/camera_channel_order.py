@@ -21,6 +21,7 @@ Parameterized by the target `ChannelOrder` and the camera names to swap:
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -77,9 +78,7 @@ class SwapChannelOrder(ObservationAdapter):
                 continue
             arr = np.asarray(frame)
             sensors[name] = np.ascontiguousarray(arr[..., ::-1])
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["SwapChannelOrder"]

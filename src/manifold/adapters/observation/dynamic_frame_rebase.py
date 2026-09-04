@@ -25,6 +25,7 @@ re-encoding loses nothing, so it is declared lossless.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -121,9 +122,7 @@ class DynamicFrameRebaseAdapter(ObservationAdapter):
         # Pass through every other state channel (including the base pose channel
         # itself) unchanged; only ee_pose is rebased.
         state = {**observation.state, "ee_pose": np.asarray(reencoded, dtype=np.float32)}
-        return Observation(
-            state=state, sensors=observation.sensors, instruction=observation.instruction
-        )
+        return replace(observation, state=state)
 
     @staticmethod
     def _spec(source: BaseModel) -> ObservationSpace:

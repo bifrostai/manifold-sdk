@@ -23,6 +23,7 @@ default) is left untouched — there is no declared polarity to bridge.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -86,9 +87,7 @@ class ObservedGripperAdapter(ObservationAdapter):
         for i in range(gripper_start, gripper_start + ee_pose.gripper.dim):
             block[i] = remap(block[i], source_encoding, self.target)
         state = {**observation.state, "ee_pose": np.asarray(block, dtype=np.float32)}
-        return Observation(
-            state=state, sensors=observation.sensors, instruction=observation.instruction
-        )
+        return replace(observation, state=state)
 
     @staticmethod
     def _spec(source: BaseModel) -> ObservationSpace:

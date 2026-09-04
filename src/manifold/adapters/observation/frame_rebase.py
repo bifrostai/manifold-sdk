@@ -20,6 +20,7 @@ It only rewrites the rotation block, so it composes before a
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -80,9 +81,7 @@ class FrameRebaseAdapter(ObservationAdapter):
         rebased = from_matrix(matrix @ self.rotation.T, ee_pose.rotation)
         reencoded = block[:pos_len] + rebased + block[pos_len + rot_len :]
         state = {**observation.state, "ee_pose": np.asarray(reencoded, dtype=np.float32)}
-        return Observation(
-            state=state, sensors=observation.sensors, instruction=observation.instruction
-        )
+        return replace(observation, state=state)
 
     @staticmethod
     def _spec(source: BaseModel) -> ObservationSpace:

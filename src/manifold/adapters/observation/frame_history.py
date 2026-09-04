@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import collections
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -120,9 +121,7 @@ class StackFrameHistory(ObservationAdapter):
                 for _ in range(self._buffer_depth):
                     buffer.append(frame)
             sensors[name] = np.stack([buffer[i] for i in self._stack_indices], axis=0)
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["StackFrameHistory"]
