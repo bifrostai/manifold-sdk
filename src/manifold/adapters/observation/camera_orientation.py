@@ -6,11 +6,19 @@ a declared convention, this adapter both rotates the named arrays AND advances e
 camera's `orientation` UPRIGHT -> ROTATED_180, so `check_compatibility` can prove the
 flip is what bridges the pairing rather than it being a spec-invisible side effect.
 Lossless (a pixel reorientation).
+
+A camera's calibration passes through untouched. Rearranging an array re-labels which
+row is row 0; it does not move the camera, so neither the intrinsics nor the pose
+change. What changes is `orientation`, which is the field that ties an array's layout to
+the image-coordinate convention the intrinsics assume — so the calibration stays
+expressed in the same layout as the frame beside it, and `orientation` says whether the
+two agree (ADR 0008).
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -67,10 +75,9 @@ class Rotate180Cameras(ObservationAdapter):
             if frame is None:
                 continue
             rotated = np.asarray(frame)[::-1, ::-1]  # 180 degrees: flip height and width
-            sensors[name] = np.ascontiguousarray(rotated)  # preserve dtype (cf. SwapChannelOrder)
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
+            sensors[name] = np.ascontiguousarray(rotated)  # preserve dtype
+        # `replace` carries the poses through unchanged: the camera did not move.
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["Rotate180Cameras"]

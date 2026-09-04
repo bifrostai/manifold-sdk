@@ -11,9 +11,20 @@ COMPATIBLE_VIA_PIPELINE but lossy (ADR-0001, decision 5).
 
 Only the target *shape* is declared. Crop and aspect are not modeled
 — the same no-speculative-modeling principle that keeps the action space
-monolithic. The interpolation order is an adapter parameter (not a spec axis),
-defaulting to bilinear, so two instances differing only in interpolation produce
-identical specs.
+monolithic. Interpolation follows the frame's modality rather than being
+parameterized, so it is not a spec axis and two instances with the same targets
+produce identical specs.
+
+A camera that declares calibration has its intrinsics resampled with it: focal
+lengths and principal point scale by the same factors the image does, and `pad=True`
+additionally shifts the principal point by the centring offset. Resizing pixels and
+leaving the intrinsics behind would silently change the field of view the numbers
+claim (ADR 0008). The extrinsic is untouched — resampling moves the pixel grid, not
+the camera.
+
+A depth camera resamples differently from a colour one (`_resample_depth` against
+`_resample_colour`): interpolating metres is not interpolating colour, so a depth
+frame resamples nearest-neighbour and pads with `inf`.
 
 Everything else about the observation — the proprioception, the instruction, and
 any cameras not named — passes through.
@@ -28,6 +39,7 @@ camera names plus one shared target `(H, W)`:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -36,12 +48,64 @@ from scipy.ndimage import zoom
 
 from manifold.core.adapter import ObservationAdapter
 from manifold.core.observation_space import ObservationSpace
+from manifold.core.sensor import CameraIntrinsics, Modality
 from manifold.core.values import Observation
 
-# Default interpolation order for scipy.ndimage.zoom: 1 is bilinear — a sensible
-# middle ground (order 0 is nearest-neighbour, blocky; order 3 is bicubic, slow
-# and prone to ringing on hard edges). It is a parameter, not a spec axis.
-_DEFAULT_ORDER = 1
+
+def _resample_depth(arr: np.ndarray, target_h: int, target_w: int, *, pad: bool) -> np.ndarray:
+    """Resample a depth frame: nearest-neighbour, padded with the `inf` no-hit marker."""
+    return _resize(arr, target_h, target_w, pad=pad, order=0, pad_value=float("inf"))
+
+
+def _resample_colour(arr: np.ndarray, target_h: int, target_w: int, *, pad: bool) -> np.ndarray:
+    """Resample a colour frame: bilinear, padded black."""
+    return _resize(arr, target_h, target_w, pad=pad, order=1, pad_value=0.0)
+
+
+def _resize(
+    arr: np.ndarray, target_h: int, target_w: int, *, pad: bool, order: int, pad_value: float
+) -> np.ndarray:
+    """Resample the image plane of `arr` to (target_h, target_w).
+
+    Call `_resample_depth` or `_resample_colour` rather than this directly: they are
+    the only two pairings of `order` and `pad_value` that are correct. Interpolating
+    across a depth edge returns a distance nothing in the scene occupies, and a zero
+    pad is a surface at the lens — both plausible values that no shape check can
+    reject (ADR 0007). Nearest-neighbour is also the only order that preserves the
+    `inf` no-hit marker at all: a combining kernel evaluates `inf - inf` across the
+    spline filter and returns NaN, replacing the marker the SDK uses with one it
+    does not.
+
+    H, W are the trailing image axes (index -3, -2 in a `(..., H, W, C)` layout);
+    leading axes (time/batch) and the trailing channel axis are preserved.
+
+    With `pad`, the image plane scales by a single factor — the smaller of the two
+    axis ratios — so it fits the target box without distortion, then centres in a
+    canvas of `pad_value`, mirroring openpi's `image_tools.resize_with_pad`. Without
+    it, each image axis is scaled alone and `pad_value` is unused.
+    """
+    zoom_factors = [1.0] * arr.ndim
+    if not pad:
+        zoom_factors[-3] = target_h / arr.shape[-3]
+        zoom_factors[-2] = target_w / arr.shape[-2]
+        return np.asarray(zoom(arr, zoom_factors, order=order))
+
+    src_h, src_w = arr.shape[-3], arr.shape[-2]
+    scale = min(target_h / src_h, target_w / src_w)
+    # Round (not floor) so a perfectly-fitting axis lands exactly on the target.
+    new_h = min(target_h, max(1, round(src_h * scale)))
+    new_w = min(target_w, max(1, round(src_w * scale)))
+    zoom_factors[-3] = new_h / src_h
+    zoom_factors[-2] = new_w / src_w
+    scaled = np.asarray(zoom(arr, zoom_factors, order=order))
+    # Centre the scaled image in a canvas of `pad_value` at the target size: black
+    # for a colour frame, `inf` (no hit) for a depth one.
+    canvas_shape = (*arr.shape[:-3], target_h, target_w, arr.shape[-1])
+    canvas = np.full(canvas_shape, pad_value, dtype=scaled.dtype)
+    top = (target_h - new_h) // 2
+    left = (target_w - new_w) // 2
+    canvas[..., top : top + new_h, left : left + new_w, :] = scaled
+    return canvas
 
 
 def _image_hw(shape: tuple[int, ...]) -> tuple[int, int]:
@@ -74,7 +138,6 @@ class ResizeCameras(ObservationAdapter):
         *,
         cameras: Sequence[str] | None = None,
         shape: tuple[int, int] | None = None,
-        order: int = _DEFAULT_ORDER,
         pad: bool = False,
     ) -> None:
         if targets is not None:
@@ -85,9 +148,8 @@ class ResizeCameras(ObservationAdapter):
             if cameras is None or shape is None:
                 raise ValueError("pass either `targets`, or both `cameras` and `shape`")
             self.targets = {name: tuple(shape) for name in cameras}
-        self.order = order
         # When True, resize preserves aspect ratio (scale to fit the target box) and
-        # zero-pads the remainder to reach the target H x W — matching openpi's
+        # pads the remainder to reach the target H x W — matching openpi's
         # `image_tools.resize_with_pad`. When False (the default), each axis is
         # scaled independently (plain anisotropic resample), preserving the prior
         # behaviour. Padding is not a spec axis: the declared output shape is the
@@ -113,7 +175,8 @@ class ResizeCameras(ObservationAdapter):
         """The same spec with each named camera's image (H, W) set to the target.
 
         Only the trailing image axes are rewritten, leaving channel count and any
-        leading time/batch axis intact (a clip stays rank-4).
+        leading time/batch axis intact (a clip stays rank-4). A camera that declares
+        calibration has its intrinsics resampled to match.
         """
         if not isinstance(source, ObservationSpace):
             raise TypeError("ResizeCameras transforms an ObservationSpace source only")
@@ -125,19 +188,52 @@ class ResizeCameras(ObservationAdapter):
             shape = camera.shape
             # Replace the H, W axes in place: ..., H, W, C -> ..., target_h, target_w, C.
             new_shape = (*shape[:-3], int(target[0]), int(target[1]), *shape[-1:])
-            out = out.with_camera(camera.model_copy(update={"shape": new_shape}))
+            update: dict[str, Any] = {"shape": new_shape}
+            if camera.calibration is not None:
+                update["calibration"] = camera.calibration.model_copy(
+                    update={
+                        "intrinsics": self._resampled_intrinsics(
+                            camera.calibration.intrinsics, shape, target
+                        )
+                    }
+                )
+            out = out.with_camera(camera.model_copy(update=update))
         return out
+
+    def _resampled_intrinsics(
+        self,
+        intrinsics: CameraIntrinsics,
+        shape: tuple[int, ...],
+        target: tuple[int, ...],
+    ) -> CameraIntrinsics:
+        """The intrinsics of a frame resampled from `shape` to `target`.
+
+        The anisotropic path scales each axis by its own ratio. The padded path scales
+        both by the single factor that fits the image in the box, then shifts the
+        principal point by the offset the image was centred at — the pinhole is the
+        same, and only where it sits in the new pixel grid has moved.
+        """
+        source_h, source_w = _image_hw(shape)
+        target_h, target_w = int(target[0]), int(target[1])
+        if not self.pad:
+            return intrinsics.scaled(x=target_w / source_w, y=target_h / source_h)
+        scale = min(target_h / source_h, target_w / source_w)
+        new_h = min(target_h, max(1, round(source_h * scale)))
+        new_w = min(target_w, max(1, round(source_w * scale)))
+        return intrinsics.scaled(x=scale, y=scale).translated(
+            x=(target_w - new_w) // 2, y=(target_h - new_h) // 2
+        )
 
     def adapt(self, observation: Any, *, source: BaseModel) -> Observation:
         """Resize each named camera's image plane to the target H x W; rest passes through.
 
         A camera absent from `observation.sensors` is skipped. The result keeps the
-        frame's dtype: order-1 (bilinear) zoom is a convex combination of the inputs,
-        so it cannot exceed the input range, and the cast back to (e.g.) uint8 is safe.
+        frame's dtype: bilinear zoom is a convex combination of the inputs, so it
+        cannot exceed the input range, and the cast back to (e.g.) uint8 is safe.
 
-        With `pad=True`, the resize preserves aspect ratio and zero-pads the shrunk
-        image, centred, to the full target H x W — matching openpi's `resize_with_pad`,
-        so a non-square source keeps its proportions instead of being squashed.
+        With `pad=True`, the resize preserves aspect ratio and pads the shrunk image,
+        centred, to the full target H x W — matching openpi's `resize_with_pad`, so a
+        non-square source keeps its proportions instead of being squashed.
         """
         sensors = dict(observation.sensors)
         for name, target in self.targets.items():
@@ -146,50 +242,15 @@ class ResizeCameras(ObservationAdapter):
                 continue
             arr = np.asarray(frame)
             target_h, target_w = int(target[0]), int(target[1])
-            resized = (
-                self._pad_resize(arr, target_h, target_w)
-                if self.pad
-                else self._stretch(arr, target_h, target_w)
+            camera = source.camera(name) if isinstance(source, ObservationSpace) else None
+            resample = (
+                _resample_depth
+                if camera is not None and camera.modality is Modality.DEPTH
+                else _resample_colour
             )
+            resized = resample(arr, target_h, target_w, pad=self.pad)
             sensors[name] = np.ascontiguousarray(resized.astype(arr.dtype))
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
-
-    def _stretch(self, arr: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-        """Anisotropic resample to (target_h, target_w): each image axis scaled alone."""
-        # H, W are the trailing image axes (index -3, -2 in a (..., H, W, C)
-        # layout); everything else (leading axes and the channel axis) is 1.0.
-        zoom_factors = [1.0] * arr.ndim
-        zoom_factors[-3] = target_h / arr.shape[-3]
-        zoom_factors[-2] = target_w / arr.shape[-2]
-        return np.asarray(zoom(arr, zoom_factors, order=self.order))
-
-    def _pad_resize(self, arr: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-        """Aspect-preserving resize-with-pad to (target_h, target_w), centred, zero-padded.
-
-        Scales the image plane by a single factor (the smaller of the two axis
-        ratios) so it fits inside the target box without distortion, then centres it
-        in a zero-filled canvas of the target H x W. Leading axes (time/batch) and
-        the trailing channel axis are preserved. Mirrors openpi's
-        `image_tools.resize_with_pad`.
-        """
-        src_h, src_w = arr.shape[-3], arr.shape[-2]
-        scale = min(target_h / src_h, target_w / src_w)
-        # Round (not floor) so a perfectly-fitting axis lands exactly on the target.
-        new_h = min(target_h, max(1, round(src_h * scale)))
-        new_w = min(target_w, max(1, round(src_w * scale)))
-        zoom_factors = [1.0] * arr.ndim
-        zoom_factors[-3] = new_h / src_h
-        zoom_factors[-2] = new_w / src_w
-        scaled = np.asarray(zoom(arr, zoom_factors, order=self.order))
-        # Centre the scaled image in a zero (black) canvas at the target size.
-        canvas_shape = (*arr.shape[:-3], target_h, target_w, arr.shape[-1])
-        canvas = np.zeros(canvas_shape, dtype=scaled.dtype)
-        top = (target_h - new_h) // 2
-        left = (target_w - new_w) // 2
-        canvas[..., top : top + new_h, left : left + new_w, :] = scaled
-        return canvas
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["ResizeCameras"]

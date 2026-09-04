@@ -6,15 +6,20 @@ different task exposes different cameras. A benchmark publishes a list of sensor
 check confirms the policy's required sensors are a subset of what the benchmark
 publishes.
 
-Depth, segmentation, and force/torque share this shape — a named, typed source —
-and can extend the `Sensor` alias without changing the types that reference it.
+Depth is a `Camera` and not a kind of its own (ADR 0007): a named, shaped, dtyped
+array read from a viewpoint is exactly what `Camera` describes, so `modality` is
+all it needs. Force/torque does not share that shape, and can extend the `Sensor`
+alias without changing the types that reference it.
 """
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from manifold.core.conventions import CameraAxes, Frame
 from manifold.lib.compat import StrEnum
 
 
@@ -26,10 +31,17 @@ class Mount(StrEnum):
 
 
 class Modality(StrEnum):
-    """What a camera measures. Implies the trailing-axis size and dtype."""
+    """What a camera measures. Implies the trailing-axis size and dtype.
 
-    RGB = "rgb"
-    DEPTH = "depth"
+    A depth camera's values are metres and its no-hit marker is `inf` — the
+    convention `manifold.replay` already fixed, adopted here rather than declared
+    as a second axis to check and bridge (ADR 0007). Both are silent when wrong:
+    millimetres, a normalised buffer, and a far-plane constant are all plausible
+    arrays that no shape check can reject.
+    """
+
+    RGB = "rgb"  # uint8 colour on the trailing axis, (H, W, 3).
+    DEPTH = "depth"  # Floating-point metres, (H, W, 1); `inf` where the ray hit nothing.
     SEGMENTATION = "segmentation"
 
 
@@ -55,6 +67,112 @@ class ChannelOrder(StrEnum):
     BGR = "bgr"
 
 
+# Relative tolerance when two declarations of one pinhole are compared. All four
+# values are derived rather than typed: `from_fov` runs a tangent, `scaled` and
+# `translated` carry the result through a resize, and a policy states the same
+# camera by whichever route its own config took. An exact comparison would refuse
+# a pairing over the last bits of that arithmetic, so compare them with a
+# relative tolerance and never for equality.
+_INTRINSICS_REL_TOL = 1e-6
+
+
+class CameraIntrinsics(BaseModel):
+    """A pinhole camera's focal lengths and principal point, in pixels.
+
+    What turns a depth frame into metric points: a pixel `(u, v)` at depth `d`
+    back-projects to `((u - cx) * d / fx, (v - cy) * d / fy, d)` in the camera's own
+    frame. Without it a depth image is a per-pixel number with no scale — the same
+    array describes a different scene at every field of view.
+
+    An ideal pinhole, with no distortion coefficients. The simulators shipped so far
+    render exactly that; a real camera's distortion is a per-unit calibration a
+    benchmark would have to publish per device rather than per model, which is a
+    different problem and is not modelled ahead of one (ADR 0008).
+
+    Compared when matching, unlike the extrinsic: a policy trained at one field of
+    view served another is being shown a differently-projected world, and a resize
+    matches pixel counts without matching focal length.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    fx: float = Field(gt=0.0, description="Focal length along x, in pixels.")
+    fy: float = Field(gt=0.0, description="Focal length along y, in pixels.")
+    cx: float = Field(description="Principal point x, in pixels from the left edge.")
+    cy: float = Field(description="Principal point y, in pixels from the declared top row.")
+
+    @classmethod
+    def from_fov(cls, *, fovy_degrees: float, height: int, width: int) -> CameraIntrinsics:
+        """Intrinsics for a renderer that describes its camera by vertical field of view.
+
+        The pinhole a vertical FOV implies: one focal length for both axes, and the
+        principal point at the image centre. This is how MuJoCo and SAPIEN describe a
+        camera, so it is how a benchmark on either derives what it publishes.
+        """
+        focal = 0.5 * height / math.tan(math.radians(fovy_degrees) * 0.5)
+        return cls(fx=focal, fy=focal, cx=width / 2.0, cy=height / 2.0)
+
+    def matrix(self) -> np.ndarray:
+        """The 3x3 K these values stand for, row-major float64."""
+        return np.array(
+            [[self.fx, 0.0, self.cx], [0.0, self.fy, self.cy], [0.0, 0.0, 1.0]], dtype=float
+        )
+
+    def scaled(self, *, x: float, y: float) -> CameraIntrinsics:
+        """The same camera resampled by `x` and `y`, which scales all four values.
+
+        Resampling an image scales the focal lengths and the principal point alike:
+        the pinhole is unchanged and only the pixel grid it is measured in moves.
+        """
+        return CameraIntrinsics(fx=self.fx * x, fy=self.fy * y, cx=self.cx * x, cy=self.cy * y)
+
+    def translated(self, *, x: float, y: float) -> CameraIntrinsics:
+        """The same camera with its principal point moved, for a crop or a pad."""
+        return CameraIntrinsics(fx=self.fx, fy=self.fy, cx=self.cx + x, cy=self.cy + y)
+
+    def is_close_to(self, other: CameraIntrinsics) -> bool:
+        """Whether `other` describes the same pinhole, to floating-point tolerance.
+
+        What matching compares, rather than `==`: all four values are derived, so
+        two correct descriptions of one camera differ in their last bits. See
+        `_INTRINSICS_REL_TOL` for why the tolerance is safe.
+        """
+        return all(
+            math.isclose(mine, theirs, rel_tol=_INTRINSICS_REL_TOL)
+            for mine, theirs in (
+                (self.fx, other.fx),
+                (self.fy, other.fy),
+                (self.cx, other.cx),
+                (self.cy, other.cy),
+            )
+        )
+
+
+class CameraCalibration(BaseModel):
+    """A camera's calibration: its intrinsics, and the conventions its pose follows.
+
+    Declaring this on a camera means the benchmark publishes that camera's 4x4
+    camera-to-`frame` extrinsic in every observation, under the camera's name (see
+    `Observation.extrinsics`). The matrix is data and lives there rather than here,
+    because a wrist camera's pose changes every step; the intrinsics and the two
+    conventions are constant and live here, where a check can compare them.
+
+    The pose is not kept on the spec even for a camera that never moves. One
+    mechanism covers both, a still camera simply repeats itself, and 16 floats a
+    step is nothing beside the depth frame they describe (ADR 0008).
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    intrinsics: CameraIntrinsics
+    axes: CameraAxes = Field(
+        default=CameraAxes.OPENCV, description="Axis convention of the camera's own frame."
+    )
+    frame: Frame = Field(
+        default=Frame.WORLD, description="The frame the extrinsic maps the camera INTO."
+    )
+
+
 class Camera(BaseModel):
     """A single camera view.
 
@@ -78,6 +196,7 @@ class Camera(BaseModel):
     modality: Modality = Modality.RGB
     orientation: CameraOrientation = CameraOrientation.UPRIGHT
     channel_order: ChannelOrder = ChannelOrder.RGB
+    calibration: CameraCalibration | None = None
 
     def example(self) -> np.ndarray:
         """A zero-filled array of this camera's shape and dtype."""
@@ -103,6 +222,8 @@ Sensor = Camera
 
 __all__ = [
     "Camera",
+    "CameraCalibration",
+    "CameraIntrinsics",
     "CameraOrientation",
     "ChannelOrder",
     "Modality",

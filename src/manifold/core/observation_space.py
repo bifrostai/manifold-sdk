@@ -21,6 +21,33 @@ from manifold.core.embodiment import Proprioception
 from manifold.core.sensor import Camera
 
 
+def _calibration_matches(wanted: Camera, offered: Camera) -> bool:
+    """Whether the offered camera supplies the calibration the wanted one consumes.
+
+    Asymmetric, like the channel comparison around it: a policy that does not
+    declare a calibration is met by a benchmark that publishes one, and never the
+    reverse. When both declare it, a field of view is not bridgeable by a resize
+    and an axis or frame mismatch is the silent kind, so both have to agree
+    (ADR 0008).
+
+    The two halves are compared differently. `axes` and `frame` are
+    closed sets the SDK defines, so equality is the whole question. The four
+    intrinsics are derived floats — a benchmark reaches them through `from_fov`, an
+    adapter through `scaled` — so two correct descriptions of one camera differ in
+    their last bits, and comparing those exactly would refuse a pairing over an error
+    smaller than the arithmetic that produced it. `is_close_to` carries the tolerance.
+    """
+    if wanted.calibration is None:
+        return True
+    if offered.calibration is None:
+        return False
+    return (
+        wanted.calibration.axes == offered.calibration.axes
+        and wanted.calibration.frame == offered.calibration.frame
+        and wanted.calibration.intrinsics.is_close_to(offered.calibration.intrinsics)
+    )
+
+
 def _camera_conventions_match(wanted: Camera, offered: Camera) -> bool:
     """Whether the consumed convention axes agree (mount excluded — it is provenance)."""
     return (
@@ -29,6 +56,7 @@ def _camera_conventions_match(wanted: Camera, offered: Camera) -> bool:
         and wanted.shape == offered.shape
         and wanted.dtype == offered.dtype
         and wanted.modality == offered.modality
+        and _calibration_matches(wanted, offered)
     )
 
 

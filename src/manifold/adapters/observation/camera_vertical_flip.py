@@ -18,6 +18,12 @@ This is a PURE vertical flip (the height axis only), distinct from
 Using the rotation where only a vertical mirror is wanted would add a spurious
 left-right swap; the two are not interchangeable.
 
+A camera's calibration passes through untouched, for the reason `Rotate180Cameras`
+gives: reversing an array's rows re-labels which row is row 0 and does not move the
+camera. The flip is in fact what makes an OpenCV calibration VALID for a benchmark that
+renders bottom-up, which is the common case in MuJoCo — the intrinsics assume row 0 is
+the top, and this is the adapter that makes that true (ADR 0008).
+
 Everything else about the observation — the proprioception, the instruction, and
 any cameras not named — passes through.
 
@@ -28,6 +34,7 @@ Parameterized by the camera names to flip: `FlipVerticalCameras(cameras=
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -78,7 +85,7 @@ class FlipVerticalCameras(ObservationAdapter):
         A camera that is absent from `observation.sensors` is skipped, so the
         adapter is safe to point at a superset of the cameras a given observation
         carries. The flip reverses the height (row) axis of the HWC array only and
-        keeps the result C-contiguous uint8.
+        keeps the result C-contiguous, preserving dtype.
         """
         sensors = dict(observation.sensors)
         for name in self.cameras:
@@ -86,10 +93,9 @@ class FlipVerticalCameras(ObservationAdapter):
             if frame is None:
                 continue
             flipped = np.asarray(frame)[::-1, :, :]  # vertical: reverse the height axis only
-            sensors[name] = np.ascontiguousarray(flipped)  # preserve dtype (cf. SwapChannelOrder)
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
+            sensors[name] = np.ascontiguousarray(flipped)  # preserve dtype
+        # `replace` carries the poses through unchanged: the camera did not move.
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["FlipVerticalCameras"]

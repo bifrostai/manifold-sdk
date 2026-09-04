@@ -10,7 +10,30 @@ code drives a socket, a pipe, or a test buffer.
 
 `BRIDGE_PROTOCOL_VERSION` marks the frame-and-codec contract; bump it when the
 frame types, payload layout, or stream framing change in a way the other side must
-agree on. The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
+agree on.
+
+What makes a change additive is where it goes, and the rule is exact, because
+`decode_observation` reads its supported keys through `.get()` with a default and
+never validates the payload's key set:
+
+    A new TOP-LEVEL payload key is additive. A new wrapper kind inside a dict a
+    peer already iterates is not.
+
+Version 3's `extrinsics` is the additive case: a peer built before the
+key skips it and loses only the poses. Version 2's depth was the other case, and
+the reason a published policy could not be paired with an RGB-D benchmark at all
+— it put an `__ndarray__` wrapper under `sensors`, which every peer already walks
+and decodes unconditionally, so a version-1 peer raised on the first observation
+of every run rather than ignoring a channel it does not consume.
+
+Version 4 moves depth to its own top-level `depth` key, which brings it under the
+rule. `Observation` is unchanged — depth is still a camera in `sensors` to both
+benchmark and policy authors (ADR 0007), and only the payload keeps the two apart,
+so an old peer sees a colour-only `sensors` and runs. The key is omitted for an
+observation without depth, and `_decode_sensor` still accepts an `__ndarray__`
+node under `sensors`, so version 2 and 3 payloads decode unchanged.
+
+The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
 synchronous peer round-trips identically without a version bump.
 
@@ -46,7 +69,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # The frame-and-codec contract version. Bump when that contract changes.
-BRIDGE_PROTOCOL_VERSION = 1
+BRIDGE_PROTOCOL_VERSION = 4
 
 # A length prefix is a 4-byte big-endian unsigned integer, so a single frame is
 # capped at 4 GiB by the wire format alone — far above any real payload.
@@ -79,26 +102,74 @@ def _attach_rtc_fields(
         payload["timestep"] = int(timestep)
 
 
-def _encode_image(array: np.ndarray, image_format: ImageFormat) -> dict[str, Any]:
-    """Encode one sensor array as an `__image__` wrapper in the chosen format."""
+def _encode_colour(array: np.ndarray, image_format: ImageFormat, *, name: str) -> dict[str, Any]:
+    """Encode a uint8 colour frame as an `__image__` wrapper in the chosen format."""
     shape = list(array.shape)
     if image_format == "raw":
-        if array.dtype != np.uint8:
-            raise ValueError(
-                f"raw image encoding requires a uint8 array, got {array.dtype}; "
-                "compressed or non-uint8 (e.g. depth) sensors are future work"
-            )
         return pack_encoded_image(array.tobytes(), format_="raw", shape=shape)
     if image_format in ("jpeg", "png"):
         data = _compress_image(array, image_format)
         return pack_encoded_image(data, format_=image_format, shape=shape)
-    raise ValueError(f"unsupported image_format {image_format!r}: use 'raw', 'jpeg', or 'png'")
+    raise ValueError(
+        f"sensor {name!r}: unsupported image_format {image_format!r}: use 'raw', 'jpeg', or 'png'"
+    )
 
 
-def _decode_image(name: str, node: Any) -> np.ndarray:
-    """Decode one `__image__` wrapper node back into a numpy array."""
-    if not isinstance(node, dict) or node.get("__image__") is not True:
-        raise ValueError(f"sensor {name!r} is not an image wrapper")
+def _encode_sensor(array: np.ndarray, image_format: ImageFormat, *, name: str) -> dict[str, Any]:
+    """Encode one sensor array: uint8 colour as an image, float depth as metres.
+
+    The dtype chooses, as it does in `replay.log`: uint8 is a colour frame and
+    goes through `image_format`, floating-point is depth in metres and is encoded as
+    an `__ndarray__` wrapper at its own dtype, losslessly (ADR 0007). Anything
+    else, and any float array shaped like colour, is refused rather than sent as
+    the other kind — a payload records no per-sensor kind, so a reader has only
+    the wrapper and the dtype to go on.
+
+    Raises:
+        ValueError: If the array is neither a colour nor a depth frame, its dtype
+            is one the wire does not carry, or `image_format` is not a recognised
+            format.
+        ImportError: If "jpeg" or "png" is requested but Pillow is not installed.
+    """
+    if array.dtype == np.uint8:
+        return _encode_colour(array, image_format, name=name)
+    if array.dtype.kind != "f":
+        raise ValueError(
+            f"sensor {name!r} has dtype {array.dtype}: a colour frame is uint8 and a depth "
+            "frame is floating-point metres"
+        )
+    if array.ndim == 3 and array.shape[2] in (3, 4):
+        raise ValueError(
+            f"sensor {name!r} is floating-point with shape {list(array.shape)}: a depth frame "
+            "has one channel, so convert a colour frame to uint8"
+        )
+    # The wire dtype follows the array's own, so a benchmark declaring float16
+    # depth halves its payload without a second option to select.
+    return pack_ndarray(
+        array.reshape(-1),
+        dtype=array.dtype.newbyteorder("<").str,
+        shape=list(array.shape),
+    )
+
+
+def _decode_depth(name: str, node: Any) -> np.ndarray:
+    """Decode an `__ndarray__` depth node, at the dtype it was sent at.
+
+    Not via `_decode_state_array`, which coerces to float32: a depth frame's dtype
+    is declared on its `Camera`, and narrowing or widening it here would hand the
+    consumer an array its own spec rejects. Writable and native-endian for the
+    reason that decoder gives.
+    """
+    array = unpack_ndarray_full(node)
+    if array is None:
+        raise ValueError(f"sensor {name!r} is not a decodable ndarray wrapper")
+    return np.array(array, dtype=array.dtype.newbyteorder("="))
+
+
+def _decode_colour(name: str, node: dict[str, Any]) -> np.ndarray:
+    """Decode one `__image__` wrapper node back into a uint8 array."""
+    if node.get("__image__") is not True:
+        raise ValueError(f"sensor {name!r} is neither an image nor an ndarray wrapper")
     data = node.get("data")
     fmt = node.get("format")
     if not isinstance(data, (bytes, bytearray)) or not isinstance(fmt, str):
@@ -109,6 +180,44 @@ def _decode_image(name: str, node: Any) -> np.ndarray:
     if fmt in ("jpeg", "png"):
         return _decompress_image(bytes(data))
     raise ValueError(f"sensor {name!r} has unsupported image format {fmt!r}")
+
+
+def _encode_extrinsic(name: str, matrix: np.ndarray) -> dict[str, Any]:
+    """Encode one camera pose as an `__ndarray__` wrapper, shape checked here.
+
+    A pose is 4x4 by construction and a caller that sends something else has a bug
+    the far side cannot diagnose: every consumer slices `[:3, :3]` and `[:3, 3]`, so a
+    wrong shape becomes a wrong rotation rather than an error.
+    """
+    array = np.asarray(matrix, dtype=np.float64)
+    if array.shape != (4, 4):
+        raise ValueError(f"extrinsic {name!r} must be 4x4, got {list(array.shape)}")
+    return pack_ndarray(array.reshape(-1), dtype="<f8", shape=[4, 4])
+
+
+def _decode_extrinsic(name: str, node: Any) -> np.ndarray:
+    """Decode one `__ndarray__` camera pose, shape checked as on the way out."""
+    array = unpack_ndarray_full(node)
+    if array is None:
+        raise ValueError(f"extrinsic {name!r} is not a decodable ndarray wrapper")
+    if array.shape != (4, 4):
+        raise ValueError(f"extrinsic {name!r} decoded to {list(array.shape)}, expected 4x4")
+    return np.array(array, dtype=np.float64)
+
+
+def _decode_sensor(name: str, node: Any) -> np.ndarray:
+    """Decode one sensor node back into an array, colour or depth.
+
+    The inverse of `_encode_sensor`: an `__image__` wrapper is a colour frame, an
+    `__ndarray__` wrapper is depth. Which marker is present decides, so neither
+    side has to record a per-sensor kind.
+    """
+    if not isinstance(node, dict):
+        # Malformed frame value, not a type misuse — see decode_observation.
+        raise ValueError(f"sensor {name!r} is not an encoded sensor")  # noqa: TRY004
+    if node.get("__ndarray__") is True:
+        return _decode_depth(name, node)
+    return _decode_colour(name, node)
 
 
 def _decode_raw_image(name: str, data: bytes, shape: Any) -> np.ndarray:
@@ -199,15 +308,20 @@ def encode_observation(
     """Encode an Observation into a frame payload.
 
     `state` arrays are encoded as `__ndarray__` wrappers keyed by role, `sensors`
-    arrays as `__image__` wrappers keyed by sensor name, and the instruction
-    passes through unchanged. `image_format` selects the sensor encoding: "raw"
-    (the default) stores the uint8 image bytes losslessly with no third-party
-    dependency, while "jpeg" and "png" compress via Pillow and require the
-    `images` extra.
+    arrays keyed by sensor name, and the instruction passes through unchanged.
+    `image_format` selects the encoding for *colour* sensors: "raw" (the default)
+    stores the uint8 image bytes losslessly with no third-party dependency, while
+    "jpeg" and "png" compress via Pillow and require the `images` extra.
 
-    Raw assumes uint8 RGB camera arrays; compressed and non-uint8 sensors (e.g.
-    float depth) are future work, so a non-uint8 raw sensor is rejected rather
-    than silently cast.
+    A floating-point sensor is depth in metres and is encoded as an `__ndarray__`
+    wrapper at its own dtype, losslessly, whatever `image_format` says (ADR 0007).
+    Any other dtype, and any float array shaped like colour, is refused rather
+    than sent as the other kind.
+
+    `extrinsics` are 4x4 camera poses keyed by camera name, each an `__ndarray__`
+    wrapper at float64 — a pose is geometry rather than network input, so
+    it keeps full precision (ADR 0008). The key is omitted entirely when the
+    observation carries none.
 
     `action_prefix` and `timestep` are forward-looking RTC fields (see the module
     docstring). The current synchronous loop passes neither, so the payload omits
@@ -217,21 +331,35 @@ def encode_observation(
 
     Raises:
         ImportError: If "jpeg" or "png" is requested but Pillow is not installed.
-        ValueError: If `image_format` is not a recognized format, or a "raw"
-            sensor array is not uint8.
+        ValueError: If `image_format` is not a recognised format, or a sensor
+            array is neither a uint8 colour frame nor a float depth frame.
     """
     state = {
         role: pack_ndarray(array.reshape(-1).tolist(), shape=list(array.shape))
         for role, array in observation.state.items()
     }
-    sensors = {
-        name: _encode_image(array, image_format) for name, array in observation.sensors.items()
+    # One encode per sensor, then routed by the wrapper it produced: `_encode_sensor`
+    # stays the single place that validates a sensor and picks its wrapper, and this
+    # only decides which key carries the result.
+    encoded = {
+        name: _encode_sensor(array, image_format, name=name)
+        for name, array in observation.sensors.items()
     }
+    sensors = {name: node for name, node in encoded.items() if "__image__" in node}
+    depth = {name: node for name, node in encoded.items() if "__ndarray__" in node}
     payload: dict[str, Any] = {
         "state": state,
         "sensors": sensors,
         "instruction": observation.instruction,
     }
+    # Omitted entirely for an observation without depth, so a colour-only
+    # benchmark's payload is byte-identical to the one it sent before version 4.
+    if depth:
+        payload["depth"] = depth
+    if observation.extrinsics:
+        payload["extrinsics"] = {
+            name: _encode_extrinsic(name, matrix) for name, matrix in observation.extrinsics.items()
+        }
     _attach_rtc_fields(payload, action_prefix=action_prefix, timestep=timestep)
     return payload
 
@@ -263,9 +391,28 @@ def decode_observation(payload: dict[str, Any]) -> Observation:
     raw_sensors = payload.get("sensors", {})
     if not isinstance(raw_sensors, dict):
         raise ValueError("observation 'sensors' must be a dict")  # noqa: TRY004
-    sensors = {name: _decode_image(name, node) for name, node in raw_sensors.items()}
+    sensors = {name: _decode_sensor(name, node) for name, node in raw_sensors.items()}
 
-    return Observation(state=state, sensors=sensors, instruction=payload.get("instruction"))
+    # Depth rejoins `sensors` here: it is a camera to everything above the wire (ADR
+    # 0007), and only the payload keeps the two apart. `_decode_sensor` still reads an
+    # `__ndarray__` node under `sensors`, so a version-2 or -3 peer's payload — which
+    # put depth there — decodes unchanged.
+    raw_depth = payload.get("depth", {})
+    if not isinstance(raw_depth, dict):
+        raise ValueError("observation 'depth' must be a dict")  # noqa: TRY004
+    sensors.update({name: _decode_depth(name, node) for name, node in raw_depth.items()})
+
+    raw_extrinsics = payload.get("extrinsics", {})
+    if not isinstance(raw_extrinsics, dict):
+        raise ValueError("observation 'extrinsics' must be a dict")  # noqa: TRY004
+    extrinsics = {name: _decode_extrinsic(name, node) for name, node in raw_extrinsics.items()}
+
+    return Observation(
+        state=state,
+        sensors=sensors,
+        extrinsics=extrinsics,
+        instruction=payload.get("instruction"),
+    )
 
 
 def encode_action(

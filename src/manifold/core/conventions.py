@@ -61,6 +61,26 @@ class GripperFormat(StrEnum):
     BINARY_OPEN_LOW = "binary_open_low"
 
 
+class CameraAxes(StrEnum):
+    """Axis convention a camera's own frame follows.
+
+    A camera pose is a plausible 4x4 matrix under either convention and the two
+    differ by a 180-degree turn about the horizontal axis, so mistaking one for the
+    other points the camera backwards through the scene it is meant to see, with
+    nothing to raise. Named here for the same reason gripper polarity is.
+
+    The intrinsic matrix shares the convention: a principal point measured down
+    from the top row only means that under OPENCV.
+    """
+
+    # +X right, +Y down, +Z along the view direction. What OpenCV calibrates to,
+    # and what `rerun` calls RDF.
+    OPENCV = "opencv"
+    # +X right, +Y up, -Z along the view direction. What OpenGL and MuJoCo's own
+    # camera bodies use, and what `rerun` calls RUB.
+    OPENGL = "opengl"
+
+
 class Frame(StrEnum):
     """Reference frame an end-effector pose or delta is expressed in.
 
@@ -115,6 +135,7 @@ def check_length(value: Any, expected: int, label: str) -> None:
 
 
 __all__ = [
+    "CameraAxes",
     "Frame",
     "GripperFormat",
     "RotationFormat",

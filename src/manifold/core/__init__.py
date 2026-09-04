@@ -15,7 +15,7 @@ from manifold.core.adapter import (
 )
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import Compatibility, Report, check_compatibility
-from manifold.core.conventions import Frame, GripperFormat, RotationFormat
+from manifold.core.conventions import CameraAxes, Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     ActionSpace,
     EEActionSpace,
@@ -43,7 +43,16 @@ from manifold.core.native_layout import (
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.pipeline import Pack, Pipeline, Unpack
 from manifold.core.policy import PolicySignature
-from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder, Modality, Mount, Sensor
+from manifold.core.sensor import (
+    Camera,
+    CameraCalibration,
+    CameraIntrinsics,
+    CameraOrientation,
+    ChannelOrder,
+    Modality,
+    Mount,
+    Sensor,
+)
 from manifold.core.state import DEFAULT_LANE, LaneKey, PipelineState
 from manifold.core.values import Action, Observation
 from manifold.core.verify import VerifyCheck, VerifyReport, verify
@@ -57,6 +66,9 @@ __all__ = [
     "BatchAxis",
     "Benchmark",
     "Camera",
+    "CameraAxes",
+    "CameraCalibration",
+    "CameraIntrinsics",
     "CameraOrientation",
     "ChannelKind",
     "ChannelOrder",

@@ -1,14 +1,20 @@
+import numpy as np
+
 from manifold.adapters.action import BasePinWiden, GripperPolarityAdapter
 from manifold.adapters.observation import Rotate180Cameras
 from manifold.benchmarks.libero import LIBERO
 from manifold.core import (
     Benchmark,
     Camera,
+    CameraAxes,
+    CameraCalibration,
+    CameraIntrinsics,
     CameraOrientation,
     Compatibility,
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
+    Frame,
     GripperFormat,
     GripperObservationSpec,
     JointActionSpace,
@@ -309,3 +315,129 @@ def test_base_pin_widen_does_not_apply_to_a_full_width_action() -> None:
         delta=True,
     )
     assert not BasePinWiden(width=7).applies(wide_arm)
+
+
+def _libero_policy(*, cameras: list[Camera]) -> PolicySignature:
+    """A signature that pairs with LIBERO on everything except the cameras given."""
+    return PolicySignature(
+        action_space=_ee(gripper=GripperFormat.SIGNED_OPEN_LOW),
+        proprioception=Proprioception(
+            ee_pose=EEObservationSpec(
+                rotation=RotationFormat.QUATERNION,
+                gripper=GripperObservationSpec(dim=2),
+            ),
+        ),
+        cameras=cameras,
+        instruction=True,
+    )
+
+
+def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
+    # LIBERO publishes metric depth beside each colour view. `first_unmet` iterates the
+    # cameras the POLICY consumes, so channels it declares none of cannot affect it —
+    # which is what makes publishing depth additive rather than a new benchmark
+    # identity (ADR 0007).
+    policy = _libero_policy(cameras=[Camera(name="agentview", shape=(256, 256, 3))])
+    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+
+
+def _calibration(
+    *, fovy: float = 45.0, axes: CameraAxes = CameraAxes.OPENCV, frame: Frame = Frame.WORLD
+) -> CameraCalibration:
+    return CameraCalibration(
+        intrinsics=CameraIntrinsics.from_fov(fovy_degrees=fovy, height=256, width=256),
+        axes=axes,
+        frame=frame,
+    )
+
+
+def test_a_policy_wanting_no_calibration_pairs_with_a_benchmark_publishing_it() -> None:
+    # Asymmetric, like every other channel comparison: LIBERO declares calibration on
+    # all four cameras and a policy that declares none is unaffected (ADR 0008).
+    policy = _libero_policy(cameras=[Camera(name="agentview", shape=(256, 256, 3))])
+    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+
+
+def test_a_field_of_view_mismatch_is_incompatible() -> None:
+    # The gap a resize cannot close: same pixels, different projection. Without this
+    # comparison the policy is fed a differently-projected world with nothing to say so.
+    policy = _libero_policy(
+        cameras=[Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration(fovy=60.0))]
+    )
+    report = check_compatibility(policy, LIBERO)
+    assert report.status is Compatibility.INCOMPATIBLE
+    assert any("agentview" in reason and "conventions" in reason for reason in report.reasons)
+
+
+def _camera_space(calibration: CameraCalibration) -> ObservationSpace:
+    """One calibrated agentview, for comparing two descriptions of the same camera."""
+    return ObservationSpace(
+        cameras=(Camera(name="agentview", shape=(256, 256, 3), calibration=calibration),)
+    )
+
+
+def test_the_same_camera_stated_at_single_precision_pairs() -> None:
+    # The false negative an exact comparison produces: two descriptions of one camera
+    # differing in the eighth digit, because one of them was stored at float32. A
+    # resize cannot bridge a field of view, but this is not one — it is the arithmetic
+    # that wrote the number down. Compared at the spec, so it pins the comparison
+    # rather than what the catalogue happens to declare.
+    exact = _calibration()
+    rounded = CameraCalibration(
+        intrinsics=CameraIntrinsics(
+            fx=float(np.float32(exact.intrinsics.fx)),
+            fy=float(np.float32(exact.intrinsics.fy)),
+            cx=float(np.float32(exact.intrinsics.cx)),
+            cy=float(np.float32(exact.intrinsics.cy)),
+        )
+    )
+    assert rounded != exact
+    assert _camera_space(rounded).first_unmet(_camera_space(exact)) is None
+
+
+def test_a_hundredth_of_a_degree_of_field_of_view_is_still_incompatible() -> None:
+    # The tolerance absorbs how a number was written down, not what it says. A field
+    # of view out by a hundredth of a degree moves the focal length by 2.5e-4 of
+    # itself — 250 times the tolerance — so the comparison that matters is untouched.
+    wanted = _camera_space(_calibration(fovy=45.01))
+    assert wanted.first_unmet(_camera_space(_calibration())) == (
+        "camera 'agentview': conventions differ"
+    )
+
+
+def test_a_policy_wanting_calibration_is_unmet_by_a_benchmark_without_it() -> None:
+    # The other direction of the asymmetry: a policy requiring the camera's pose and
+    # projection is not served by a benchmark that declares neither.
+    wanted = ObservationSpace(
+        cameras=(Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration()),)
+    )
+    offered = ObservationSpace(cameras=(Camera(name="agentview", shape=(256, 256, 3)),))
+    assert wanted.first_unmet(offered) == "camera 'agentview': conventions differ"
+
+
+def test_an_axis_convention_mismatch_is_incompatible() -> None:
+    # The silent one: a plausible 4x4 under either convention, pointing the camera
+    # backwards under the wrong one.
+    policy = _libero_policy(
+        cameras=[
+            Camera(
+                name="agentview",
+                shape=(256, 256, 3),
+                calibration=_calibration(axes=CameraAxes.OPENGL),
+            )
+        ]
+    )
+    assert check_compatibility(policy, LIBERO).status is Compatibility.INCOMPATIBLE
+
+
+def test_an_extrinsic_frame_mismatch_is_incompatible() -> None:
+    # LIBERO publishes camera-to-world; a policy requiring base-frame poses needs a
+    # transform nothing in the catalogue supplies yet, so the pairing must not claim to work.
+    policy = _libero_policy(
+        cameras=[
+            Camera(
+                name="agentview", shape=(256, 256, 3), calibration=_calibration(frame=Frame.BASE)
+            )
+        ]
+    )
+    assert check_compatibility(policy, LIBERO).status is Compatibility.INCOMPATIBLE
