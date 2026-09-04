@@ -48,16 +48,41 @@ class Modality(StrEnum):
 class CameraOrientation(StrEnum):
     """Image orientation relative to an upright scene.
 
-    A mismatch is silent and plausible — a valid-looking but upside-down frame
-    that sails through a shape check — so it is a declared, checkable convention
-    (the pattern gripper polarity already set). It is lossless-bridgeable by a
-    flip adapter (a 180-degree rotation or a pure vertical flip), or else
-    INCOMPATIBLE.
+    An upside-down frame has the right shape, so a shape check will not catch it;
+    declaring the orientation makes the mismatch visible. The rows and the columns are
+    the only two things that can be reversed, so these four are every possible
+    orientation.
     """
 
     UPRIGHT = "upright"  # row 0 = top of the scene.
     ROTATED_180 = "rotated_180"  # rows and columns reversed (a 180-degree flip).
     FLIPPED_VERTICAL = "flipped_vertical"  # rows reversed only (a top-bottom mirror).
+    FLIPPED_HORIZONTAL = "flipped_horizontal"  # columns reversed only (a left-right mirror).
+
+    def flipped(self, by: CameraOrientation) -> CameraOrientation:
+        """This orientation with `by`'s mirrors applied to it.
+
+        An orientation is two yes/no facts — rows reversed, columns reversed — so
+        combining two of them is an XOR of each fact. That lets one adapter handle any
+        starting orientation instead of only the `UPRIGHT -> X` case.
+        """
+        mine, theirs = _ORIENTATION_MIRRORS[self], _ORIENTATION_MIRRORS[by]
+        return _MIRRORS_ORIENTATION[(mine[0] ^ theirs[0], mine[1] ^ theirs[1])]
+
+
+# Each orientation as (rows reversed, columns reversed) against an upright scene, and
+# the way back. Kept beside the enum rather than inside it because a StrEnum member's
+# value is its wire form, and these axes are the algebra over the members, not data on
+# one: `flipped` is the only reader.
+_ORIENTATION_MIRRORS: dict[CameraOrientation, tuple[bool, bool]] = {
+    CameraOrientation.UPRIGHT: (False, False),
+    CameraOrientation.FLIPPED_VERTICAL: (True, False),
+    CameraOrientation.FLIPPED_HORIZONTAL: (False, True),
+    CameraOrientation.ROTATED_180: (True, True),
+}
+_MIRRORS_ORIENTATION: dict[tuple[bool, bool], CameraOrientation] = {
+    mirrors: orientation for orientation, mirrors in _ORIENTATION_MIRRORS.items()
+}
 
 
 class ChannelOrder(StrEnum):

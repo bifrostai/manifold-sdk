@@ -1,9 +1,8 @@
-"""Flip named camera images top-to-bottom on the observation side.
+"""Mirror named camera images left-to-right on the observation side.
 
-Reverses the row order of each named camera image and updates the camera's declared
-`orientation` to match, so the compatibility check can see the flip. Rows only —
-`Rotate180Cameras` reverses the columns too — and no pixel values change, so the
-calibration is left alone (ADR 0008).
+Reverses the column order of each named camera image and updates the camera's declared
+`orientation` to match. Nothing asks for this flip directly, but a bottom-up frame
+rotated 180 degrees lands on it, so that state needs an adapter of its own.
 """
 
 from __future__ import annotations
@@ -21,13 +20,13 @@ from manifold.core.sensor import CameraOrientation
 from manifold.core.values import Observation
 
 
-class FlipVerticalCameras(ObservationAdapter):
-    """Flip the named camera channels top-to-bottom and set their declared orientation."""
+class FlipHorizontalCameras(ObservationAdapter):
+    """Mirror the named camera channels left-to-right and advance their orientation."""
 
     from_spec: ClassVar[type[BaseModel]] = ObservationSpace
     to_spec: ClassVar[type[BaseModel]] = ObservationSpace
     lossless: ClassVar[bool] = True
-    operation: ClassVar[CameraOrientation] = CameraOrientation.FLIPPED_VERTICAL
+    operation: ClassVar[CameraOrientation] = CameraOrientation.FLIPPED_HORIZONTAL
 
     def __init__(self, cameras: Sequence[str]) -> None:
         self.cameras = tuple(cameras)
@@ -44,9 +43,9 @@ class FlipVerticalCameras(ObservationAdapter):
         return any(source.camera(name) is not None for name in self.cameras)
 
     def produce(self, source: BaseModel) -> ObservationSpace:
-        """The same spec with each named camera mirrored top-to-bottom."""
+        """The same spec with each named camera mirrored left-to-right."""
         if not isinstance(source, ObservationSpace):
-            raise TypeError("FlipVerticalCameras transforms an ObservationSpace source only")
+            raise TypeError("FlipHorizontalCameras transforms an ObservationSpace source only")
         out = source
         for name in self.cameras:
             camera = source.camera(name)
@@ -59,24 +58,22 @@ class FlipVerticalCameras(ObservationAdapter):
         return out
 
     def adapt(self, observation: Any, *, source: BaseModel) -> Observation:
-        """Flip each named camera top-to-bottom; other sensors and state pass through.
+        """Mirror each named camera left-to-right; other sensors and state pass through.
 
-        A camera that is absent from `observation.sensors` is skipped, so the
-        adapter is safe to point at a superset of the cameras a given observation
-        carries. The flip reverses the height (row) axis of the HWC array only and
-        keeps the result C-contiguous, preserving dtype. The axis is addressed from
-        the end of the shape, so a stacked rank-4 clip is flipped per frame rather
-        than having its time axis reversed.
+        A camera that is absent from `observation.sensors` is skipped, so the adapter is
+        safe to point at a superset of the cameras a given observation carries. The width
+        axis is addressed from the end of the shape, so a stacked rank-4 clip is mirrored
+        per frame rather than along some other axis.
         """
         sensors = dict(observation.sensors)
         for name in self.cameras:
             frame = sensors.get(name)
             if frame is None:
                 continue
-            flipped = np.asarray(frame)[..., ::-1, :, :]  # vertical: the height axis only
-            sensors[name] = np.ascontiguousarray(flipped)  # preserve dtype
+            mirrored = np.asarray(frame)[..., :, ::-1, :]  # horizontal: the width axis only
+            sensors[name] = np.ascontiguousarray(mirrored)  # preserve dtype
         # `replace` carries the poses through unchanged: the camera did not move.
         return replace(observation, sensors=sensors)
 
 
-__all__ = ["FlipVerticalCameras"]
+__all__ = ["FlipHorizontalCameras"]

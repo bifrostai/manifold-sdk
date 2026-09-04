@@ -4,12 +4,15 @@ Covers PART A (SwapChannelOrder, ResizeCameras) and PART B (tap) of the
 adapter-layer workstreams.
 """
 
+from dataclasses import fields
+
 import numpy as np
 import pytest
 
 from manifold.adapters import ActionTap, ObservationTap
 from manifold.adapters.action import GripperThresholdAdapter
 from manifold.adapters.observation import (
+    FlipHorizontalCameras,
     FlipVerticalCameras,
     FrameRebaseAdapter,
     ResizeCameras,
@@ -540,3 +543,154 @@ def test_a_vertical_flip_keeps_the_pose_too() -> None:
         source=source,
     )
     np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+
+
+# --- PART C: camera orientation as a closed vocabulary ------------------------
+
+UP = CameraOrientation.UPRIGHT
+R180 = CameraOrientation.ROTATED_180
+FV = CameraOrientation.FLIPPED_VERTICAL
+FH = CameraOrientation.FLIPPED_HORIZONTAL
+
+
+def _oriented(
+    orientation: CameraOrientation, shape: tuple[int, ...] = (2, 3, 3)
+) -> ObservationSpace:
+    return ObservationSpace(
+        cameras=(Camera(name="agentview", shape=shape, orientation=orientation),)
+    )
+
+
+def _frame(observation: Observation) -> np.ndarray:
+    return np.asarray(observation.sensors["agentview"])
+
+
+def _observation(frame: np.ndarray) -> Observation:
+    return Observation(state={}, sensors={"agentview": frame}, instruction=None)
+
+
+def test_the_orientations_are_closed_under_composition() -> None:
+    # The four are the two independent mirrors under composition, so composing any
+    # pair lands on a member (closure), doing it twice returns the original (every
+    # member is its own inverse), and UPRIGHT is the identity. A vocabulary missing
+    # one of the four would break closure, which is what the fourth member fixes.
+    for a in CameraOrientation:
+        assert a.flipped(UP) is a
+        for b in CameraOrientation:
+            assert a.flipped(b) in set(CameraOrientation)
+            assert a.flipped(b).flipped(b) is a
+
+
+@pytest.mark.parametrize(
+    "adapter,source,target",
+    [
+        # The two edges that existed before this vocabulary closed: unchanged.
+        (Rotate180Cameras(cameras=("agentview",)), UP, R180),
+        (FlipVerticalCameras(cameras=("agentview",)), UP, FV),
+        # ... and the ones only composition can express.
+        (Rotate180Cameras(cameras=("agentview",)), FV, FH),
+        (Rotate180Cameras(cameras=("agentview",)), R180, UP),
+        (Rotate180Cameras(cameras=("agentview",)), FH, FV),
+        (FlipVerticalCameras(cameras=("agentview",)), FV, UP),
+        (FlipVerticalCameras(cameras=("agentview",)), R180, FH),
+        (FlipVerticalCameras(cameras=("agentview",)), FH, R180),
+        (FlipHorizontalCameras(cameras=("agentview",)), UP, FH),
+        (FlipHorizontalCameras(cameras=("agentview",)), FV, R180),
+        (FlipHorizontalCameras(cameras=("agentview",)), R180, FV),
+        (FlipHorizontalCameras(cameras=("agentview",)), FH, UP),
+    ],
+)
+def test_an_orientation_edge_composes_onto_whatever_the_source_declares(
+    adapter, source, target
+) -> None:
+    # The whole table, so a change to the composition cannot pass by only covering
+    # the UPRIGHT row. The first two rows are the pre-existing edges: this is also
+    # the regression guard that generalising did not move them.
+    space = _oriented(source)
+    assert adapter.applies(space)
+    assert adapter.produce(space).camera("agentview").orientation is target
+
+
+def test_a_flip_bridges_a_benchmark_that_publishes_bottom_up_frames() -> None:
+    # The case the old `is UPRIGHT` precondition could not express, and the reason
+    # this change exists: a benchmark that ships FLIPPED_VERTICAL frames against a
+    # policy trained on upright ones. Before, no edge left FLIPPED_VERTICAL at all.
+    benchmark = _benchmark(Camera(name="agentview", shape=(2, 3, 3), orientation=FV))
+    signature = PolicySignature(
+        action_space=_ee(),
+        proprioception=benchmark.embodiment.proprioception,
+        cameras=[Camera(name="agentview", shape=(2, 3, 3), orientation=UP)],
+        instruction=False,
+    )
+    pipeline = Pipeline(observation=[FlipVerticalCameras(cameras=("agentview",))])
+    report = check_compatibility(signature, benchmark, pipeline)
+    assert report.status is Compatibility.COMPATIBLE_VIA_PIPELINE
+    assert report.lossless
+
+
+def test_each_flip_reverses_only_its_own_axis() -> None:
+    # Distinctness: the rotation is the composition of the two mirrors, so using one
+    # where another is wanted adds a spurious swap. Pinned on an asymmetric frame.
+    frame = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
+    source = _oriented(UP)
+    vertical = _frame(
+        FlipVerticalCameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+    )
+    horizontal = _frame(
+        FlipHorizontalCameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+    )
+    rotated = _frame(
+        Rotate180Cameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+    )
+    np.testing.assert_array_equal(vertical, frame[::-1, :, :])
+    np.testing.assert_array_equal(horizontal, frame[:, ::-1, :])
+    np.testing.assert_array_equal(rotated, frame[::-1, ::-1, :])
+    # The rotation IS the two mirrors composed.
+    np.testing.assert_array_equal(rotated, vertical[:, ::-1, :])
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        FlipVerticalCameras(cameras=("agentview",)),
+        FlipHorizontalCameras(cameras=("agentview",)),
+        Rotate180Cameras(cameras=("agentview",)),
+    ],
+    ids=["FlipVertical", "FlipHorizontal", "Rotate180"],
+)
+def test_a_flip_carries_through_every_field_it_does_not_touch(adapter) -> None:
+    # A flip rearranges an array and moves nothing else about the observation, so
+    # every other field arrives as the object that went in. Written against `fields`
+    # rather than a list of names: an adapter that rebuilds the value from an explicit
+    # field list drops a field added to `Observation` afterwards, silently and in every
+    # adapter at once, and this asserts the property rather than today's field list.
+    observation = Observation(
+        state={"ee_pose": np.zeros(7, dtype=np.float32)},
+        sensors={"agentview": np.zeros((2, 3, 3), dtype=np.uint8)},
+        instruction="pick up the mug",
+    )
+    result = adapter.adapt(observation, source=_oriented(UP))
+    for field in fields(Observation):
+        if field.name == "sensors":
+            continue
+        assert getattr(result, field.name) is getattr(observation, field.name), field.name
+
+
+@pytest.mark.parametrize(
+    "adapter,expected",
+    [
+        (FlipVerticalCameras(cameras=("agentview",)), lambda a: a[:, ::-1, :, :]),
+        (FlipHorizontalCameras(cameras=("agentview",)), lambda a: a[:, :, ::-1, :]),
+        (Rotate180Cameras(cameras=("agentview",)), lambda a: a[:, ::-1, ::-1, :]),
+    ],
+    ids=["FlipVertical", "FlipHorizontal", "Rotate180"],
+)
+def test_a_flip_reorients_the_image_plane_of_a_rank4_clip(adapter, expected) -> None:
+    # `StackFrameHistory` makes rank-4 camera tensors and RLDX consumes them, so a
+    # flip written against rank 3 would reverse the TIME axis of a clip instead of
+    # its rows - silently feeding the model its frames backwards. The axes are
+    # addressed from the end of the shape for exactly this reason.
+    clip = np.arange(2 * 2 * 3 * 3, dtype=np.uint8).reshape(2, 2, 3, 3)
+    out = _frame(adapter.adapt(_observation(clip), source=_oriented(UP, shape=(2, 2, 3, 3))))
+    assert out.shape == clip.shape
+    np.testing.assert_array_equal(out, expected(clip))

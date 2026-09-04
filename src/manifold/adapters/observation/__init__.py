@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from manifold.adapters.observation.camera_channel_order import SwapChannelOrder
-from manifold.adapters.observation.camera_orientation import Rotate180Cameras
+from manifold.adapters.observation.camera_horizontal_flip import FlipHorizontalCameras
 from manifold.adapters.observation.camera_resolution import ResizeCameras
+from manifold.adapters.observation.camera_rotate_180 import Rotate180Cameras
 from manifold.adapters.observation.camera_vertical_flip import FlipVerticalCameras
 from manifold.adapters.observation.dynamic_frame_rebase import DynamicFrameRebaseAdapter
 from manifold.adapters.observation.frame_history import StackFrameHistory
@@ -14,6 +15,7 @@ from manifold.adapters.observation.proprio_rotation import ProprioRotationAdapte
 
 __all__ = [
     "DynamicFrameRebaseAdapter",
+    "FlipHorizontalCameras",
     "FlipVerticalCameras",
     "FrameRebaseAdapter",
     "ObservedGripperAdapter",
