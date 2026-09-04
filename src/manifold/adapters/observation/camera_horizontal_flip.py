@@ -8,6 +8,7 @@ rotated 180 degrees lands on it, so that state needs an adapter of its own.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Any, ClassVar
 
 import numpy as np
@@ -71,9 +72,8 @@ class FlipHorizontalCameras(ObservationAdapter):
                 continue
             mirrored = np.asarray(frame)[..., :, ::-1, :]  # horizontal: the width axis only
             sensors[name] = np.ascontiguousarray(mirrored)  # preserve dtype
-        return Observation(
-            state=observation.state, sensors=sensors, instruction=observation.instruction
-        )
+        # `replace` carries the poses through unchanged: the camera did not move.
+        return replace(observation, sensors=sensors)
 
 
 __all__ = ["FlipHorizontalCameras"]

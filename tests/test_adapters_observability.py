@@ -4,6 +4,8 @@ Covers PART A (SwapChannelOrder, ResizeCameras) and PART B (tap) of the
 adapter-layer workstreams.
 """
 
+from dataclasses import fields
+
 import numpy as np
 import pytest
 
@@ -645,6 +647,33 @@ def test_each_flip_reverses_only_its_own_axis() -> None:
     np.testing.assert_array_equal(rotated, frame[::-1, ::-1, :])
     # The rotation IS the two mirrors composed.
     np.testing.assert_array_equal(rotated, vertical[:, ::-1, :])
+
+
+@pytest.mark.parametrize(
+    "adapter",
+    [
+        FlipVerticalCameras(cameras=("agentview",)),
+        FlipHorizontalCameras(cameras=("agentview",)),
+        Rotate180Cameras(cameras=("agentview",)),
+    ],
+    ids=["FlipVertical", "FlipHorizontal", "Rotate180"],
+)
+def test_a_flip_carries_through_every_field_it_does_not_touch(adapter) -> None:
+    # A flip rearranges an array and moves nothing else about the observation, so
+    # every other field arrives as the object that went in. Written against `fields`
+    # rather than a list of names: an adapter that rebuilds the value from an explicit
+    # field list drops a field added to `Observation` afterwards, silently and in every
+    # adapter at once, and this asserts the property rather than today's field list.
+    observation = Observation(
+        state={"ee_pose": np.zeros(7, dtype=np.float32)},
+        sensors={"agentview": np.zeros((2, 3, 3), dtype=np.uint8)},
+        instruction="pick up the mug",
+    )
+    result = adapter.adapt(observation, source=_oriented(UP))
+    for field in fields(Observation):
+        if field.name == "sensors":
+            continue
+        assert getattr(result, field.name) is getattr(observation, field.name), field.name
 
 
 @pytest.mark.parametrize(
