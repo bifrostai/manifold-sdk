@@ -1,18 +1,12 @@
 """Rotate named camera images 180 degrees on the observation side.
 
-Some checkpoints train on a different orientation than the benchmark publishes (the
-RLDX LIBERO checkpoint expects robosuite's frames rotated 180°). Because orientation is
-a declared convention, this adapter both rotates the named arrays AND advances each
-camera's `orientation` UPRIGHT -> ROTATED_180, so `check_compatibility` can prove the
-flip is what bridges the pairing rather than it being a spec-invisible side effect.
-Lossless (a pixel reorientation).
+Renamed from `camera_orientation.py`: orientation has three adapters, so each one has
+its own file.
 
-A camera's calibration passes through untouched. Rearranging an array re-labels which
-row is row 0; it does not move the camera, so neither the intrinsics nor the pose
-change. What changes is `orientation`, which is the field that ties an array's layout to
-the image-coordinate convention the intrinsics assume — so the calibration stays
-expressed in the same layout as the frame beside it, and `orientation` says whether the
-two agree (ADR 0008).
+Reverses both the row and the column order of each named camera image and updates the
+camera's declared `orientation` to match, so the compatibility check can see the
+rotation. The new orientation is worked out from whatever the source declares, and no
+pixel values change, so the calibration is left alone (ADR 0008).
 """
 
 from __future__ import annotations
@@ -36,22 +30,25 @@ class Rotate180Cameras(ObservationAdapter):
     from_spec: ClassVar[type[BaseModel]] = ObservationSpace
     to_spec: ClassVar[type[BaseModel]] = ObservationSpace
     lossless: ClassVar[bool] = True
+    operation: ClassVar[CameraOrientation] = CameraOrientation.ROTATED_180
 
     def __init__(self, cameras: Sequence[str]) -> None:
         self.cameras = tuple(cameras)
 
     def applies(self, source: BaseModel) -> bool:
-        """True when any named camera is still UPRIGHT (so a flip is needed)."""
+        """True when the source publishes any of the named cameras.
+
+        The rotation works from any starting orientation, so only a missing camera
+        rules it out. Whether the rotation is the one a pairing needs is decided by
+        `check_compatibility`, which matches the transformations required against the
+        declared orientations of the policy's and benchmark's cameras.
+        """
         if not isinstance(source, ObservationSpace):
             return False
-        return any(
-            (camera := source.camera(name)) is not None
-            and camera.orientation is CameraOrientation.UPRIGHT
-            for name in self.cameras
-        )
+        return any(source.camera(name) is not None for name in self.cameras)
 
     def produce(self, source: BaseModel) -> ObservationSpace:
-        """The same spec with each named camera's orientation flipped to ROTATED_180."""
+        """The same spec with each named camera's orientation rotated 180 degrees."""
         if not isinstance(source, ObservationSpace):
             raise TypeError("Rotate180Cameras transforms an ObservationSpace source only")
         out = source
@@ -59,7 +56,9 @@ class Rotate180Cameras(ObservationAdapter):
             camera = source.camera(name)
             if camera is not None:
                 out = out.with_camera(
-                    camera.model_copy(update={"orientation": CameraOrientation.ROTATED_180})
+                    camera.model_copy(
+                        update={"orientation": camera.orientation.flipped(self.operation)}
+                    )
                 )
         return out
 
@@ -68,13 +67,16 @@ class Rotate180Cameras(ObservationAdapter):
 
         A camera absent from `observation.sensors` is skipped, so the adapter is safe to
         point at a superset of the cameras an observation carries.
+
+        The height and width axes are addressed from the END of the shape, so a stacked
+        rank-4 clip is rotated per frame instead of having its time axis reversed.
         """
         sensors = dict(observation.sensors)
         for name in self.cameras:
             frame = sensors.get(name)
             if frame is None:
                 continue
-            rotated = np.asarray(frame)[::-1, ::-1]  # 180 degrees: flip height and width
+            rotated = np.asarray(frame)[..., ::-1, ::-1, :]  # 180°: height and width
             sensors[name] = np.ascontiguousarray(rotated)  # preserve dtype
         # `replace` carries the poses through unchanged: the camera did not move.
         return replace(observation, sensors=sensors)
