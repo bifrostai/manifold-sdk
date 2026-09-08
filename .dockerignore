@@ -1,0 +1,8 @@
+# The Dockerfile copies named paths, so this only keeps the build context small.
+# `.venv*`, not `.venv`: a LIBERO runner env lives beside it as `.venv-libero`.
+**/__pycache__/
+**/*.py[cod]
+**/.venv*/
+**/.pytest_cache/
+**/.ruff_cache/
+.git/

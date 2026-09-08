@@ -25,3 +25,13 @@ jobs:
       - uses: actions/checkout@v7
       - run: uv sync --frozen
       - run: uv run pytest
+
+  # Builds the image publish.yml would push, so a Dockerfile a release would fail on is
+  # caught here, then imports the package from the installed wheel.
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker build -t manifold-sdk:ci .
+      - run: docker run --rm manifold-sdk:ci python -c 'import manifold, PIL'
+      - run: docker run --rm manifold-sdk:ci sh -c 'ls /dist/*.whl /dist/requirements.txt'

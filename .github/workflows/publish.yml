@@ -1,0 +1,43 @@
+name: publish
+
+# A release is a `v<version>` tag on main. Pushing it builds the Dockerfile and pushes
+# ghcr.io/bifrostai/manifold-sdk:<version>. Nothing else triggers this.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      # The image tag is the wheel's version, so a tag that names another version is
+      # refused rather than published under a name the wheel inside contradicts.
+      - id: version
+        run: |
+          version="$(uv version --short)"
+          test "v${version}" = "${GITHUB_REF_NAME}"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY}:${version}" >> "$GITHUB_OUTPUT"
+      - run: docker build -t "$IMAGE" .
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+      # Exercised before it is pushed: downstream pins whatever digest lands, so a
+      # broken install or an empty /dist must fail here, not in a workload build.
+      - run: |
+          docker run --rm "$IMAGE" python -c 'import manifold, PIL'
+          docker run --rm "$IMAGE" sh -c 'ls /dist/*.whl /dist/requirements.txt'
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: docker push "$IMAGE"
+        env:
+          IMAGE: ${{ steps.version.outputs.image }}
