@@ -800,7 +800,8 @@ def _probe_observation(contract: ObservationSpace) -> Observation:
     into its declared format) plus zeroed gripper qpos; any other proprioception
     channel is length-correct zeros (only its length and rotation, where present,
     are checked). Each camera is a deterministic per-pixel gradient so shape is
-    genuinely exercised by distinct values rather than a uniform fill. No RNG.
+    genuinely exercised by distinct values rather than a uniform fill, and each
+    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
     """
     proprio = contract.proprioception
     state: dict[str, np.ndarray] = {}
@@ -816,7 +817,32 @@ def _probe_observation(contract: ObservationSpace) -> Observation:
         camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
     }
     instruction = "" if contract.instruction else None
-    return Observation(state=state, sensors=sensors, instruction=instruction)
+    return Observation(
+        state=state,
+        sensors=sensors,
+        instruction=instruction,
+        extrinsics=_probe_extrinsics(contract),
+    )
+
+
+def _probe_extrinsics(contract: ObservationSpace) -> dict[str, np.ndarray]:
+    """One 4x4 camera-to-frame pose per calibrated camera, distinct per camera.
+
+    A camera declaring `calibration` means the benchmark publishes that camera's pose
+    in every observation (ADR 0008), so a probe that omits it does not lay out the
+    contract it claims to: an adapter reading `Observation.extrinsics` fails on the
+    probe alone. Each pose is a valid rigid transform — identity rotation, a
+    per-camera translation — so the poses are asymmetric like the frames, and
+    float64, because a pose is read as geometry rather than fed to a network.
+    """
+    poses: dict[str, np.ndarray] = {}
+    for index, camera in enumerate(contract.cameras):
+        if camera.calibration is None:
+            continue
+        pose = np.eye(4, dtype=np.float64)
+        pose[:3, 3] = (index + 1) * np.array([0.1, 0.2, 0.3])
+        poses[camera.name] = pose
+    return poses
 
 
 def _augment_probe_for_layout(
@@ -845,7 +871,12 @@ def _augment_probe_for_layout(
         state[entry.source_name] = np.arange(width, dtype=np.float32)
         synthesized.add(entry.source_name)
     return (
-        Observation(state=state, sensors=observation.sensors, instruction=observation.instruction),
+        Observation(
+            state=state,
+            sensors=observation.sensors,
+            instruction=observation.instruction,
+            extrinsics=observation.extrinsics,
+        ),
         synthesized,
     )
 

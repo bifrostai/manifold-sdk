@@ -12,12 +12,16 @@ from manifold.core import (
     ActionAdapter,
     Benchmark,
     Camera,
+    CameraCalibration,
+    CameraIntrinsics,
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
     Frame,
     GripperFormat,
     GripperObservationSpec,
+    ObservationAdapter,
+    ObservationSpace,
     Pipeline,
     PolicySignature,
     Proprioception,
@@ -442,3 +446,73 @@ def test_chunked_per_step_bug_is_caught() -> None:
     # Step 0's gripper is fine; a later step's is wrong.
     assert _check(report, "action.gripper.step0").passed
     assert not _check(report, "action.gripper.step1").passed
+
+
+class RequiresCameraPoseAdapter(ObservationAdapter):
+    """Reads a calibrated camera's pose off the observation, as ADR 0008 allows."""
+
+    from_spec = ObservationSpace
+    to_spec = ObservationSpace
+    lossless = True
+
+    def applies(self, source: Any) -> bool:
+        return isinstance(source, ObservationSpace)
+
+    def produce(self, source: Any) -> ObservationSpace:
+        return source
+
+    def adapt(self, observation: Any, /, *, source: Any) -> Any:
+        pose = observation.extrinsics.get("agentview")
+        if pose is None:
+            raise RuntimeError("no pose published for 'agentview'")
+        assert np.asarray(pose).shape == (4, 4)
+        return observation
+
+
+def test_probe_publishes_a_pose_for_each_calibrated_camera() -> None:
+    # A calibrated camera means a pose in every observation, so an adapter reading
+    # one must not fail on the probe alone.
+    calibrated = Camera(
+        name="agentview",
+        shape=(8, 8, 3),
+        calibration=CameraCalibration(intrinsics=CameraIntrinsics(fx=4.0, fy=4.0, cx=4.0, cy=4.0)),
+    )
+    embodiment = Embodiment(name="arm", action=_ee(), proprioception=_franka_proprio())
+    bench = Benchmark(name="suite", embodiment=embodiment, sensors=[calibrated], instruction=False)
+    policy = _policy(_ee(), proprio=_franka_proprio(), rotation=RotationFormat.AXIS_ANGLE)
+    pipeline = Pipeline(observation=[RequiresCameraPoseAdapter()])
+
+    report = verify(policy, bench, pipeline)
+
+    assert report.ok, report.reasons
+
+
+def test_probe_poses_are_distinct_and_only_for_calibrated_cameras() -> None:
+    # Sanity: an uncalibrated camera publishes no pose, and two calibrated ones do
+    # not share a pose — a probe that repeats itself cannot reveal a swap.
+    from manifold.core.verify import _probe_extrinsics
+
+    intrinsics = CameraIntrinsics(fx=4.0, fy=4.0, cx=4.0, cy=4.0)
+    space = ObservationSpace(
+        proprioception=_franka_proprio(),
+        cameras=(
+            Camera(name="plain", shape=(8, 8, 3)),
+            Camera(
+                name="agentview",
+                shape=(8, 8, 3),
+                calibration=CameraCalibration(intrinsics=intrinsics),
+            ),
+            Camera(
+                name="wrist",
+                shape=(8, 8, 3),
+                calibration=CameraCalibration(intrinsics=intrinsics),
+            ),
+        ),
+        instruction=False,
+    )
+
+    poses = _probe_extrinsics(space)
+
+    assert set(poses) == {"agentview", "wrist"}
+    assert all(pose.shape == (4, 4) and pose.dtype == np.float64 for pose in poses.values())
+    assert not np.array_equal(poses["agentview"], poses["wrist"])
