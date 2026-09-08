@@ -6,6 +6,7 @@ import io
 
 import numpy as np
 import pytest
+from PIL import Image
 
 from manifold.replay import (
     REPLAY_LOG_VERSION,
@@ -270,7 +271,6 @@ def test_a_first_frame_that_is_not_a_frame_at_all_is_refused(tmp_path):
 
 
 def test_a_jpeg_channel_image_round_trips(tmp_path):
-    pytest.importorskip("PIL")
     path = tmp_path / "episode.replay"
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     frame[:, :, 0] = 255
@@ -348,7 +348,6 @@ def test_a_greyscale_colour_frame_drops_its_trailing_axis(tmp_path):
 
 
 def test_an_alpha_channel_is_refused_for_jpeg(tmp_path):
-    pytest.importorskip("PIL")
     path = tmp_path / "episode.replay"
     with (
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="jpeg") as log,
@@ -358,7 +357,6 @@ def test_an_alpha_channel_is_refused_for_jpeg(tmp_path):
 
 
 def test_a_png_channel_image_round_trips(tmp_path):
-    pytest.importorskip("PIL")
     path = tmp_path / "episode.replay"
     frame = np.zeros((8, 8, 4), dtype=np.uint8)
     frame[:, :, 1] = 128
@@ -373,7 +371,6 @@ def test_a_png_channel_image_round_trips(tmp_path):
 
 @pytest.mark.parametrize(("image_format", "shape"), [("jpeg", (8, 8, 3)), ("png", (8, 8, 4))])
 def test_a_compressed_frame_reads_back_as_the_bytes_that_were_stored(tmp_path, image_format, shape):
-    pillow = pytest.importorskip("PIL.Image")
     path = tmp_path / "episode.replay"
     frame = np.zeros(shape, dtype=np.uint8)
     frame[:, :, 1] = 128
@@ -383,7 +380,7 @@ def test_a_compressed_frame_reads_back_as_the_bytes_that_were_stored(tmp_path, i
 
     stored = read_replay_log(path).steps[0].encoded_images["agentview"]
     buffer = io.BytesIO()
-    pillow.fromarray(frame).save(buffer, format=image_format.upper())
+    Image.fromarray(frame).save(buffer, format=image_format.upper())
     # The writer's own encode, handed back byte for byte: whatever stores the
     # frame downstream stores these rather than re-encoding the decoded pixels.
     assert stored.format == image_format
@@ -410,7 +407,6 @@ def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
 
 
 def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
-    pytest.importorskip("PIL")
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="jpeg") as log:
         log.write_step(
@@ -429,7 +425,6 @@ def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
 
 @pytest.mark.parametrize("image_format", ["raw", "jpeg"])
 def test_a_decoded_colour_frame_is_the_callers_to_mutate(tmp_path, image_format):
-    pytest.importorskip("PIL")
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format=image_format) as log:
         log.write_step({}, images={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)})
