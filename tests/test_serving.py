@@ -8,11 +8,16 @@ torch).
 
 from __future__ import annotations
 
+import io
+import socket
+import threading
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
 from typing import cast
 
+import numpy as np
 import pytest
+from PIL import Image
 
 from manifold.recipes import OpenLoopChunkQueue, StepResult
 
@@ -213,6 +218,238 @@ def test_run_episodes_drives_the_ids_it_is_given_in_order(monkeypatch):
     # The shard tally belongs to the shard wrapper; a bare id list has no shard to
     # name, so this emits only what one connection's run does.
     assert not any(event.startswith("[bench shard") for event in events)
+
+
+def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(monkeypatch):
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.sensor import Camera, CameraOrientation
+    from manifold.core.values import Observation
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import run_episodes, serving
+    from manifold.wire import FrameChannel
+
+    # arrange
+    live_client, live_server = socket.socketpair()
+    received: list[dict] = []
+    received_frame = threading.Event()
+
+    def receive_live_view() -> None:
+        with live_server:
+            channel = FrameChannel.from_socket(live_server)
+            hello = channel.recv()
+            assert hello is not None
+            assert hello["type"] == "hello"
+            channel.send("watch", {"watched": True})
+            frame = channel.recv()
+            assert frame is not None
+            received.append(frame["payload"])
+            received_frame.set()
+            channel.send("ack", {"sequence": frame["payload"]["sequence"]})
+
+    receiver = threading.Thread(target=receive_live_view)
+    receiver.start()
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
+    policy_socket = _FakeSocket()
+    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: policy_socket)
+    monkeypatch.setattr(
+        serving,
+        "FrameChannel",
+        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
+    )
+    source = np.zeros((360, 640, 3), dtype=np.uint8)
+    source[:180, :, 0] = 255
+    source[180:, :, 2] = 255
+    benchmark = Benchmark(
+        name="bench-1",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[
+            Camera(
+                name="scene",
+                shape=source.shape,
+                orientation=CameraOrientation.FLIPPED_VERTICAL,
+            )
+        ],
+        instruction=True,
+    )
+
+    def step(_action) -> StepResult:
+        assert received_frame.wait(timeout=2.0)
+        return StepResult(
+            observation=Observation(sensors={"scene": source}), success=True, done=True
+        )
+
+    # act
+    result = run_episodes(
+        benchmark,
+        lambda _episode: Observation(sensors={"scene": source}, instruction="pick"),
+        step,
+        server="policy:9000",
+        episode_ids=[7],
+        max_steps=1,
+        live_view_server="127.0.0.1:9001",
+        live_view_sensor="scene",
+    )
+    receiver.join(timeout=2.0)
+
+    # assert
+    assert result.successes == 1
+    assert not receiver.is_alive()
+    assert len(received) == 1
+    payload = received[0]
+    assert payload["episode_idx"] == 7
+    assert payload["step"] == 0
+    assert payload["task"] == "pick"
+    assert (payload["width"], payload["height"]) == (455, 256)
+    displayed = np.asarray(Image.open(io.BytesIO(payload["jpeg"])))
+    assert displayed.shape == (256, 455, 3)
+    assert displayed[10, 10, 2] > displayed[10, 10, 0]
+
+
+def test_run_episodes_requires_a_sensor_when_the_live_view_server_is_set():
+    from manifold.core.values import Observation
+    from manifold.recipes import run_episodes
+
+    # act
+    # assert
+    with pytest.raises(ValueError, match="sensor is required"):
+        run_episodes(
+            _fake_benchmark(),
+            lambda _episode: cast(Observation, None),
+            _step,
+            server="policy:9000",
+            episode_ids=[],
+            max_steps=1,
+            live_view_server="127.0.0.1:9001",
+        )
+
+
+def test_run_episodes_rejects_a_depth_live_view_sensor():
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.sensor import Camera, Modality
+    from manifold.core.values import Observation
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import run_episodes
+
+    benchmark = Benchmark(
+        name="bench-1",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[
+            Camera(
+                name="depth",
+                shape=(256, 256, 1),
+                dtype="float32",
+                modality=Modality.DEPTH,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="must be RGB"):
+        run_episodes(
+            benchmark,
+            lambda _episode: Observation(),
+            _step,
+            server="policy:9000",
+            episode_ids=[],
+            max_steps=1,
+            live_view_server="127.0.0.1:9001",
+            live_view_sensor="depth",
+        )
+
+
+def test_run_episodes_validates_a_live_view_before_copying(monkeypatch):
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.sensor import Camera
+    from manifold.core.values import Observation
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import run_episodes, serving
+
+    live_client, live_server = socket.socketpair()
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
+    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
+    monkeypatch.setattr(
+        serving,
+        "FrameChannel",
+        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
+    )
+    benchmark = Benchmark(
+        name="bench-1",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[Camera(name="scene", shape=(256, 256, 3))],
+    )
+
+    with live_server, pytest.raises(ValueError, match="shape mismatch"):
+        run_episodes(
+            benchmark,
+            lambda _episode: Observation(
+                sensors={"scene": np.zeros((1000, 1000, 3), dtype=np.uint8)}
+            ),
+            _step,
+            server="policy:9000",
+            episode_ids=[0],
+            max_steps=1,
+            live_view_server="127.0.0.1:9001",
+            live_view_sensor="scene",
+        )
+
+
+def test_run_episodes_closes_a_live_view_socket_during_a_partial_control_frame(
+    monkeypatch,
+):
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.sensor import Camera
+    from manifold.core.values import Observation
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import run_episodes, serving
+    from manifold.wire import FrameChannel
+
+    live_client, live_server = socket.socketpair()
+    partial_sent = threading.Event()
+
+    def receive_live_view() -> None:
+        with live_server:
+            channel = FrameChannel.from_socket(live_server)
+            assert channel.recv() is not None
+            live_server.sendall(b"\x00")
+            partial_sent.set()
+            assert live_server.recv(1) == b""
+
+    receiver = threading.Thread(target=receive_live_view)
+    receiver.start()
+    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
+    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
+    monkeypatch.setattr(
+        serving,
+        "FrameChannel",
+        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
+    )
+    image = np.zeros((256, 256, 3), dtype=np.uint8)
+    benchmark = Benchmark(
+        name="bench-1",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[Camera(name="scene", shape=image.shape)],
+    )
+
+    def step(_action) -> StepResult:
+        assert partial_sent.wait(timeout=2.0)
+        return StepResult(
+            observation=Observation(sensors={"scene": image}),
+            success=True,
+            done=True,
+        )
+
+    run_episodes(
+        benchmark,
+        lambda _episode: Observation(sensors={"scene": image}),
+        step,
+        server="policy:9000",
+        episode_ids=[0],
+        max_steps=1,
+        live_view_server="127.0.0.1:9001",
+        live_view_sensor="scene",
+    )
+    receiver.join(timeout=1.0)
+
+    assert not receiver.is_alive()
 
 
 def test_run_episodes_rejects_ids_that_cannot_identify_an_episode():
