@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,8 +37,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
 from manifold.core.pipeline import Pipeline
+from manifold.core.sensor import Modality
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
+from manifold.recipes._live_view import LiveViewPublisher
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
 from manifold.recipes.recording import NO_RECORDER
 from manifold.recipes.sharding import shard_episode_ids
@@ -302,6 +305,7 @@ def _run_episode(
     episode_idx: int,
     benchmark_name: str,
     recorder: EpisodeRecorder = NO_RECORDER,
+    live_view: LiveViewPublisher | None,
 ) -> EpisodeRecord:
     """Drive one episode over the channel, returning the record of what it did.
 
@@ -316,6 +320,13 @@ def _run_episode(
     started_at = datetime.now(timezone.utc)
     observation = reset()
     task_name = observation.instruction or benchmark_name
+    if live_view is not None:
+        live_view.publish(
+            observation,
+            episode_idx=episode_idx,
+            step=0,
+            task=task_name,
+        )
     steps = 0
     success = False
     initialization_sec = 0.0
@@ -335,6 +346,13 @@ def _run_episode(
             result = step(action)
             steps += 1
             observation = result.observation
+            if live_view is not None:
+                live_view.publish(
+                    observation,
+                    episode_idx=episode_idx,
+                    step=steps,
+                    task=task_name,
+                )
             # The budget is the third way an episode ends, and the only one a
             # recorder cannot see for itself.
             ended = result.success or result.done or steps == max_steps
@@ -724,6 +742,8 @@ def run_benchmark(
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
     on_episode: Callable[[EpisodeRecord], None] | None = None,
+    live_view_server: str | None = None,
+    live_view_camera: str | None = None,
 ) -> BenchmarkResult:
     """Run a benchmark against a remote policy over the bridge, in native form.
 
@@ -735,7 +755,10 @@ def run_benchmark(
     `image_format` is the sensor encoding for frames ("raw", "jpeg", "png"); "raw"
     does not need an extra dependency. `recorder` is driven within each episode;
     see `recipes.recording`. `on_episode` receives its finished record before the
-    next episode begins.
+    next episode begins. When `live_view_server` is set, `live_view_camera` selects
+    the colour camera used for the dedicated latest-value channel. Omitting
+    `live_view_server` disables live-view publication. The SDK ignores
+    `live_view_camera` in that case.
 
     Returns:
         A record for each episode run, and the tally over them.
@@ -756,6 +779,8 @@ def run_benchmark(
         on_event=on_event,
         recorder=recorder,
         on_episode=on_episode,
+        live_view_server=live_view_server,
+        live_view_camera=live_view_camera,
     )
 
 
@@ -772,6 +797,8 @@ def _run_connected(
     on_event: Callable[[str], None],
     recorder: EpisodeRecorder,
     on_episode: Callable[[EpisodeRecord], None] | None,
+    live_view_server: str | None,
+    live_view_camera: str | None,
 ) -> BenchmarkResult:
     """Hold one connection open and drive the named episodes down it, in order.
 
@@ -783,7 +810,10 @@ def _run_connected(
     """
     emit = on_event
     ids = list(episode_ids)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    with (
+        _live_view_context(benchmark, live_view_server, live_view_camera) as live_view,
+        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock,
+    ):
         sock.connect((host, port))
         channel = FrameChannel.from_socket(sock)
         channel.send(
@@ -809,6 +839,7 @@ def _run_connected(
                 episode_idx=episode_id,
                 benchmark_name=benchmark.name,
                 recorder=recorder,
+                live_view=live_view,
             )
             records.append(record)
             if on_episode is not None:
@@ -819,6 +850,26 @@ def _run_connected(
         result = BenchmarkResult(records=tuple(records))
         emit(f"done — {result.successes}/{len(ids)} succeeded")
         return result
+
+
+def _live_view_context(
+    benchmark: Benchmark,
+    server: str | None,
+    camera_name: str | None,
+) -> AbstractContextManager[LiveViewPublisher | None]:
+    """A context manager yielding a configured live-view publisher or `None`."""
+    if server is None:
+        return nullcontext(None)
+    if camera_name is None:
+        raise ValueError("live_view_camera is required when live_view_server is set")
+
+    camera = benchmark.observation_space.camera(camera_name)
+    if camera is None:
+        raise ValueError(f"benchmark observation space does not include camera {camera_name!r}")
+    if camera.modality is not Modality.RGB:
+        raise ValueError(f"live-view camera {camera_name!r} must be RGB")
+    host, port = _parse_server(server)
+    return LiveViewPublisher(host, port, camera)
 
 
 def run_episodes(
@@ -833,6 +884,8 @@ def run_episodes(
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
     on_episode: Callable[[EpisodeRecord], None] | None = None,
+    live_view_server: str | None = None,
+    live_view_camera: str | None = None,
 ) -> BenchmarkResult:
     """Run the named global episodes of a benchmark against a remote policy.
 
@@ -841,7 +894,8 @@ def run_episodes(
     and the set an interrupted attempt never reached is another. This owns the
     run-mechanics around one connection: it parses the server string and hands the
     ids down, so each episode is seeded by the id it runs and each record is stamped
-    with it.
+    with it. `live_view_server` and `live_view_camera` configure the optional
+    latest-value channel as they do for `run_benchmark`.
 
     `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
     grid cell) — the only shape difference from `run_benchmark`'s no-argument
@@ -879,6 +933,8 @@ def run_episodes(
         on_event=on_event,
         recorder=recorder,
         on_episode=on_episode,
+        live_view_server=live_view_server,
+        live_view_camera=live_view_camera,
     )
 
 
@@ -896,6 +952,8 @@ def run_sharded_benchmark(
     on_event: Callable[[str], None] = _emit,
     recorder: EpisodeRecorder = NO_RECORDER,
     output_dir: Path | None = None,
+    live_view_server: str | None = None,
+    live_view_camera: str | None = None,
 ) -> BenchmarkResult:
     """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
 
@@ -908,7 +966,9 @@ def run_sharded_benchmark(
     shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
     `on_event` also receives the final per-shard tally line. `recorder` is driven per
     episode, and is given the global id each one begins. When `output_dir` is set,
-    the rollup is updated after each episode.
+    the rollup is updated after each episode. `live_view_server` and
+    `live_view_camera` configure the optional latest-value channel as they do for
+    `run_benchmark`.
 
     Returns:
         A record for each episode this shard ran, and the tally over them.
@@ -941,6 +1001,8 @@ def run_sharded_benchmark(
         on_event=on_event,
         recorder=recorder,
         on_episode=write_episode,
+        live_view_server=live_view_server,
+        live_view_camera=live_view_camera,
     )
     on_event(result.format_shard(shard_index, num_shards))
     return result
