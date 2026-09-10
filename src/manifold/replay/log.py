@@ -42,10 +42,12 @@ other.
 
 from __future__ import annotations
 
+import io
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from PIL import Image
 
 from manifold.lib.compat import StrEnum
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
@@ -407,8 +409,8 @@ class ReplayLogWriter:
 
         `episode_idx` is the episode's index in the run, carried in the header so
         a reader identifies the episode from the log alone, without a filename
-        convention. `image_format` applies to uint8 channel images; "jpeg" and
-        "png" need the `images` extra, and depth is float16 regardless.
+        convention. `image_format` applies to uint8 channel images; depth is
+        float16 regardless.
 
         `overview_group` is the scalar group drawn beside the scene rather than
         in a tab of its own. It must match the group of at least one scalar channel.
@@ -685,7 +687,6 @@ def _pack_image(array: np.ndarray, image_format: ImageFormat, *, name: str) -> d
     Raises:
         ValueError: If the array is neither a colour nor a depth frame, or if its
             shape or range is one the chosen encoding cannot hold.
-        ImportError: If "jpeg" or "png" is requested but Pillow is not installed.
     """
     if array.dtype == np.uint8:
         return _pack_colour_image(array, image_format, name=name)
@@ -721,14 +722,6 @@ def _pack_colour_image(
                 f"colour image {name!r} carries an alpha channel, which JPEG cannot hold: "
                 "use image_format='png' or drop the alpha channel"
             )
-        try:
-            from PIL import Image
-        except ImportError as exc:  # pragma: no cover - depends on the images extra
-            raise ImportError(
-                f"image_format={image_format!r} needs Pillow: install manifold-sdk[images]"
-            ) from exc
-        import io
-
         buffer = io.BytesIO()
         Image.fromarray(array).save(buffer, format=image_format.upper())
         return pack_encoded_image(buffer.getvalue(), format_=image_format, shape=list(array.shape))
@@ -1000,7 +993,6 @@ def _unpack_image(node: Any, name: str) -> np.ndarray:
 
     Raises:
         ValueError: If the node is neither a decodable image nor a decodable array.
-        ImportError: If the image is JPEG- or PNG-encoded and Pillow is missing.
     """
     encoded = find_encoded_image(node)
     if encoded is None:
@@ -1016,14 +1008,6 @@ def _unpack_image(node: Any, name: str) -> np.ndarray:
                 f"raw image {name!r} has {len(data)} bytes but shape {shape} needs {expected}"
             )
         return np.array(np.frombuffer(data, dtype=np.uint8), dtype=np.uint8).reshape(shape)
-    try:
-        from PIL import Image
-    except ImportError as exc:  # pragma: no cover - depends on the images extra
-        raise ImportError(
-            f"image {name!r} is {image_format}-encoded: install manifold-sdk[images]"
-        ) from exc
-    import io
-
     try:
         decoded = Image.open(io.BytesIO(data))
     except Exception as exc:

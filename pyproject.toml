@@ -24,12 +24,8 @@ dependencies = [
     "msgpack>=1.0",
     "numpy>=1.24",
     "scipy>=1.11",
+    "pillow>=10",
 ]
-
-[project.optional-dependencies]
-# JPEG/PNG sensor encoding on the bridge. Raw framing does not require an extra
-# dependency; only the compressed image formats require Pillow.
-images = ["pillow>=10"]
 
 [project.urls]
 Homepage = "https://manifold.bifrost.ai"
@@ -46,7 +42,6 @@ dev = [
     "ruff>=0.6",
     "ty>=0.0.32",
     "pytest>=8",
-    "pillow>=10",  # exercises the bridge's jpeg/png image paths in the test gate
 ]
 
 [tool.ruff]

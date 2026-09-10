@@ -51,6 +51,7 @@ import struct
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from PIL import Image
 
 from manifold.core.values import Action, Observation
 from manifold.lib.compat import StrEnum
@@ -129,7 +130,6 @@ def _encode_sensor(array: np.ndarray, image_format: ImageFormat, *, name: str) -
         ValueError: If the array is neither a colour nor a depth frame, its dtype
             is one the wire does not carry, or `image_format` is not a recognised
             format.
-        ImportError: If "jpeg" or "png" is requested but Pillow is not installed.
     """
     if array.dtype == np.uint8:
         return _encode_colour(array, image_format, name=name)
@@ -254,30 +254,16 @@ def _decode_state_array(role: str, node: Any) -> np.ndarray:
 
 
 def _compress_image(array: np.ndarray, image_format: ImageFormat) -> bytes:
-    """Compress an array to JPEG or PNG bytes via Pillow, lazily imported."""
-    image = _pillow().fromarray(array.astype(np.uint8))
+    """Compress an array to JPEG or PNG bytes."""
     buffer = io.BytesIO()
-    image.save(buffer, format=image_format.upper())
+    Image.fromarray(array.astype(np.uint8)).save(buffer, format=image_format.upper())
     return buffer.getvalue()
 
 
 def _decompress_image(data: bytes) -> np.ndarray:
-    """Decompress JPEG or PNG bytes back into a writable array via Pillow."""
+    """Decompress JPEG or PNG bytes back into a writable array."""
     # A PIL-backed asarray can be read-only; np.array copies to a writable array.
-    return np.array(_pillow().open(io.BytesIO(data)), dtype=np.uint8)
-
-
-def _pillow() -> Any:
-    """Return PIL.Image, or raise a clear ImportError pointing at the extra."""
-    try:
-        # lazy — Pillow is an optional dependency (the 'images' extra).
-        from PIL import Image
-    except ImportError as exc:
-        raise ImportError(
-            "JPEG and PNG image formats require Pillow. "
-            "Install the 'images' extra: pip install 'manifold-sdk[images]'."
-        ) from exc
-    return Image
+    return np.array(Image.open(io.BytesIO(data)), dtype=np.uint8)
 
 
 class FrameType(StrEnum):
@@ -310,8 +296,7 @@ def encode_observation(
     `state` arrays are encoded as `__ndarray__` wrappers keyed by role, `sensors`
     arrays keyed by sensor name, and the instruction passes through unchanged.
     `image_format` selects the encoding for *colour* sensors: "raw" (the default)
-    stores the uint8 image bytes losslessly with no third-party dependency, while
-    "jpeg" and "png" compress via Pillow and require the `images` extra.
+    stores the uint8 image bytes losslessly, "jpeg" and "png" compress them.
 
     A floating-point sensor is depth in metres and is encoded as an `__ndarray__`
     wrapper at its own dtype, losslessly, whatever `image_format` says (ADR 0007).
@@ -330,7 +315,6 @@ def encode_observation(
     `__ndarray__` wrapper, and `timestep` is the monotonic correlation index.
 
     Raises:
-        ImportError: If "jpeg" or "png" is requested but Pillow is not installed.
         ValueError: If `image_format` is not a recognised format, or a sensor
             array is neither a uint8 colour frame nor a float depth frame.
     """
@@ -373,8 +357,6 @@ def decode_observation(payload: dict[str, Any]) -> Observation:
     Raises:
         ValueError: If a required field is missing or any array or image is
             malformed.
-        ImportError: If a sensor is JPEG- or PNG-encoded but Pillow is not
-            installed.
     """
     # A malformed frame value is a ValueError by contract, not a TypeError (see the
     # module docstring), so the isinstance guards here suppress TRY004.

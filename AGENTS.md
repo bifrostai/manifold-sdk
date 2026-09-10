@@ -39,10 +39,9 @@ then classes, then functions) — run `just fmt`; do not hand-sort.
 ## Imports
 
 Absolute only — relative imports are banned (ruff `TID`). Import at module top
-unless (a) breaking a real import cycle or (b) loading an optional dependency;
-annotate either exception with a one-line `#` reason (as `core/verify.py` and
-`wire/bridge.py` do). Type-only imports go under `if TYPE_CHECKING:`. Every module
-begins with `from __future__ import annotations`.
+unless breaking a real import cycle; annotate the exception with a one-line `#`
+reason (as `core/verify.py` does). Type-only imports go under `if TYPE_CHECKING:`.
+Every module begins with `from __future__ import annotations`.
 
 ## Comments
 
