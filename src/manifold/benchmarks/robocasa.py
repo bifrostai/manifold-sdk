@@ -26,8 +26,8 @@ ROBOCASA = Benchmark(
     name="robocasa",
     embodiment=PANDA_OMRON_WHOLE_BODY,
     sensors=[
-        agentview_left((256, 256, 3), _ORIENTATION),
-        agentview_right((256, 256, 3), _ORIENTATION),
+        agentview_left((256, 256, 3), orientation=_ORIENTATION),
+        agentview_right((256, 256, 3), orientation=_ORIENTATION),
         wrist((256, 256, 3), orientation=_ORIENTATION),
     ],
     instruction=True,
