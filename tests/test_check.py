@@ -3,6 +3,7 @@ import numpy as np
 from manifold.adapters.action import BasePinWiden, GripperPolarityAdapter
 from manifold.adapters.observation import Rotate180Cameras
 from manifold.benchmarks.libero import LIBERO
+from manifold.benchmarks.robocasa import ROBOCASA
 from manifold.core import (
     Benchmark,
     Camera,
@@ -318,6 +319,13 @@ def test_base_pin_widen_does_not_apply_to_a_full_width_action() -> None:
     assert not BasePinWiden(width=7).applies(wide_arm)
 
 
+# The orientation every robosuite benchmark publishes: it hands back MuJoCo's bottom-up
+# buffer. The pairings below each vary one camera axis — modality, calibration — so their
+# cameras carry this on the orientation axis and only the axis under test can decide the
+# result.
+_ROBOSUITE_ORIENTATION = CameraOrientation.FLIPPED_VERTICAL
+
+
 def _libero_policy(*, cameras: list[Camera]) -> PolicySignature:
     """A signature that pairs with LIBERO on everything except the cameras given."""
     return PolicySignature(
@@ -333,24 +341,43 @@ def _libero_policy(*, cameras: list[Camera]) -> PolicySignature:
     )
 
 
+def test_robocasa_declares_the_orientation_its_renderer_publishes() -> None:
+    # RoboCasa is robosuite too, so its frames are bottom-up for the same reason
+    # LIBERO's are. It differs in how the wrong value stayed invisible: no runner
+    # corrected it at serve time, so the entry and the pairings built on it agreed on
+    # an orientation no published frame carried, and nothing was refused anywhere.
+    assert [camera.orientation for camera in ROBOCASA.sensors] == [_ROBOSUITE_ORIENTATION] * 3
+
+
+def test_libero_declares_the_orientation_its_renderer_publishes() -> None:
+    # robosuite hands back MuJoCo's render buffer bottom-up, so every LIBERO frame is
+    # row-reversed against an upright scene. The catalogue has to say so: a wrong
+    # orientation is invisible to a shape check, and a benchmark container that fixed
+    # it at serve time made the pairing pass here and fail at the handshake.
+    assert [camera.orientation for camera in LIBERO.sensors] == [_ROBOSUITE_ORIENTATION] * 4
+
+
 def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
     # LIBERO publishes metric depth beside each colour view. `first_unmet` iterates the
     # cameras the POLICY consumes, so channels it declares none of cannot affect it —
     # which is what makes publishing depth additive rather than a new benchmark
     # identity (ADR 0007).
-    policy = _libero_policy(cameras=[Camera(name="agentview", shape=(256, 256, 3))])
+    policy = _libero_policy(
+        cameras=[Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)]
+    )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
 
 def test_an_rgbd_policy_pairs_with_libero() -> None:
     policy = _libero_policy(
         cameras=[
-            Camera(name="agentview", shape=(256, 256, 3)),
+            Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION),
             Camera(
                 name="agentview_depth",
                 shape=(256, 256, 1),
                 dtype="float32",
                 modality=Modality.DEPTH,
+                orientation=_ROBOSUITE_ORIENTATION,
             ),
         ]
     )
@@ -362,7 +389,11 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
     # uint8 colour frame does not silently pair with the float32 metres published under
     # that name. Without that comparison this is the first failure class: a plausible
     # array a name check cannot reject.
-    policy = _libero_policy(cameras=[Camera(name="agentview_depth", shape=(256, 256, 3))])
+    policy = _libero_policy(
+        cameras=[
+            Camera(name="agentview_depth", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)
+        ]
+    )
     report = check_compatibility(policy, LIBERO)
     assert report.status is Compatibility.INCOMPATIBLE
     assert any("agentview_depth" in reason and "conventions" in reason for reason in report.reasons)
@@ -381,13 +412,22 @@ def _calibration(
 def test_a_policy_wanting_no_calibration_pairs_with_a_benchmark_publishing_it() -> None:
     # Asymmetric, like every other channel comparison: LIBERO declares calibration on
     # all four cameras and a policy that declares none is unaffected (ADR 0008).
-    policy = _libero_policy(cameras=[Camera(name="agentview", shape=(256, 256, 3))])
+    policy = _libero_policy(
+        cameras=[Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)]
+    )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
 
 def test_a_policy_consuming_libero_calibration_pairs() -> None:
     policy = _libero_policy(
-        cameras=[Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration())]
+        cameras=[
+            Camera(
+                name="agentview",
+                shape=(256, 256, 3),
+                calibration=_calibration(),
+                orientation=_ROBOSUITE_ORIENTATION,
+            )
+        ]
     )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 

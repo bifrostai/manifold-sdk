@@ -11,9 +11,14 @@ camera, one pinhole — so both are passed the same value.
 
 A `*_depth` constructor is the metric-depth view from the same viewpoint as the
 colour camera it is named for, published as a separate channel so a colour-only
-policy still pairs (ADR 0007). It carries the same orientation as its sibling,
-which is why neither sets one here: a renderer hands both frames back from one
-read, so a pairing that reorients one reorients both.
+policy still pairs (ADR 0007). It carries the same orientation as its sibling: a
+renderer hands both frames back from one read, so a benchmark that renders bottom-up
+passes the same `orientation` to both.
+
+`orientation` defaults to `UPRIGHT` and is passed by a benchmark whose renderer hands
+back rows in some other order. It is a property of the frames a benchmark actually
+publishes, not of the view, which is why it is a parameter here rather than a value
+baked into a constructor.
 
 These are constructors, not constants, because a camera is not a complete value
 until a benchmark sets its resolution: the name and mount are fixed and shared,
@@ -23,15 +28,29 @@ free parameter, are module constants.) The benchmark passes the shape.
 
 from __future__ import annotations
 
-from manifold.core.sensor import Camera, CameraCalibration, Modality, Mount
+from manifold.core.sensor import Camera, CameraCalibration, CameraOrientation, Modality, Mount
 
 
-def agentview(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+def agentview(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The third-person scene camera, at the given shape."""
-    return Camera(name="agentview", shape=shape, mount=Mount.SCENE, calibration=calibration)
+    return Camera(
+        name="agentview",
+        shape=shape,
+        mount=Mount.SCENE,
+        orientation=orientation,
+        calibration=calibration,
+    )
 
 
-def agentview_depth(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+def agentview_depth(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The third-person scene camera's metric depth, at the given shape."""
     return Camera(
         name="agentview_depth",
@@ -39,22 +58,29 @@ def agentview_depth(shape: tuple[int, ...], calibration: CameraCalibration | Non
         dtype="float32",
         mount=Mount.SCENE,
         modality=Modality.DEPTH,
+        orientation=orientation,
         calibration=calibration,
     )
 
 
-def agentview_left(shape: tuple[int, ...]) -> Camera:
+def agentview_left(
+    shape: tuple[int, ...],
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The left third-person workspace camera, at the given shape.
 
     RoboCasa publishes a stereo pair of workspace views (left + right) alongside
     the wrist camera, rather than the single `agentview` LIBERO uses.
     """
-    return Camera(name="agentview_left", shape=shape, mount=Mount.SCENE)
+    return Camera(name="agentview_left", shape=shape, mount=Mount.SCENE, orientation=orientation)
 
 
-def agentview_right(shape: tuple[int, ...]) -> Camera:
+def agentview_right(
+    shape: tuple[int, ...],
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The right third-person workspace camera, at the given shape."""
-    return Camera(name="agentview_right", shape=shape, mount=Mount.SCENE)
+    return Camera(name="agentview_right", shape=shape, mount=Mount.SCENE, orientation=orientation)
 
 
 def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
@@ -70,12 +96,26 @@ def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
     return Camera(name="over_shoulder_left", shape=shape, mount=Mount.SCENE)
 
 
-def wrist(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+def wrist(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The wrist-mounted camera, at the given shape."""
-    return Camera(name="wrist", shape=shape, mount=Mount.WRIST, calibration=calibration)
+    return Camera(
+        name="wrist",
+        shape=shape,
+        mount=Mount.WRIST,
+        orientation=orientation,
+        calibration=calibration,
+    )
 
 
-def wrist_depth(shape: tuple[int, ...], calibration: CameraCalibration | None = None) -> Camera:
+def wrist_depth(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The wrist-mounted camera's metric depth, at the given shape."""
     return Camera(
         name="wrist_depth",
@@ -83,6 +123,7 @@ def wrist_depth(shape: tuple[int, ...], calibration: CameraCalibration | None = 
         dtype="float32",
         mount=Mount.WRIST,
         modality=Modality.DEPTH,
+        orientation=orientation,
         calibration=calibration,
     )
 
