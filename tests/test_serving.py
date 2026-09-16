@@ -1212,3 +1212,40 @@ def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
     assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
     assert datetime.fromisoformat(first["started_at"]).tzinfo is not None
     assert not (tmp_path / "results" / "bench.json.tmp").exists()
+
+
+def test_write_rollup_includes_a_set_task_id(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
+
+    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    record = EpisodeRecord(
+        episode_idx=0,
+        task_name="Pack boxed foods into the bin",
+        success=False,
+        steps=1,
+        initialization_sec=0.0,
+        started_at=moment,
+        ended_at=moment,
+        task_id="FoodPacking2BoxesTask",
+    )
+
+    path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="bench")
+
+    (written,) = json.loads(path.read_text())["records"]
+    assert written["task_id"] == "FoodPacking2BoxesTask"
+    assert written["task_name"] == "Pack boxed foods into the bin"
+
+
+def test_write_rollup_omits_an_unset_task_id(tmp_path):
+    import json
+
+    from manifold.recipes import BenchmarkResult, write_rollup
+
+    path = write_rollup(
+        BenchmarkResult(records=_records(1, successes=0)), tmp_path, benchmark_name="bench"
+    )
+
+    (written,) = json.loads(path.read_text())["records"]
+    assert "task_id" not in written
