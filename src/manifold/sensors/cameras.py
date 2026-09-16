@@ -40,9 +40,9 @@ def agentview(
     return Camera(
         name="agentview",
         shape=shape,
-        mount=Mount.SCENE,
-        orientation=orientation,
         calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
     )
 
 
@@ -55,16 +55,17 @@ def agentview_depth(
     return Camera(
         name="agentview_depth",
         shape=shape,
+        calibration=calibration,
+        orientation=orientation,
         dtype="float32",
         mount=Mount.SCENE,
         modality=Modality.DEPTH,
-        orientation=orientation,
-        calibration=calibration,
     )
 
 
 def agentview_left(
     shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
     orientation: CameraOrientation = CameraOrientation.UPRIGHT,
 ) -> Camera:
     """The left third-person workspace camera, at the given shape.
@@ -72,18 +73,35 @@ def agentview_left(
     RoboCasa publishes a stereo pair of workspace views (left + right) alongside
     the wrist camera, rather than the single `agentview` LIBERO uses.
     """
-    return Camera(name="agentview_left", shape=shape, mount=Mount.SCENE, orientation=orientation)
+    return Camera(
+        name="agentview_left",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
 
 
 def agentview_right(
     shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
     orientation: CameraOrientation = CameraOrientation.UPRIGHT,
 ) -> Camera:
     """The right third-person workspace camera, at the given shape."""
-    return Camera(name="agentview_right", shape=shape, mount=Mount.SCENE, orientation=orientation)
+    return Camera(
+        name="agentview_right",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
 
 
-def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
+def over_shoulder_left(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
     """The over-the-shoulder scene camera on the left, at the given shape.
 
     RoboLab's `OverShoulderLeftCameraCfg` — a fixed third-person view set behind
@@ -93,7 +111,13 @@ def over_shoulder_left(shape: tuple[int, ...]) -> Camera:
     folding a behind-the-shoulder view into the front-facing `agentview` would
     let a LIBERO-trained policy pair against a viewpoint it never saw.
     """
-    return Camera(name="over_shoulder_left", shape=shape, mount=Mount.SCENE)
+    return Camera(
+        name="over_shoulder_left",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
 
 
 def wrist(
@@ -105,9 +129,9 @@ def wrist(
     return Camera(
         name="wrist",
         shape=shape,
-        mount=Mount.WRIST,
-        orientation=orientation,
         calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
     )
 
 
@@ -120,11 +144,11 @@ def wrist_depth(
     return Camera(
         name="wrist_depth",
         shape=shape,
+        calibration=calibration,
+        orientation=orientation,
         dtype="float32",
         mount=Mount.WRIST,
         modality=Modality.DEPTH,
-        orientation=orientation,
-        calibration=calibration,
     )
 
 
