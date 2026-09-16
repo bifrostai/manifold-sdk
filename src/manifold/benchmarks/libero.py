@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from manifold.core.benchmark import Benchmark
 from manifold.core.conventions import CameraAxes, Frame
-from manifold.core.sensor import CameraCalibration, CameraIntrinsics
+from manifold.core.sensor import CameraCalibration, CameraIntrinsics, CameraOrientation
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.sensors.cameras import agentview, agentview_depth, wrist, wrist_depth
 
@@ -50,14 +50,20 @@ _WRIST_CALIBRATION = CameraCalibration(
     frame=Frame.WORLD,
 )
 
+# Every LIBERO camera publishes MuJoCo's render buffer as robosuite hands it back, and
+# that buffer is bottom-up: row 0 is the bottom of the scene. All four sensors share one
+# value because a renderer hands the colour frame and the depth beside it back from one
+# read.
+_ORIENTATION = CameraOrientation.FLIPPED_VERTICAL
+
 LIBERO = Benchmark(
     name="libero",
     embodiment=FRANKA_EE_DELTA,
     sensors=[
-        agentview((CAMERA_RES, CAMERA_RES, 3), _AGENTVIEW_CALIBRATION),
-        wrist((CAMERA_RES, CAMERA_RES, 3), _WRIST_CALIBRATION),
-        agentview_depth((CAMERA_RES, CAMERA_RES, 1), _AGENTVIEW_CALIBRATION),
-        wrist_depth((CAMERA_RES, CAMERA_RES, 1), _WRIST_CALIBRATION),
+        agentview((CAMERA_RES, CAMERA_RES, 3), _AGENTVIEW_CALIBRATION, _ORIENTATION),
+        wrist((CAMERA_RES, CAMERA_RES, 3), _WRIST_CALIBRATION, _ORIENTATION),
+        agentview_depth((CAMERA_RES, CAMERA_RES, 1), _AGENTVIEW_CALIBRATION, _ORIENTATION),
+        wrist_depth((CAMERA_RES, CAMERA_RES, 1), _WRIST_CALIBRATION, _ORIENTATION),
     ],
     instruction=True,
 )
