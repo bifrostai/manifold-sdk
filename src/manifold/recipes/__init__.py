@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
+from manifold.recipes.endpoint import EndpointFailed, serve_endpoint
 from manifold.recipes.inspect import Recorder, describe, dump, load
 from manifold.recipes.lerobot import SignatureSuggestion, from_lerobot_checkpoint
 from manifold.recipes.pairing import Pairing, read_pairing
@@ -31,6 +32,7 @@ __all__ = [
     "NO_RECORDER",
     "BenchmarkResult",
     "ChunkEndpoint",
+    "EndpointFailed",
     "EpisodeCursor",
     "EpisodeRecord",
     "EpisodeRecorder",
@@ -55,6 +57,7 @@ __all__ = [
     "run_episodes",
     "run_sharded_benchmark",
     "serve",
+    "serve_endpoint",
     "serve_http",
     "shard_episode_ids",
     "write_rollup",
