@@ -580,6 +580,10 @@ class EpisodeRecord:
     the reset observation's instruction where the benchmark publishes one, and the
     benchmark's own name otherwise. `episode_idx` is the global episode id, which a
     sharded run partitions disjointly, so two shards never report the same one.
+
+    `task_id` is the benchmark's own identifier for the task, such as a class
+    name. It is optional. Two tasks in a suite may share an instruction, and
+    `task_id` separates them. When it is unset, the rollup omits the key.
     """
 
     episode_idx: int
@@ -589,6 +593,7 @@ class EpisodeRecord:
     initialization_sec: float
     started_at: datetime
     ended_at: datetime
+    task_id: str | None = None
 
     @property
     def elapsed_sec(self) -> float:
@@ -641,7 +646,8 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
     This is the file a runner scans a benchmark worker's output directory for: a
     flat document keyed ``records``, one entry per episode, instants in ISO 8601.
     The runner derives ``elapsed_sec`` from the two instants, so the rollup does
-    not carry a duration free to disagree with them.
+    not carry a duration free to disagree with them. ``task_id`` is written
+    only when a record sets it.
     """
     records = [
         {
@@ -652,6 +658,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
             "initialization_sec": record.initialization_sec,
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
+            **({} if record.task_id is None else {"task_id": record.task_id}),
         }
         for record in result.records
     ]
