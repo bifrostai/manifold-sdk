@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from manifold.wire.bridge import (
     BRIDGE_PROTOCOL_VERSION,
+    HTTP_MEDIA_TYPE,
     MAX_FRAME_BYTES,
     FrameChannel,
     FrameType,
@@ -18,8 +19,12 @@ from manifold.wire.bridge import (
     decode_observation,
     decode_rtc_fields,
     encode_action,
+    encode_action_chunk,
     encode_observation,
+    pack_http_frame,
     pack_stream_frame,
+    read_action_chunk,
+    read_http_frame,
     read_stream_frame,
 )
 from manifold.wire.codec import (
@@ -37,6 +42,7 @@ from manifold.wire.codec import (
 __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
     "DEFAULT_FRAME_LANE",
+    "HTTP_MEDIA_TYPE",
     "MAX_FRAME_BYTES",
     "FrameChannel",
     "FrameType",
@@ -45,12 +51,16 @@ __all__ = [
     "decode_observation",
     "decode_rtc_fields",
     "encode_action",
+    "encode_action_chunk",
     "encode_observation",
     "find_encoded_image",
     "pack_encoded_image",
     "pack_frame",
+    "pack_http_frame",
     "pack_ndarray",
     "pack_stream_frame",
+    "read_action_chunk",
+    "read_http_frame",
     "read_stream_frame",
     "unpack_frame",
     "unpack_ndarray",
