@@ -67,7 +67,7 @@ from manifold.wire.codec import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 # The frame-and-codec contract version. Bump when that contract changes.
 BRIDGE_PROTOCOL_VERSION = 4
@@ -437,6 +437,74 @@ def decode_action(payload: dict[str, Any]) -> Action:
     return Action.from_array(values)
 
 
+def encode_action_chunk(actions: Sequence[Action]) -> dict[str, Any]:
+    """Encode one open-loop chunk of actions into a frame payload.
+
+    The stream path sends one ACTION frame per step. A request/response transport
+    answers one observation with the whole chunk instead, because the caller holds
+    the chunk queue. Each entry is an `encode_action` payload, so one action has
+    the same encoding on either path.
+    """
+    return {"actions": [encode_action(action) for action in actions]}
+
+
+def read_action_chunk(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read the per-step action payloads out of a chunk payload, in order.
+
+    Each entry stays encoded rather than decoded to an `Action`: a caller holding
+    the chunk queue sends one entry on as the ACTION frame of one step, and the
+    bytes are then identical to the ones the one-step-at-a-time path produces.
+    Call `decode_action` on an entry to read its values.
+
+    Raises:
+        ValueError: If the payload does not carry an `actions` list, or if an
+            entry is not an action payload. A short chunk would otherwise refill
+            the caller's queue at a different cadence from the one-step path,
+            which is the divergence this encoding exists to rule out.
+    """
+    actions = payload.get("actions") if isinstance(payload, dict) else None
+    if actions is None or not isinstance(actions, list):
+        raise ValueError("action chunk payload missing 'actions'")
+    malformed = [index for index, entry in enumerate(actions) if not isinstance(entry, dict)]
+    if len(malformed) > 0:
+        raise ValueError(f"action chunk entries {malformed} are not action payloads")
+    return actions
+
+
+# The media type a bridge frame is carried under on a request/response
+# transport. Both halves of HTTP serving write it, so it is declared once here.
+HTTP_MEDIA_TYPE = "application/x-msgpack"
+
+
+def pack_http_frame(frame_type: FrameType | str, payload: dict[str, Any]) -> bytes:
+    """Frame one message for a request/response transport: the frame, unprefixed.
+
+    The `pack_stream_frame` twin for a transport that delimits each message
+    itself. One request carries one frame and its response carries one frame, so
+    the sequence number orders nothing here and every body is written with seq 0.
+    """
+    return pack_frame(str(frame_type), payload, seq=0)
+
+
+def read_http_frame(body: bytes, expected: FrameType | str) -> dict[str, Any]:
+    """Read one frame off a request or response body and return its payload.
+
+    The inverse of `pack_http_frame`. The route fixes which frame the body
+    carries, so `expected` is checked here and a mismatch is refused instead of
+    being dispatched on.
+
+    Raises:
+        ValueError: If the body does not decode, carries another frame type, or
+            does not carry a payload mapping. This parses an untrusted body, so
+            the three cases share one message.
+    """
+    frame = unpack_frame(body) or {}
+    payload = frame.get("payload")
+    if frame.get("type") != str(expected) or not isinstance(payload, dict):
+        raise ValueError(f"body does not decode as a {expected} frame with a payload")
+    return payload
+
+
 def pack_stream_frame(
     frame_type: FrameType | str,
     payload: dict[str, Any],
@@ -605,6 +673,7 @@ def decode_rtc_fields(payload: dict[str, Any]) -> tuple[np.ndarray | None, int |
 
 __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
+    "HTTP_MEDIA_TYPE",
     "MAX_FRAME_BYTES",
     "FrameChannel",
     "FrameType",
@@ -612,7 +681,11 @@ __all__ = [
     "decode_observation",
     "decode_rtc_fields",
     "encode_action",
+    "encode_action_chunk",
     "encode_observation",
+    "pack_http_frame",
     "pack_stream_frame",
+    "read_action_chunk",
+    "read_http_frame",
     "read_stream_frame",
 ]
