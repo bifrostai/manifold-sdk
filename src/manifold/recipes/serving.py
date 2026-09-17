@@ -15,6 +15,12 @@ connection gets its own `Session` and `PipelineState` over that shared model.
 concurrency safety is the endpoint's responsibility (its lock is taken inside
 `forward`/`infer`). Each session is `close`d on disconnect to release its scratch.
 
+`serve_http` is the same policy side over a request/response transport: it loads
+the model and returns a plain ASGI app whose three routes carry the same frames.
+The chunk queue sits with the caller there rather than in a `Session`, so the
+served wrap does not keep per-episode state and a repeated request is safe.
+`recipes/endpoint` is the caller.
+
 The transport today is a TCP socket carrying the bridge's length-prefixed frames;
 the send/recv surface is named as a minimal `Transport` Protocol (which
 `FrameChannel` satisfies structurally), marking the seam where a future transport
@@ -25,6 +31,7 @@ plugs in. Compatibility-checking lives on the policy side (ADR-0001): `serve` ru
 
 from __future__ import annotations
 
+import asyncio
 import json
 import socket
 import threading
@@ -32,7 +39,7 @@ from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
@@ -47,7 +54,7 @@ from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from manifold.core.native_layout import NativeLayout
     from manifold.core.observation_space import ObservationSpace
@@ -56,6 +63,12 @@ if TYPE_CHECKING:
     from manifold.recipes.pairing import Pairing
     from manifold.recipes.recording import EpisodeRecorder
     from manifold.wire import ImageFormat
+
+    # The ASGI surface `serve_http` returns, spelled out rather than imported, so
+    # the SDK declares the contract without depending on a web framework.
+    ASGIReceive = Callable[[], Awaitable[dict[str, Any]]]
+    ASGISend = Callable[[dict[str, Any]], Awaitable[None]]
+    ASGIApp = Callable[[dict[str, Any], ASGIReceive, ASGISend], Awaitable[None]]
 
 
 def _emit(message: str) -> None:
@@ -293,6 +306,248 @@ def _resolve_pipeline(
     if isinstance(pipeline, Pipeline):
         return pipeline
     return pipeline(benchmark)
+
+
+def _http_app(
+    endpoint: PolicyEndpoint,
+    pipeline: Pipeline,
+    observation_source: ObservationSpace,
+    emit: Callable[[str], None],
+) -> ASGIApp:
+    """Build the three-route ASGI app over a model that is already loaded.
+
+    Every handler is synchronous work against the shared model, so each one runs
+    on a worker thread and the event loop stays free to read the next body.
+    """
+    signature = endpoint.signature
+    chunk_steps = _chunk_steps(endpoint) if pipeline.pack is not None else 1
+    stateful = _stateful_adapters(pipeline)
+
+    def hello(body: bytes) -> tuple[int, bytes]:
+        return _http_gate(body, signature, pipeline, emit), b""
+
+    def forward(body: bytes) -> tuple[int, bytes]:
+        # The refusal is a property of the loaded pipeline and not of the caller,
+        # so it is answered here as well as on `/hello`. A stateless `/forward`
+        # carries no session, so nothing here can tell whether this caller was
+        # the one `/hello` refused.
+        if len(stateful) > 0:
+            emit(f"refusing a forward: {', '.join(stateful)} holds per-episode state")
+            return 409, b""
+        return _http_forward(
+            body, endpoint, pipeline, observation_source, signature, chunk_steps, emit
+        )
+
+    async def app(scope: dict[str, Any], receive: ASGIReceive, send: ASGISend) -> None:
+        if scope["type"] == "lifespan":
+            await _run_lifespan(receive, send)
+            return
+        if scope["type"] != "http":
+            return
+        route = _route(scope)
+        if route == ("GET", "/healthz"):
+            await _respond(send, 200)
+            return
+        handler = {("POST", "/hello"): hello, ("POST", "/forward"): forward}.get(route)
+        if handler is None:
+            await _respond(send, 404)
+            return
+        try:
+            body = await _read_body(receive)
+        except ValueError as exc:
+            emit(f"refusing a request body: {exc}")
+            await _respond(send, 400)
+            return
+        status, answer = await asyncio.to_thread(handler, body)
+        await _respond(send, status, answer)
+
+    return app
+
+
+def _http_gate(
+    body: bytes,
+    signature: PolicySignature,
+    pipeline: Pipeline,
+    emit: Callable[[str], None],
+) -> int:
+    """Answer one `/hello` body: 200 accepts the pairing, 409 refuses it.
+
+    Runs the same `_gate` the bridge handshake runs. It refuses a stateful
+    adapter first: each `/forward` request is independent of every earlier one,
+    so a per-episode history cannot be kept across them, and folding every
+    observation against a fresh empty history would score the run silently wrong.
+    The reasons stay in this server's log — the caller reads only the status.
+    """
+    try:
+        payload = bridge.read_http_frame(body, FrameType.HELLO)
+        benchmark = Benchmark.model_validate(payload["benchmark"])
+    except (KeyError, ValueError) as exc:
+        emit(f"undecodable hello body, refusing it: {exc}")
+        return 400
+    stateful = _stateful_adapters(pipeline)
+    if len(stateful) > 0:
+        emit(
+            "incompatible — rejecting the pairing. reasons: "
+            f"['HTTP serving cannot carry the per-episode state of {', '.join(stateful)}']"
+        )
+        return 409
+    if _gate(signature, benchmark, pipeline, emit):
+        return 200
+    return 409
+
+
+def _http_forward(
+    body: bytes,
+    endpoint: PolicyEndpoint,
+    pipeline: Pipeline,
+    observation_source: ObservationSpace,
+    signature: PolicySignature,
+    chunk_steps: int,
+    emit: Callable[[str], None],
+) -> tuple[int, bytes]:
+    """Answer one `/forward` body with the encoded actions of one chunk.
+
+    An undecodable body is the caller's own bug and is answered 400, which the
+    caller fails on at once. A failure inside the model is answered 500, which
+    the caller repeats within its forward budget.
+    """
+    try:
+        observation = bridge.decode_observation(bridge.read_http_frame(body, FrameType.OBSERVATION))
+    except (KeyError, ValueError) as exc:
+        emit(f"undecodable observation body, refusing it: {exc}")
+        return 400, b""
+    try:
+        chunk = _forward_chunk(
+            endpoint, observation, pipeline, observation_source, signature, chunk_steps
+        )
+    except Exception as exc:  # answered 500, which the caller may repeat.
+        emit(f"forward failed: {exc!r}")
+        return 500, b""
+    return 200, bridge.pack_http_frame(FrameType.ACTION, bridge.encode_action_chunk(chunk))
+
+
+def _forward_chunk(
+    endpoint: PolicyEndpoint,
+    observation: Observation,
+    pipeline: Pipeline,
+    observation_source: ObservationSpace,
+    signature: PolicySignature,
+    chunk_steps: int,
+) -> list[Action]:
+    """Fold one observation into a whole chunk of actions: the `/forward` kernel.
+
+    The request/response cut of `_infer_step`. `_infer_step` asks a `Session` for
+    one step of a buffered chunk, which keeps the buffer and the step pointer on
+    the policy side; here the caller keeps the queue, so the model runs once and
+    every step of the chunk is unpacked and carried through the action chain. The
+    no-packing degenerate answers the observation directly, which is a chunk of
+    one, and mints a session per request because `Session.infer` is the only
+    surface that answers an observation — sharing one session across concurrent
+    requests would interleave its scratch.
+
+    A fresh `PipelineState` per request is the whole of the per-episode history,
+    which is why `_http_gate` refuses a stateful adapter.
+    """
+    state = PipelineState()
+    observation = pipeline.apply_observation(
+        observation, source=observation_source, state=state, lane=DEFAULT_LANE
+    )
+    if pipeline.pack is not None and pipeline.unpack is not None:
+        native = pipeline.apply_pack(observation, source=signature.observation_space)
+        raw_chunk = endpoint.forward(native)
+        chunk = [pipeline.apply_unpack(raw_chunk, step=step) for step in range(chunk_steps)]
+    else:
+        session = endpoint.session()
+        try:
+            chunk = [session.infer(observation)]
+        finally:
+            session.close()
+    return [
+        pipeline.apply_action(action, source=signature.action_space, state=state, lane=DEFAULT_LANE)
+        for action in chunk
+    ]
+
+
+def _chunk_steps(endpoint: PolicyEndpoint) -> int:
+    """How many actions one `/forward` answers with: the profile's `exec_steps`.
+
+    Read off the endpoint's profile through `ChunkEndpoint`, the field
+    `OpenLoopChunkQueue.advance` counts against, so the two serving paths cut a
+    chunk at the same step. The count itself never crosses the wire: the caller
+    refills its queue from however many actions come back.
+    """
+    return cast("ChunkEndpoint", endpoint).profile.exec_steps
+
+
+def _stateful_adapters(pipeline: Pipeline) -> list[str]:
+    """The class names of the pipeline's stateful adapters, in chain order."""
+    return [
+        type(adapter).__name__
+        for adapter in (*pipeline.observation, *pipeline.action)
+        if adapter.state_key is not None
+    ]
+
+
+def _route(scope: dict[str, Any]) -> tuple[str, str]:
+    """The method and the path this app routes on, with any mount prefix off.
+
+    ASGI puts the mount prefix in `path` as well as in `root_path`, and the
+    client prefixes every request with the path of its URL, so the prefix comes
+    off here or a mounted app answers 404 to all three routes.
+    """
+    path = scope["path"]
+    root = scope.get("root_path", "")
+    if len(root) > 0 and path.startswith(root):
+        path = path[len(root) :] or "/"
+    return scope["method"], path
+
+
+async def _read_body(receive: ASGIReceive) -> bytes:
+    """Read one whole request body, looping while the server sets `more_body`.
+
+    Stops at `MAX_FRAME_BYTES`, the cap `read_stream_frame` applies to a frame
+    off a socket, so that a peer cannot demand an unbounded allocation from a
+    route published on a public host. A body over the cap raises, which the
+    caller answers 400.
+    """
+    chunks: list[bytes] = []
+    read = 0
+    while True:
+        event = await receive()
+        chunk = event.get("body", b"")
+        read += len(chunk)
+        if read > bridge.MAX_FRAME_BYTES:
+            raise ValueError(f"request body is over {bridge.MAX_FRAME_BYTES} bytes")
+        chunks.append(chunk)
+        if not event.get("more_body", False):
+            return b"".join(chunks)
+
+
+async def _respond(send: ASGISend, status: int, body: bytes = b"") -> None:
+    """Send one response: the status and headers, then the body in one message."""
+    await send(
+        {
+            "type": "http.response.start",
+            "status": status,
+            "headers": [(b"content-type", bridge.HTTP_MEDIA_TYPE.encode())],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+
+
+async def _run_lifespan(receive: ASGIReceive, send: ASGISend) -> None:
+    """Acknowledge the lifespan startup and shutdown events, then return.
+
+    A server that opens a lifespan scope waits for the startup acknowledgement
+    before it routes any request, so an app that ignores the scope never serves.
+    """
+    while True:
+        event = await receive()
+        if event["type"] == "lifespan.startup":
+            await send({"type": "lifespan.startup.complete"})
+        elif event["type"] == "lifespan.shutdown":
+            await send({"type": "lifespan.shutdown.complete"})
+            return
 
 
 def _run_episode(
@@ -1118,6 +1373,52 @@ def launch_server(
     )
 
 
+def serve_http(
+    pairing: Pairing,
+    *,
+    weights: str | None = None,
+    device: str | None = None,
+    on_event: Callable[[str], None] = _emit,
+) -> ASGIApp:
+    """Load one pairing's model and return the ASGI app that serves it over HTTP.
+
+    The request/response spelling of `serve`: the same gate and the same
+    benchmark->model->benchmark fold, one route at a time instead of over a held
+    connection, so a wrap runs behind Modal, Cerebrium or any HTTPS host. The
+    returned app is plain ASGI, so the SDK does not depend on a web framework —
+    return it from an `@modal.asgi_app()` function, or serve it with
+    `uvicorn module:app`.
+
+    The model is loaded before the app is returned. Both hosts hold traffic until
+    the process answers, so a caller during a cold start sees a slow 200 instead
+    of a refused connection.
+
+    Routes:
+        GET /healthz: 200, since the app exists only once the model is loaded.
+        POST /hello: the benchmark's HELLO frame. 200 accepts the pairing, 409
+            refuses it; the reasons go to `on_event` and not into the response.
+        POST /forward: one OBSERVATION frame. The response carries the actions of
+            one chunk, encoded by `bridge.encode_action_chunk`. The chunk length
+            is the wrap's own decision and never crosses the wire.
+
+    The caller keeps the open-loop chunk queue, so the wrap does not keep
+    per-episode state and a `/forward` that failed is safe to send again. A
+    pipeline with a stateful adapter cannot be served this way, and `/hello`
+    refuses one rather than answering from an empty history each time.
+
+    `pairing` fixes the pipeline and the observation space for every request,
+    because a stateless `/forward` cannot look up what an earlier `/hello`
+    accepted. `/hello` is where a benchmark the pipeline cannot bridge is refused.
+    `weights` falls back to the profile's `default_weights` when None; `device`
+    autodetects when None.
+    """
+    profile = pairing.profile
+    endpoint = profile.load(weights if weights is not None else profile.default_weights, device)
+    pipeline = _resolve_pipeline(pairing.pipeline, pairing.benchmark)
+    on_event(f"loaded the policy; serving {pairing.benchmark.name} over HTTP")
+    return _http_app(endpoint, pipeline, pairing.benchmark.observation_space, on_event)
+
+
 __all__ = [
     "BenchmarkResult",
     "ChunkEndpoint",
@@ -1135,5 +1436,6 @@ __all__ = [
     "run_episodes",
     "run_sharded_benchmark",
     "serve",
+    "serve_http",
     "write_rollup",
 ]

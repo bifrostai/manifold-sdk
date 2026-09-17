@@ -22,6 +22,7 @@ from manifold.recipes.serving import (
     run_episodes,
     run_sharded_benchmark,
     serve,
+    serve_http,
     write_rollup,
 )
 from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
@@ -54,6 +55,7 @@ __all__ = [
     "run_episodes",
     "run_sharded_benchmark",
     "serve",
+    "serve_http",
     "shard_episode_ids",
     "write_rollup",
 ]
