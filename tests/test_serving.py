@@ -14,7 +14,7 @@ import threading
 from contextlib import suppress
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -146,7 +146,7 @@ def test_launch_server_loads_the_shared_profile_and_serves_the_single_pipeline(m
         ),
     )
 
-    launch_server([_pairing(profile)], port=9000)
+    launch_server([_pairing(profile)], port=9000, max_workers=3)
 
     assert captured["endpoint"] is sentinel_endpoint
     assert captured["pipeline"] == "PIPE"  # a single pairing serves its own pipeline
@@ -178,6 +178,62 @@ def test_launch_server_rejects_pairings_that_do_not_share_one_profile(monkeypatc
 
     with pytest.raises(ValueError):
         launch_server([_pairing(profile_a), _pairing(profile_b)], port=9000)
+
+
+# serve
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return cast(int, probe.getsockname()[1])
+
+
+def test_serve_accepts_connections_beyond_max_workers():
+    from manifold.recipes import serve
+
+    # None of these connections sends HELLO, so each started worker blocks in `recv`
+    # and holds its connection open. The accept loop reaches the last connection
+    # because `max_workers` no longer limits how many connections are served at once.
+    connections = 12
+    port = _free_port()
+    accepted = threading.Semaphore(0)
+    accepted_count = 0
+    listening = threading.Event()
+
+    def record(event: str) -> None:  # called from the accept loop and its workers
+        nonlocal accepted_count
+        if event.startswith("listening on"):
+            listening.set()
+        elif event.startswith("benchmark connected from"):
+            accepted_count += 1
+            accepted.release()
+            if accepted_count == connections:
+                raise KeyboardInterrupt
+
+    server = threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace()),),  # never read: the gate runs after HELLO
+        kwargs={"host": "127.0.0.1", "port": port, "max_workers": 1, "on_event": record},
+        daemon=True,
+    )
+    server.start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    clients = []
+    try:
+        for _ in range(connections):
+            clients.append(socket.create_connection(("127.0.0.1", port), timeout=5))
+        for accepted_so_far in range(connections):
+            assert accepted.acquire(timeout=5), (
+                f"the accept loop stopped after {accepted_so_far} of {connections} connections"
+            )
+    finally:
+        for client in clients:
+            with suppress(OSError):
+                client.close()
+        server.join(timeout=5)
+    assert not server.is_alive(), "the server did not stop after accepting the test connections"
 
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------

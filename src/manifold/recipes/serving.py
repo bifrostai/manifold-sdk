@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import time
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -146,7 +147,6 @@ def _serve_connection(
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     conn: socket.socket,
     addr: Any,
-    slots: threading.BoundedSemaphore,
     emit: Callable[[str], None],
 ) -> None:
     """Own one runner connection end to end on its worker thread.
@@ -154,8 +154,7 @@ def _serve_connection(
     Wraps `_serve_session` so any error in a single connection — a rejected
     pairing, a dropped socket, a malformed frame — is caught, logged, and confined
     here: it never propagates to the accept loop and so never kills the server or
-    a sibling shard. The semaphore slot taken on accept is always released, and the
-    socket always closed, even on error.
+    a sibling shard. The socket is always closed, even on error.
     """
     try:
         with conn:
@@ -163,8 +162,6 @@ def _serve_connection(
         emit(f"connection from {addr} closed")
     except Exception as exc:  # one shard's failure must not kill the server.
         emit(f"connection from {addr} errored, dropping it: {exc!r}")
-    finally:
-        slots.release()
 
 
 def _serve_session(
@@ -677,20 +674,23 @@ def serve(
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
     host: str = "127.0.0.1",
     port: int,
+    # TODO: max_workers is now ignored, but kept for backwards compatibility. Remove it
+    # after all existing callers no longer pass max_workers.
     max_workers: int = 8,
     on_event: Callable[[str], None] = _emit,
 ) -> None:
     """Serve one loaded policy to many runner shards concurrently over the bridge.
 
-    Accepts connections, each handled on its own daemon thread with its own session
-    and `PipelineState`, so shards sharing the loaded model have isolated per-session
-    state. Concurrency is bounded by `max_workers` (a semaphore the accept loop
-    acquires before spawning a worker). Per connection the worker reads HELLO, gates
-    the pairing (`check_compatibility` + `verify`), and only if both pass sends READY
-    and answers each OBSERVATION with an ACTION until BYE. Inference safety is the
-    endpoint's concern (its lock is inside the forward), so `serve` does not add
-    loop-level serialization. One connection's failure is confined to its worker thread; a
-    KeyboardInterrupt stops accepting and waits briefly for in-flight workers.
+    The accept loop has no application-level connection limit. It starts one daemon
+    thread per connection, with a separate session and `PipelineState`, so shards
+    sharing the loaded model have isolated per-session state. `serve` does not set a
+    deadline on the HELLO read, so a peer that sends nothing can block its worker
+    indefinitely. Per connection the worker reads HELLO, gates the pairing
+    (`check_compatibility` + `verify`), and only if both pass sends READY and answers
+    each OBSERVATION with an ACTION until BYE. An endpoint that takes its own lock
+    runs one forward at a time across connections; `serve` does not add another lock.
+    One connection's failure is confined to its worker thread. A KeyboardInterrupt
+    stops accepting and gives all in-flight workers one second in total to finish.
 
     `pipeline` may be None (empty pipeline), a callable invoked per connection with
     the benchmark (the dynamic-injection hook — the pipeline arrives with the job),
@@ -698,42 +698,35 @@ def serve(
     sink must be concurrency-safe.
     """
     emit = on_event
-    slots = threading.BoundedSemaphore(max_workers)
     workers: list[threading.Thread] = []
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         listener.bind((host, port))
-        # A backlog > 1 lets several shards queue at the kernel while the accept
-        # loop is between iterations, so a burst of runner connects is not refused.
-        listener.listen(max(max_workers, 8))
-        emit(f"listening on {host}:{port} (TCP), up to {max_workers} concurrent shard(s)")
+        # Request the platform's maximum backlog for connections that arrive between
+        # accept iterations.
+        listener.listen(socket.SOMAXCONN)
+        emit(f"listening on {host}:{port} (TCP)")
         try:
             while True:
-                slots.acquire()
-                try:
-                    conn, addr = listener.accept()
-                except BaseException:
-                    # Nothing was spawned, so release the slot we took on the way in.
-                    slots.release()
-                    raise
+                conn, addr = listener.accept()
                 emit(f"benchmark connected from {addr}")
                 worker = threading.Thread(
                     target=_serve_connection,
-                    args=(endpoint, pipeline, conn, addr, slots, emit),
+                    args=(endpoint, pipeline, conn, addr, emit),
                     daemon=True,
                 )
                 workers.append(worker)
                 worker.start()
-                # Drop references to finished workers so the list cannot grow
-                # without bound across a long-lived server.
+                # Drop references to workers that have finished.
                 workers = [w for w in workers if w.is_alive()]
         except KeyboardInterrupt:
             emit("interrupted; shutting down")
-    # The listener is closed; give in-flight workers a brief, bounded chance to
+    # The listener is closed; give all in-flight workers one second in total to
     # finish their current frame exchange. They are daemon threads, so the process
     # never hangs on a stuck connection.
+    shutdown_deadline = time.monotonic() + 1.0
     for worker in workers:
-        worker.join(timeout=1.0)
+        worker.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
 
 
 def run_benchmark(
@@ -1094,6 +1087,8 @@ def launch_server(
     device: str | None = None,
     host: str = "0.0.0.0",
     port: int,
+    # TODO: max_workers is now ignored, but kept for backwards compatibility. Remove it
+    # after all existing callers no longer pass max_workers.
     max_workers: int = 8,
     on_event: Callable[[str], None] = _emit,
 ) -> None:
@@ -1120,7 +1115,6 @@ def launch_server(
         pipeline=pipeline,
         host=host,
         port=port,
-        max_workers=max_workers,
         on_event=on_event,
     )
 
