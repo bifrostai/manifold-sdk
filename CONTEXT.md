@@ -37,3 +37,19 @@ forward by calling an inference server it dials over the network. The signature,
 the native layouts and the session are unchanged, so a policy served this way is
 not a distinct kind of version: only `forward` differs.
 _Avoid_: proxy policy, hosted policy, remote policy
+
+**HTTP serving** - `serve` over request and response instead of a connection:
+`serve_http(pairing, weights=..., device=...)` loads the model and returns a
+plain ASGI app, so a wrap can sit behind Modal, Cerebrium or any HTTPS host
+without the SDK taking a web framework. Three routes, each read by the caller:
+`/healthz` answers once the model is loaded, `/hello` runs the pairing gate on a
+benchmark spec and answers yes or no as today's handshake does, `/forward` takes
+one observation and returns the actions of one chunk.
+The wrap holds no per-episode state, so the caller keeps the chunk queue and
+a stateful adapter is not served this way yet; ids on `/forward` are the
+extension when it is. Because no request depends on an earlier one, a
+`/forward` that failed may be sent again: the caller retries a connection
+error, a timeout, a 5xx, a 408 or a 429 within one budget per observation,
+and treats any other 4xx as the wrap's answer. Distinct from a remote driver,
+which keeps the wrap on the caller's side and dials out from there.
+_Avoid_: REST policy, endpoint mode, stateless serving
