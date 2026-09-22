@@ -29,6 +29,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,7 +49,7 @@ from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Iterator
 
     from manifold.core.native_layout import NativeLayout
     from manifold.core.observation_space import ObservationSpace
@@ -82,6 +83,17 @@ def _parse_server(server: str) -> tuple[str, int]:
     if not host or not port:
         raise ValueError(f"server must be host:port, got {server!r}")
     return host, int(port)
+
+
+def _validated_episode_ids(episode_ids: Iterable[int]) -> Iterator[int]:
+    seen: set[int] = set()
+    for episode_id in episode_ids:
+        if episode_id < 0:
+            raise ValueError("episode ids must be >= 0")
+        if episode_id in seen:
+            raise ValueError("episode ids must be distinct")
+        seen.add(episode_id)
+        yield episode_id
 
 
 def _run_episode_in_process(
@@ -789,7 +801,7 @@ def _run_connected(
     reset_episode: Callable[[int], Observation],
     step: Callable[[Action], StepResult],
     *,
-    episode_ids: Sequence[int],
+    episode_ids: Iterable[int],
     max_steps: int,
     image_format: ImageFormat,
     host: str,
@@ -809,7 +821,7 @@ def _run_connected(
     one shard wants is how far through its own list it is.
     """
     emit = on_event
-    ids = list(episode_ids)
+    total = len(episode_ids) if isinstance(episode_ids, Sequence) else None
     with (
         _live_view_context(benchmark, live_view_server, live_view_camera) as live_view,
         socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock,
@@ -829,7 +841,7 @@ def _run_connected(
         emit("policy confirmed the pairing (ready)")
 
         records: list[EpisodeRecord] = []
-        for position, episode_id in enumerate(ids):
+        for position, episode_id in enumerate(episode_ids):
             record = _run_episode(
                 channel,
                 lambda episode_id=episode_id: reset_episode(episode_id),
@@ -845,10 +857,11 @@ def _run_connected(
             if on_episode is not None:
                 on_episode(record)
             outcome = "success" if record.success else "failure"
-            emit(f"episode {position + 1}/{len(ids)}: {outcome}")
+            count = str(position + 1) if total is None else f"{position + 1}/{total}"
+            emit(f"episode {count}: {outcome}")
         channel.send(FrameType.BYE, {})
         result = BenchmarkResult(records=tuple(records))
-        emit(f"done — {result.successes}/{len(ids)} succeeded")
+        emit(f"done — {result.successes}/{result.episodes} succeeded")
         return result
 
 
@@ -878,7 +891,7 @@ def run_episodes(
     step: Callable[[Action], StepResult],
     *,
     server: str,
-    episode_ids: Sequence[int],
+    episode_ids: Iterable[int],
     max_steps: int,
     image_format: ImageFormat = "raw",
     on_event: Callable[[str], None] = _emit,
@@ -903,6 +916,9 @@ def run_episodes(
     policy as a ``host:port`` string. `on_episode` receives each finished record
     before the next episode begins.
 
+    An iterable may supply IDs lazily. Each ID is requested after the previous
+    episode's recorder and callback finish, using the same policy connection.
+
     The ids must be distinct: `episode_idx` identifies an episode within a run, so a
     repeat would report one index twice. An empty list runs nothing, which is the
     result when there is nothing outstanding.
@@ -916,16 +932,13 @@ def run_episodes(
         PairingRejected: Propagated from `run_benchmark`.
     """
     host, port = _parse_server(server)
-    ids = list(episode_ids)
-    if any(episode_id < 0 for episode_id in ids):
-        raise ValueError("episode ids must be >= 0")
-    if len(set(ids)) != len(ids):
-        raise ValueError("episode ids must be distinct")
+    ids = _validated_episode_ids(episode_ids)
+    validated: Iterable[int] = list(ids) if isinstance(episode_ids, Sequence) else ids
     return _run_connected(
         benchmark,
         reset_episode,
         step,
-        episode_ids=ids,
+        episode_ids=validated,
         max_steps=max_steps,
         image_format=image_format,
         host=host,
