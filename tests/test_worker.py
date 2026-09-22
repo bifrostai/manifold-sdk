@@ -267,3 +267,144 @@ def test_worker_uses_length_prefixed_scheduler_frames(monkeypatch, tmp_path):
     assert not thread.is_alive()
     assert errors == []
     assert [record.task_id for record in result.records] == ["3", "7"]
+
+
+def _reassign_first_episode(monkeypatch, scheduler, *, repeat_attempt=False, output_dir=None):
+    receive = scheduler.recv
+
+    def reassigned():
+        reply = receive()
+        if reply["type"] == "work" and scheduler.assigned == 2:
+            payload = reply["payload"]
+            payload["item_id"] = "item-3"
+            payload["task_id"] = "3"
+            payload["task_config"]["task_id"] = 3
+            payload["episode_indices"] = [3]
+            if repeat_attempt:
+                payload["attempt_id"] = "attempt-3"
+            if output_dir is not None:
+                payload["output_dir"] = str(output_dir)
+        return reply
+
+    monkeypatch.setattr(scheduler, "recv", reassigned)
+
+
+def test_reclaimed_episode_runs_under_new_attempt_in_same_worker(monkeypatch, tmp_path):
+    run, scheduler, policy, connections, events = _execute(monkeypatch, tmp_path)
+    _reassign_first_episode(monkeypatch, scheduler)
+    result = run()
+    assert [record.episode_idx for record in result.records] == [3, 3]
+    assert [event for event in events if isinstance(event, tuple) and event[0] == "begin"] == [
+        ("begin", 3),
+        ("begin", 3),
+    ]
+    assert connections == ["policy"]
+    assert policy.sent.count(FrameType.RESET) == 2
+    completed = [payload for kind, payload in scheduler.sent if kind == "complete"]
+    assert [payload["attempt_id"] for payload in completed] == ["attempt-3", "attempt-7"]
+    assert [payload["results"][0]["episode_idx"] for payload in completed] == [3, 3]
+    assert [payload["artifacts"][0]["episode_idx"] for payload in completed] == [3, 3]
+    assert (tmp_path / "attempt-3" / "replay.mfr").read_bytes() == b"closed"
+    assert (tmp_path / "attempt-7" / "replay.mfr").read_bytes() == b"closed"
+
+
+def test_duplicate_attempt_is_rejected_before_second_reset(monkeypatch, tmp_path):
+    run, scheduler, policy, _, _ = _execute(monkeypatch, tmp_path)
+    _reassign_first_episode(monkeypatch, scheduler, repeat_attempt=True)
+    with pytest.raises(ValueError, match="repeated an executed attempt"):
+        run()
+    assert policy.sent.count(FrameType.RESET) == 1
+    assert [kind for kind, _ in scheduler.sent].count("complete") == 1
+    assert not (tmp_path / "attempt-7").exists()
+
+
+@pytest.mark.parametrize("directory", ["attempt-3", "attempt-3/nested", "."])
+def test_new_attempt_cannot_reuse_or_overlap_recording_directory(monkeypatch, tmp_path, directory):
+    run, scheduler, policy, _, _ = _execute(monkeypatch, tmp_path)
+    _reassign_first_episode(monkeypatch, scheduler, output_dir=tmp_path / directory)
+    with pytest.raises(ValueError, match="reused an attempt output directory"):
+        run()
+    assert policy.sent.count(FrameType.RESET) == 1
+    assert (tmp_path / "attempt-3" / "replay.mfr").read_bytes() == b"closed"
+
+
+def test_lease_lost_completion_is_omitted_before_reclaimed_attempt(monkeypatch, tmp_path):
+    run, scheduler, policy, connections, events = _execute(monkeypatch, tmp_path)
+    _reassign_first_episode(monkeypatch, scheduler)
+    receive = scheduler.recv
+
+    def discard_expired():
+        reply = receive()
+        if reply["type"] == "accepted" and reply["payload"]["attempt_id"] == "attempt-3":
+            reply["type"] = "discarded"
+            reply["payload"]["reason"] = "lease_lost"
+        return reply
+
+    monkeypatch.setattr(scheduler, "recv", discard_expired)
+    result = run()
+    assert [record.episode_idx for record in result.records] == [3]
+    assert connections == ["policy"]
+    assert policy.sent.count(FrameType.RESET) == 2
+    assert events.count("close") == 2
+    assert [payload["attempt_id"] for kind, payload in scheduler.sent if kind == "complete"] == [
+        "attempt-3",
+        "attempt-7",
+    ]
+    assert (tmp_path / "attempt-3" / "replay.mfr").read_bytes() == b"closed"
+    assert (tmp_path / "attempt-7" / "replay.mfr").read_bytes() == b"closed"
+
+
+@pytest.mark.parametrize("wrong_field", ["attempt_id", "item_id", "reason"])
+def test_invalid_discard_receipt_is_fatal(monkeypatch, tmp_path, wrong_field):
+    run, scheduler, policy, _, _ = _execute(monkeypatch, tmp_path)
+    receive = scheduler.recv
+
+    def invalid_discard():
+        reply = receive()
+        if reply["type"] == "accepted":
+            reply["type"] = "discarded"
+            reply["payload"]["reason"] = "lease_lost"
+            reply["payload"][wrong_field] = "wrong-value"
+        return reply
+
+    monkeypatch.setattr(scheduler, "recv", invalid_discard)
+    with pytest.raises(ValueError):
+        run()
+    assert policy.sent.count(FrameType.RESET) == 1
+    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim", "complete"]
+
+
+def test_duplicate_attempt_is_rejected_even_after_lease_loss(monkeypatch, tmp_path):
+    run, scheduler, policy, _, _ = _execute(monkeypatch, tmp_path)
+    _reassign_first_episode(monkeypatch, scheduler, repeat_attempt=True)
+    receive = scheduler.recv
+
+    def discarded():
+        reply = receive()
+        if reply["type"] == "accepted":
+            reply["type"] = "discarded"
+            reply["payload"]["reason"] = "lease_lost"
+        return reply
+
+    monkeypatch.setattr(scheduler, "recv", discarded)
+    with pytest.raises(ValueError, match="repeated an executed attempt"):
+        run()
+    assert policy.sent.count(FrameType.RESET) == 1
+
+
+@pytest.mark.parametrize("message", ["lease_lost", "completion mismatch"])
+def test_scheduler_error_remains_fatal_regardless_of_message(monkeypatch, tmp_path, message):
+    run, scheduler, policy, _, _ = _execute(monkeypatch, tmp_path)
+    receive = scheduler.recv
+
+    def failed_completion():
+        reply = receive()
+        if reply["type"] == "accepted":
+            return {"type": "error", "payload": {"message": message}}
+        return reply
+
+    monkeypatch.setattr(scheduler, "recv", failed_completion)
+    with pytest.raises(RuntimeError, match=message):
+        run()
+    assert policy.sent.count(FrameType.RESET) == 1
+    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim", "complete"]

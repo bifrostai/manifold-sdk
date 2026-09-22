@@ -64,8 +64,11 @@ def run_worker(
 ) -> BenchmarkResult:
     """Execute scheduler assignments with one policy connection.
 
-    Send results after closing each replay, then wait for scheduler acceptance
-    before claiming again.
+    Send results after closing each replay, then wait for the scheduler to accept
+    or discard the attempt before claiming again. A new attempt may repeat a global
+    episode index. Attempt IDs must be distinct, and output directories must not
+    overlap. Omit a result when the scheduler discards its attempt after lease loss,
+    then claim again.
     """
     host, separator, port = scheduler_address.rpartition(":")
     if not separator or not host:
@@ -111,6 +114,23 @@ class _WorkerRun:
         self.current_task: WorkerTask | None = None
         self.current_recorder: EpisodeRecorder | None = None
         self.records: list[EpisodeRecord] = []
+        self.attempt_ids: set[str] = set()
+        self.output_dirs: set[Path] = set()
+
+    def assign_task(self, payload: dict[str, Any]) -> None:
+        task = _parse_task_assignment(payload)
+        if task.attempt_id in self.attempt_ids:
+            raise ValueError("scheduler repeated an executed attempt")
+        output_dir = task.output_dir.resolve()
+        if any(
+            output_dir.is_relative_to(previous) or previous.is_relative_to(output_dir)
+            for previous in self.output_dirs
+        ):
+            raise ValueError("scheduler reused an attempt output directory")
+        self.attempt_ids.add(task.attempt_id)
+        self.output_dirs.add(output_dir)
+        self.current_task = task
+        self.current_recorder = self.recorder_factory(task)
 
     def claim_episode_ids(self) -> Iterator[int]:
         while True:
@@ -130,9 +150,10 @@ class _WorkerRun:
                 continue
             if reply["type"] != "work":
                 raise ValueError(f"unexpected scheduler response {reply['type']}")
-            self.current_task = _parse_task_assignment(payload)
-            self.current_recorder = self.recorder_factory(self.current_task)
-            yield self.current_task.episode_idx
+            self.assign_task(payload)
+            # The generic recipe requires distinct IDs. Restore the global index
+            # before recording or reporting each attempt.
+            yield len(self.attempt_ids) - 1
             self.current_task = None
             self.current_recorder = None
 
@@ -141,8 +162,9 @@ class _WorkerRun:
         return self.reset_task(self.current_task)
 
     def begin(self, episode_id: int) -> None:
+        assert self.current_task is not None
         assert self.current_recorder is not None
-        self.current_recorder.begin(episode_id)
+        self.current_recorder.begin(self.current_task.episode_idx)
 
     def record(self, action: Action, *, success: bool, done: bool) -> None:
         assert self.current_recorder is not None
@@ -155,7 +177,7 @@ class _WorkerRun:
     def report_episode(self, record: EpisodeRecord) -> None:
         assert self.current_task is not None
         task = self.current_task
-        record = replace(record, task_id=task.task_id)
+        record = replace(record, episode_idx=task.episode_idx, task_id=task.task_id)
         result = asdict(record)
         result["started_at"] = record.started_at.isoformat()
         result["ended_at"] = record.ended_at.isoformat()
@@ -178,9 +200,16 @@ class _WorkerRun:
                 "artifacts": artifacts,
             },
         )
-        accepted = _receive_scheduler_frame(self.channel, "accepted")["payload"]
-        if accepted["item_id"] != task.item_id or accepted["attempt_id"] != task.attempt_id:
-            raise ValueError("scheduler accepted a different item or attempt")
+        reply = _receive_scheduler_frame(self.channel)
+        if reply["type"] not in ("accepted", "discarded"):
+            raise ValueError(f"expected scheduler accepted or discarded, got {reply['type']}")
+        receipt = reply["payload"]
+        if receipt["item_id"] != task.item_id or receipt["attempt_id"] != task.attempt_id:
+            raise ValueError("scheduler replied for a different item or attempt")
+        if reply["type"] == "discarded":
+            if receipt["reason"] != "lease_lost":
+                raise ValueError("unexpected scheduler discard reason")
+            return
         self.records.append(record)
 
 
