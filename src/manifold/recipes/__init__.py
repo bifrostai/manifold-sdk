@@ -5,6 +5,7 @@ from __future__ import annotations
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
 from manifold.recipes.inspect import Recorder, describe, dump, load
 from manifold.recipes.lerobot import SignatureSuggestion, from_lerobot_checkpoint
+from manifold.recipes.local import serve as serve_function
 from manifold.recipes.pairing import Pairing, read_pairing
 from manifold.recipes.recording import NO_RECORDER, EpisodeRecorder
 from manifold.recipes.resolve import resolve
@@ -58,6 +59,7 @@ __all__ = [
     "run_sharded_benchmark",
     "run_worker",
     "serve",
+    "serve_function",
     "shard_episode_ids",
     "write_rollup",
 ]
