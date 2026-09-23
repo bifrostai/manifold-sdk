@@ -733,3 +733,36 @@ def test_verify_catches_an_ee_pose_corrupted_on_the_second_arm() -> None:
     assert not report.ok
     assert _check(report, "observation.ee_pose.position.arm0").passed
     assert not _check(report, "observation.ee_pose.position.arm1").passed
+
+
+def test_bimanual_rotation_adapter_converts_both_arms() -> None:
+    # This test runs the adapters end to end. The policy emits AXIS_ANGLE, the
+    # benchmark wants QUATERNION, and RotationFormatAdapter converts between them.
+    # Before the arm loop existed, the adapter converted arm 0 and passed arm 1
+    # through in the source encoding. verify now reports that as a failed arm1
+    # rotation check.
+    bench = _bimanual_benchmark(rotation=RotationFormat.QUATERNION)
+    policy = _policy(
+        EEActionSpace(
+            rotation=RotationFormat.AXIS_ANGLE,
+            gripper=GripperFormat.SIGNED,
+            arm_count=2,
+            delta=True,
+        ),
+        proprio=Proprioception(
+            ee_pose=EEObservationSpec(
+                rotation=RotationFormat.QUATERNION,
+                gripper=GripperObservationSpec(dim=2),
+                arm_count=2,
+            )
+        ),
+        rotation=RotationFormat.QUATERNION,
+    )
+    pipeline = Pipeline(action=[RotationFormatAdapter(target=RotationFormat.QUATERNION)])
+
+    report = verify(policy, bench, pipeline)
+
+    assert report.ok, report.reasons
+    assert _check(report, "action.rotation.arm0").passed
+    assert _check(report, "action.rotation.arm1").passed
+    assert _check(report, "action.position.arm1").passed
