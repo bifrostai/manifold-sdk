@@ -74,12 +74,21 @@ class FrameRebaseAdapter(ObservationAdapter):
         ee_pose = self._spec(source).proprioception.ee_pose
         if ee_pose is None:
             raise TypeError("FrameRebaseAdapter needs a proprioception with an ee_pose")
-        block = [float(v) for v in observation.state["ee_pose"]]
+        values = [float(v) for v in observation.state["ee_pose"]]
+        # The loop below takes exactly `arm_count` arms, so a value longer than the spec
+        # declares would lose its tail without a word; refuse it by name instead.
+        ee_pose.validate_value(values)
         pos_len, rot_len, _ = ee_step_layout(ee_pose.rotation, None)
-        rot_block = block[pos_len : pos_len + rot_len]
-        matrix = to_matrix(rot_block, ee_pose.rotation)
-        rebased = from_matrix(matrix @ self.rotation.T, ee_pose.rotation)
-        reencoded = block[:pos_len] + rebased + block[pos_len + rot_len :]
+        # One arm's values, which is what the layout repeats. Treating the whole
+        # value as one arm would transform arm 0 and pass every other arm through
+        # untouched -- the halves of one robot then disagree.
+        per_arm = ee_pose.per_arm_length()
+        reencoded: list[float] = []
+        for arm in range(ee_pose.arm_count):
+            arm_values = values[arm * per_arm : (arm + 1) * per_arm]
+            matrix = to_matrix(arm_values[pos_len : pos_len + rot_len], ee_pose.rotation)
+            rebased = from_matrix(matrix @ self.rotation.T, ee_pose.rotation)
+            reencoded += arm_values[:pos_len] + rebased + arm_values[pos_len + rot_len :]
         state = {**observation.state, "ee_pose": np.asarray(reencoded, dtype=np.float32)}
         return replace(observation, state=state)
 

@@ -1,8 +1,8 @@
 """Convert the rotation encoding of an end-effector action to a target format.
 
 A policy trained to emit euler-XYZ rotations can drive a benchmark that expects
-axis-angle (or quaternion, or 6D). Only the rotation portion of each step is
-re-encoded; the position and gripper pass through. Re-encoding the same rotation
+axis-angle (or quaternion, or 6D). Only the rotation of each arm is re-encoded;
+its position and gripper pass through. Re-encoding the same rotation
 in another format is lossless.
 
 Parameterized by the target format: `RotationFormatAdapter(target=AXIS_ANGLE)`.
@@ -41,19 +41,25 @@ class RotationFormatAdapter(ActionAdapter):
         return source.model_copy(update={"rotation": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Re-encode the rotation of each per-step block; pass position and gripper through."""
+        """Re-encode the rotation of each arm; pass position and gripper through."""
         if not isinstance(source, EEActionSpace):
             raise TypeError("RotationFormatAdapter transforms EEActionSpace only")
         buffer = [float(v) for v in values]
         source.validate_value(buffer)
         pos_len, rot_len, _ = ee_step_layout(source.rotation, source.gripper)
-        per_step = pos_len + rot_len + (1 if source.gripper is not None else 0)
+        # One arm's values, which is what the layout repeats: a bimanual step carries
+        # `arm_count` of them, so the buffer holds chunk_size x arm_count of
+        # them back to back and a flat loop covers both. Iterating chunk steps alone would
+        # re-encode the first arm of each step and pass the rest through unconverted.
+        per_arm = source.per_arm_length()
         out: list[float] = []
-        for step in range(source.chunk_size):
-            block = buffer[step * per_step : (step + 1) * per_step]
-            out.extend(block[:pos_len])  # position
-            out.extend(convert(block[pos_len : pos_len + rot_len], source.rotation, self.target))
-            out.extend(block[pos_len + rot_len :])  # gripper, if any
+        for slice_index in range(source.chunk_size * source.arm_count):
+            arm_values = buffer[slice_index * per_arm : (slice_index + 1) * per_arm]
+            out.extend(arm_values[:pos_len])  # position
+            out.extend(
+                convert(arm_values[pos_len : pos_len + rot_len], source.rotation, self.target)
+            )
+            out.extend(arm_values[pos_len + rot_len :])  # gripper, if any
         return out
 
 

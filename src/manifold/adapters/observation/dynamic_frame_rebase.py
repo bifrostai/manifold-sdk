@@ -13,8 +13,8 @@ same math is moved to the seam: the runner publishes the world-frame `ee_pose` p
 the `base_pose` on a side channel, and this adapter performs the rebase, transforming
 both position and rotation. The rotation is decoded to a matrix (via `lib.rotation`),
 rotated by the base orientation's inverse, and re-encoded in the `ee_pose`'s current
-rotation format; position is the translated, rotated offset. The gripper slot and
-every other channel pass through untouched.
+rotation format; position is the translated, rotated offset. Each arm's gripper
+slot, and every other channel, pass through untouched.
 
 The base pose is read from `base_pose_channel` (default ``"base_pose"``) and may be
 either a flat 16-element row-major 4x4 homogeneous matrix, or a 7-element
@@ -106,18 +106,31 @@ class DynamicFrameRebaseAdapter(ObservationAdapter):
             )
         base = _homogeneous(observation.state[self.base_pose_channel])
 
-        block = [float(v) for v in observation.state["ee_pose"]]
+        values = [float(v) for v in observation.state["ee_pose"]]
+        # The loop below takes exactly `arm_count` arms, so a value longer than the spec
+        # declares would lose its tail without a word; refuse it by name instead.
+        ee_pose.validate_value(values)
         pos_len, rot_len, _ = ee_step_layout(ee_pose.rotation, None)
-        pos = np.asarray(block[:pos_len], dtype=np.float64)
-        rot_block = block[pos_len : pos_len + rot_len]
-        ee = np.eye(4, dtype=np.float64)
-        ee[:3, :3] = to_matrix(rot_block, ee_pose.rotation)
-        ee[:3, 3] = pos
+        # One arm's values, which is what the layout repeats. Treating the whole
+        # value as one arm would transform arm 0 and pass every other arm through
+        # untouched -- the halves of one robot then disagree.
+        per_arm = ee_pose.per_arm_length()
+        # Both arms rebase against the same base pose: the channel describes where the
+        # robot is, not where one of its arms is.
+        inverse_base = np.linalg.inv(base)
+        reencoded: list[float] = []
+        for arm in range(ee_pose.arm_count):
+            arm_values = values[arm * per_arm : (arm + 1) * per_arm]
+            ee = np.eye(4, dtype=np.float64)
+            ee[:3, :3] = to_matrix(arm_values[pos_len : pos_len + rot_len], ee_pose.rotation)
+            ee[:3, 3] = np.asarray(arm_values[:pos_len], dtype=np.float64)
 
-        ee_in_target = np.linalg.inv(base) @ ee
-        new_pos = ee_in_target[:3, 3].tolist()
-        new_rot = from_matrix(ee_in_target[:3, :3], ee_pose.rotation)
-        reencoded = new_pos + new_rot + block[pos_len + rot_len :]
+            ee_in_target = inverse_base @ ee
+            reencoded += (
+                ee_in_target[:3, 3].tolist()
+                + from_matrix(ee_in_target[:3, :3], ee_pose.rotation)
+                + arm_values[pos_len + rot_len :]
+            )
 
         # Pass through every other state channel (including the base pose channel
         # itself) unchanged; only ee_pose is rebased.

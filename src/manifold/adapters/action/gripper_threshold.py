@@ -39,21 +39,21 @@ from manifold.lib.gripper import from_openness
 def _threshold_gripper(
     out: list[float],
     gripper_offset: int,
-    step_width: int,
-    chunk_size: int,
+    group_width: int,
+    groups: int,
     target: GripperFormat,
     cutoff: float,
 ) -> None:
-    """Threshold the gripper slot of each per-step block in place.
+    """Threshold one gripper slot in each of `groups` back-to-back groups, in place.
 
-    The gripper sits at `gripper_offset` within each `step_width`-wide step block;
-    there are `chunk_size` such blocks back to back. The head is a raw open-high
-    score (not yet in `target`'s range), so threshold it directly: above the cutoff
-    is open (openness 1.0), at or below is closed. Shared by both threshold adapters
-    so the EE and unified paths cannot drift.
+    The slot sits at `gripper_offset` within each `group_width`-wide group. A group is
+    whatever the caller strides by -- one arm of an end-effector action, or one step
+    of a unified buffer -- so the helper knows nothing of either. The head is a raw
+    open-high score (not yet in `target`'s range), so it is thresholded directly:
+    above the cutoff is open (openness 1.0), at or below is closed.
     """
-    for step in range(chunk_size):
-        gripper_index = step * step_width + gripper_offset
+    for group in range(groups):
+        gripper_index = group * group_width + gripper_offset
         openness = 1.0 if out[gripper_index] > cutoff else 0.0
         out[gripper_index] = from_openness(openness, target)
 
@@ -84,18 +84,21 @@ class GripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper element of each per-step block into the target."""
+        """Threshold every arm's gripper element into the target."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperThresholdAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the slice below assumes the declared length
-        # The gripper is the last element of each per-step block.
-        per_step = source.expected_length() // source.chunk_size
+        # The gripper is the last element of each ARM's values, and a bimanual step
+        # holds `arm_count` of them. Treating the step as one arm would threshold
+        # the trailing gripper and leave the others in the source encoding -- a robot
+        # whose left arm obeys a different convention from its right.
+        per_arm = source.per_arm_length()
         _threshold_gripper(
             out,
-            gripper_offset=per_step - 1,
-            step_width=per_step,
-            chunk_size=source.chunk_size,
+            gripper_offset=per_arm - 1,
+            group_width=per_arm,
+            groups=source.chunk_size * source.arm_count,
             target=self.target,
             cutoff=self.cutoff,
         )
@@ -107,14 +110,14 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
 
     The whole-body counterpart of `GripperThresholdAdapter`: the RLDX/RoboCasa use
     case, where the policy emits a fixed-width buffer (e.g. 12-D) whose leading slots
-    are an `EEActionSpace` payload carrying the gripper and the rest is padding. The
-    gripper sits at the payload's per-step boundary within each `width`-wide step,
-    located via the payload's `ee_step_layout` — never hardcoded.
+    are an `EEActionSpace` payload carrying the grippers and the rest is padding. Each
+    arm's gripper ends that arm's values within the payload, in every `width`-wide
+    step, located via the payload's `per_arm_length()` — never hardcoded.
 
     It is declared with `from_spec = to_spec = UnifiedActionSpace` so it is reachable
     through `check_compatibility`, which matches an adapter by exact `from_spec` type.
     Polarity and lossy semantics are identical to the EE adapter: it shares
-    `_threshold_gripper`, so the two cannot drift.
+    `_threshold_gripper`, and both walk every arm of the payload.
     """
 
     from_spec: ClassVar[type[BaseModel]] = UnifiedActionSpace
@@ -149,13 +152,13 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"payload": new_payload})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper dim inside each per-step width-D block of the buffer.
+        """Threshold every arm's gripper inside each `width`-wide step of the buffer.
 
-        The gripper sits at `payload.per_step_length() - 1` (the last dim of the EE
-        payload) within each `width`-wide step. The payload's per-step length must fit
-        within `width`; if it does not the layout is malformed and indexing the
-        gripper would read past the step, so raise rather than corrupt a neighbouring
-        dim.
+        Arm `n`'s gripper is the last dim of that arm's values in the payload, at
+        `n * per_arm + per_arm - 1` within each `width`-wide step. The payload's
+        per-step length must fit within `width`; if it does not the layout is
+        malformed and indexing a gripper would read past the step, so raise rather
+        than corrupt a neighbouring dim.
         """
         if not isinstance(source, UnifiedActionSpace) or not isinstance(
             source.payload, EEActionSpace
@@ -175,15 +178,18 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
                 f"unified payload per-step length {per_step} does not fit within "
                 f"the buffer width {source.width}: the gripper would index past the step"
             )
-        # Gripper offset within each width-D step: last dim of the arm payload.
-        _threshold_gripper(
-            out,
-            gripper_offset=per_step - 1,
-            step_width=source.width,
-            chunk_size=payload.chunk_size,
-            target=self.target,
-            cutoff=self.cutoff,
-        )
+        # One pass per arm, each at that arm's gripper: offsetting by the whole payload
+        # step would threshold the last arm alone and hand the rest on as raw scores.
+        per_arm = payload.per_arm_length()
+        for arm in range(payload.arm_count):
+            _threshold_gripper(
+                out,
+                gripper_offset=arm * per_arm + per_arm - 1,
+                group_width=source.width,
+                groups=payload.chunk_size,
+                target=self.target,
+                cutoff=self.cutoff,
+            )
         return out
 
 
