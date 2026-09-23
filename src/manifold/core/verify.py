@@ -32,6 +32,8 @@ from manifold.core.conventions import (
 from manifold.core.embodiment import (
     EEActionSpace,
     EEObservationSpec,
+    JointActionSpace,
+    JointObservationSpec,
     Proprioception,
     ValueSpec,
 )
@@ -513,33 +515,66 @@ def _run_action(
         _fail(checks, "action", "action pipeline failed on probe data", exc)
         return
     checks.append(VerifyCheck("action.length", True, "output length fits the benchmark spec"))
-
-    # Meaning comparison is only valid for end-effector pairs (the rotation/gripper
-    # conventions live on EEActionSpace). A joint or unified target is length-only.
-    if not (isinstance(policy_action, EEActionSpace) and isinstance(bench_action, EEActionSpace)):
-        return
     out = [float(v) for v in result.values]
 
+    # A joint pairing is also compared arm by arm. `JointActionSpace` has its own
+    # gripper and arm layout, so a length check alone does not detect two arms that
+    # were swapped, or a gripper moved out of its arm's slot.
+    if isinstance(policy_action, JointActionSpace) and isinstance(bench_action, JointActionSpace):
+        _compare_joint_action(policy_action, bench_action, values, out, pipeline, checks)
+        return
+    # A unified target is a padded buffer. Its payload is not divided into arms at
+    # this point, so only the length is checked. An end-effector pairing is compared
+    # below.
+    if not (isinstance(policy_action, EEActionSpace) and isinstance(bench_action, EEActionSpace)):
+        return
+
+    # Each arm carries a distinct position, so comparing the arms one at a time
+    # catches damage to a single arm. The name of each check includes the arm index.
+    #
+    # The two sides of a pairing may disagree about how many arms they have. Such a
+    # pairing cannot be compared arm for arm. `check_compatibility` rejects it before
+    # this function runs, because it compares the adapted spec to the benchmark's
+    # spec for equality, and that comparison includes `arm_count`. This function
+    # would compare the wrong halves without saying so, so it refuses here too.
+    arms = policy_action.arm_count
+    if arms != bench_action.arm_count:
+        checks.append(
+            VerifyCheck(
+                "action.arms",
+                False,
+                f"policy declares {arms} arm(s), benchmark "
+                f"{bench_action.arm_count}; arms cannot be compared",
+            )
+        )
+        return
     src_pos, src_rot, _ = ee_step_layout(policy_action.rotation, policy_action.gripper)
     tgt_pos, tgt_rot, _ = ee_step_layout(bench_action.rotation, bench_action.gripper)
-    _compare_position("action.position", values[:src_pos], out[:tgt_pos], checks)
-    _compare_rotation(
-        "action.rotation",
-        values[src_pos : src_pos + src_rot],
-        policy_action.rotation,
-        out[tgt_pos : tgt_pos + tgt_rot],
-        bench_action.rotation,
-        checks,
-    )
-    if policy_action.gripper is not None and bench_action.gripper is not None:
-        _compare_gripper(
-            "action.gripper",
-            values[src_pos + src_rot],
-            policy_action.gripper,
-            out[tgt_pos + tgt_rot],
-            bench_action.gripper,
+    # The layout repeats one arm's values. Read that width from the spec, so that it
+    # cannot drift from the width that the spec declares.
+    src_arm, tgt_arm = policy_action.per_arm_length(), bench_action.per_arm_length()
+    for arm in range(arms):
+        suffix = "" if arms == 1 else f".arm{arm}"
+        in_arm = values[arm * src_arm : (arm + 1) * src_arm]
+        out_arm = out[arm * tgt_arm : (arm + 1) * tgt_arm]
+        _compare_position(f"action.position{suffix}", in_arm[:src_pos], out_arm[:tgt_pos], checks)
+        _compare_rotation(
+            f"action.rotation{suffix}",
+            in_arm[src_pos : src_pos + src_rot],
+            policy_action.rotation,
+            out_arm[tgt_pos : tgt_pos + tgt_rot],
+            bench_action.rotation,
             checks,
         )
+        if policy_action.gripper is not None and bench_action.gripper is not None:
+            _compare_gripper(
+                f"action.gripper{suffix}",
+                in_arm[src_pos + src_rot],
+                policy_action.gripper,
+                out_arm[tgt_pos + tgt_rot],
+                bench_action.gripper,
+                checks,
+            )
 
     # The probe action carries an open gripper. A separate closed-gripper probe
     # covers the other end of the range. An adapter that preserves open but
@@ -554,7 +589,7 @@ def _check_closed_gripper(
     pipeline: Pipeline,
     checks: list[VerifyCheck],
 ) -> None:
-    """Run a closed-gripper probe action and compare its gripper openness."""
+    """Close the gripper on each arm, then compare the arms one at a time."""
     from manifold.lib.rotation import convert  # lazy — avoids circular import at module load
 
     assert policy_action.gripper is not None and bench_action.gripper is not None
@@ -562,7 +597,11 @@ def _check_closed_gripper(
     tgt_pos, tgt_rot, _ = ee_step_layout(bench_action.rotation, bench_action.gripper)
     rotation = convert(_PROBE_ROTVEC, RotationFormat.AXIS_ANGLE, policy_action.rotation)
     closed = from_openness(0.0, policy_action.gripper)
-    action = [*_PROBE_POSITION[:src_pos], *rotation, closed]
+    arms = policy_action.arm_count
+    # The probe closes the gripper on each arm, and the comparison below reads each
+    # arm. Without that, an adapter that thresholds a single gripper slot and leaves
+    # the other in its source encoding would pass.
+    action = [*_PROBE_POSITION[:src_pos], *rotation, closed] * arms
     try:
         result = pipeline.apply_action(
             Action.from_array(action), source=policy_action, state=PipelineState()
@@ -571,14 +610,114 @@ def _check_closed_gripper(
         _fail(checks, "action.gripper.closed", "closed-gripper probe failed", exc)
         return
     out = [float(v) for v in result.values]
-    _compare_gripper(
-        "action.gripper.closed",
-        action[src_pos + src_rot],
-        policy_action.gripper,
-        out[tgt_pos + tgt_rot],
-        bench_action.gripper,
+    src_arm = policy_action.per_arm_length()
+    tgt_arm = bench_action.per_arm_length()
+    for arm in range(arms):
+        name = "action.gripper.closed" if arms == 1 else f"action.gripper.closed.arm{arm}"
+        _compare_gripper(
+            name,
+            action[arm * src_arm + src_pos + src_rot],
+            policy_action.gripper,
+            out[arm * tgt_arm + tgt_pos + tgt_rot],
+            bench_action.gripper,
+            checks,
+        )
+
+
+def _compare_joint_action(
+    policy_action: JointActionSpace,
+    bench_action: JointActionSpace,
+    values: list[float],
+    out: list[float],
+    pipeline: Pipeline,
+    checks: list[VerifyCheck],
+) -> None:
+    """Compare a joint action arm by arm, then close the grippers and compare again.
+
+    The closed probe works as `_check_closed_gripper` does. The open probe covers only
+    the open end of the gripper range. Without the closed probe, an adapter that
+    produces a wrong value for a closed gripper would pass.
+    """
+    _compare_joint_arms(
+        "action.joints",
+        "action.gripper",
+        policy_action,
+        values,
+        bench_action,
+        out,
         checks,
     )
+    if policy_action.gripper is None or bench_action.gripper is None:
+        return
+    closed = _probe_joint_step(policy_action, openness=0.0)
+    try:
+        result = pipeline.apply_action(
+            Action.from_array(closed),
+            source=policy_action,
+            state=PipelineState(),
+        )
+    except Exception as exc:
+        _fail(checks, "action.gripper.closed", "closed-gripper probe failed", exc)
+        return
+    out_closed = [float(v) for v in result.values]
+    arms = policy_action.arm_count
+    src_arm, tgt_arm = policy_action.per_arm_length(), bench_action.per_arm_length()
+    src_joints = policy_action.dof // arms
+    tgt_joints = bench_action.dof // bench_action.arm_count
+    for arm in range(arms):
+        _compare_gripper(
+            "action.gripper.closed" if arms == 1 else f"action.gripper.closed.arm{arm}",
+            closed[arm * src_arm + src_joints],
+            policy_action.gripper,
+            out_closed[arm * tgt_arm + tgt_joints],
+            bench_action.gripper,
+            checks,
+        )
+
+
+def _compare_joint_arms(
+    joints_name: str,
+    gripper_name: str,
+    source: JointActionSpace | JointObservationSpec,
+    in_values: list[float],
+    target: JointActionSpace | JointObservationSpec,
+    out_values: list[float],
+    checks: list[VerifyCheck],
+) -> None:
+    """Compare a joint layout arm by arm: each arm's joints, then that arm's gripper.
+
+    Each arm's `dof // arm_count` joints are followed by that arm's gripper. If two
+    arms are swapped, or a gripper moves out of its arm, some slot here changes even
+    though the total length stays the same. Joints are compared for equality, as a
+    position is. No adapter in the SDK maps joint values, so a change can only come
+    from the pipeline.
+    """
+    arms = source.arm_count
+    if arms != target.arm_count:
+        checks.append(
+            VerifyCheck(
+                joints_name,
+                False,
+                f"arm count changed across the chain: {arms} -> {target.arm_count}",
+            )
+        )
+        return
+    src_arm, tgt_arm = source.per_arm_length(), target.per_arm_length()
+    src_joints, tgt_joints = source.dof // arms, target.dof // arms
+    for arm in range(arms):
+        suffix = "" if arms == 1 else f".arm{arm}"
+        src = in_values[arm * src_arm : (arm + 1) * src_arm]
+        dst = out_values[arm * tgt_arm : (arm + 1) * tgt_arm]
+        _compare_position(f"{joints_name}{suffix}", src[:src_joints], dst[:tgt_joints], checks)
+        if source.gripper is not None and target.gripper is not None:
+            _compare_gripper(
+                f"{gripper_name}{suffix}",
+                src[src_joints],
+                source.gripper,
+                dst[tgt_joints],
+                target.gripper,
+                checks,
+            )
 
 
 def _run_observation(
@@ -620,6 +759,21 @@ def _run_observation(
         out_ee_values = [float(v) for v in result.state["ee_pose"]]
         _compare_ee_pose(in_ee, in_ee_values, out_ee, out_ee_values, checks, not_checked)
 
+    # joint_pos uses the same arm-by-arm layout as a joint action, so it is compared
+    # the same way. A length check alone does not detect two arms that were swapped.
+    in_joint = bench_obs.proprioception.joint_pos
+    out_joint = policy_consumes.proprioception.joint_pos
+    if in_joint is not None and out_joint is not None and "joint_pos" in observation.state:
+        _compare_joint_arms(
+            "observation.joint_pos",
+            "observation.joint_pos.gripper",
+            in_joint,
+            [float(v) for v in observation.state["joint_pos"]],
+            out_joint,
+            [float(v) for v in result.state["joint_pos"]],
+            checks,
+        )
+
     # Each consumed camera: shape/dtype IS exercised (validate_value above did not
     # raise), so record it passed. Content — orientation, channel order — is not
     # checkable from synthetic data, which cannot tell up from down or RGB from BGR
@@ -653,26 +807,46 @@ def _compare_ee_pose(
     static reorientation with no coordinate-free ground truth, so comparing the two
     frames' rotations by geodesic angle would falsely report a large change. When
     the frame changed, the rotation is routed to `not_checked` instead of compared.
+
+    Every arm is compared on its own slice, since each carries a pose of its own:
+    reading only the first would leave a chain that corrupts a later arm looking
+    faithful.
     """
     in_pos, in_rot, _ = ee_step_layout(in_spec.rotation, None)
     out_pos, out_rot, _ = ee_step_layout(out_spec.rotation, None)
-    _compare_position(
-        "observation.ee_pose.position", in_values[:in_pos], out_values[:out_pos], checks
-    )
-    if in_spec.frame != out_spec.frame:
+    arms = in_spec.arm_count
+    if arms != out_spec.arm_count:
+        checks.append(
+            VerifyCheck(
+                "observation.ee_pose.arms",
+                False,
+                f"arm count changed across the chain: {arms} -> {out_spec.arm_count}",
+            )
+        )
+        return
+    in_arm, out_arm = in_spec.per_arm_length(), out_spec.per_arm_length()
+    rebased = in_spec.frame != out_spec.frame
+    for arm in range(arms):
+        suffix = "" if arms == 1 else f".arm{arm}"
+        src = in_values[arm * in_arm : (arm + 1) * in_arm]
+        dst = out_values[arm * out_arm : (arm + 1) * out_arm]
+        _compare_position(
+            f"observation.ee_pose.position{suffix}", src[:in_pos], dst[:out_pos], checks
+        )
+        if not rebased:
+            _compare_rotation(
+                f"observation.ee_pose.rotation{suffix}",
+                src[in_pos : in_pos + in_rot],
+                in_spec.rotation,
+                dst[out_pos : out_pos + out_rot],
+                out_spec.rotation,
+                checks,
+            )
+    if rebased:
         not_checked.append(
             f"observation.ee_pose.rotation: static rebase {in_spec.frame} -> "
             f"{out_spec.frame}, no coordinate-free ground truth"
         )
-        return
-    _compare_rotation(
-        "observation.ee_pose.rotation",
-        in_values[in_pos : in_pos + in_rot],
-        in_spec.rotation,
-        out_values[out_pos : out_pos + out_rot],
-        out_spec.rotation,
-        checks,
-    )
 
 
 def _compare_position(
@@ -747,22 +921,83 @@ def _compare_gripper(
 def _probe_action_values(spec: ValueSpec) -> list[float]:
     """An asymmetric probe action laid out under `spec`.
 
-    For an end-effector action, the probe holds the known probe position, the
-    probe rotation (encoded into the spec's format) and an open gripper.
-    `_check_closed_gripper` probes the closed end separately. For any other
-    action space, a zero-filled value of the right length (length is all that side
-    can check).
+    For an end-effector action, the probe carries, per arm, the known probe rotation
+    (encoded into the spec's format), a position distinct per arm so a swapped or
+    dropped arm is visible, and an open gripper; `_check_closed_gripper` probes the
+    closed end separately. A joint action gets the same treatment arm by arm
+    (`_probe_joint_step`). Any other action space gets a zero-filled value of the right
+    length, since length is all that side can check.
     """
     from manifold.lib.rotation import convert  # lazy — avoids circular import at module load
 
+    if isinstance(spec, JointActionSpace):
+        return _probe_joint_step(spec)
     if not isinstance(spec, EEActionSpace):
         return spec.example()
     pos_len, _, _ = ee_step_layout(spec.rotation, spec.gripper)
     rotation = convert(_PROBE_ROTVEC, RotationFormat.AXIS_ANGLE, spec.rotation)
-    out = [*_PROBE_POSITION[:pos_len], *rotation]
-    if spec.gripper is not None:
-        out.append(from_openness(1.0, spec.gripper))
+    out: list[float] = []
+    for arm in range(spec.arm_count):
+        # Give each arm a distinct position. If both arms held the same values, a
+        # swap of the two arms would look the same as a correct pass-through.
+        out.extend(coord + arm for coord in _PROBE_POSITION[:pos_len])
+        out.extend(rotation)
+        if spec.gripper is not None:
+            out.append(from_openness(1.0, spec.gripper))
     return out
+
+
+def _probe_joint_step(
+    spec: JointActionSpace | JointObservationSpec, *, openness: float = 1.0
+) -> list[float]:
+    """A joint probe laid out arm by arm: each arm's joints, then that arm's gripper.
+
+    Each joint gets a distinct value, and the values differ between arms. If two arms
+    are swapped, or a gripper moves out of its arm, some slot in the probe changes.
+    The gripper is open unless `openness` sets it otherwise. A separate probe covers
+    the closed end of the range, on each arm.
+    """
+    joints = spec.dof // spec.arm_count
+    out: list[float] = []
+    for arm in range(spec.arm_count):
+        out.extend(0.1 * (joint + 1) + arm for joint in range(joints))
+        if spec.gripper is not None:
+            out.append(from_openness(openness, spec.gripper))
+    return out
+
+
+def _probe_observation(contract: ObservationSpace) -> Observation:
+    """An asymmetric probe observation laid out under `contract`.
+
+    Proprioception ee_pose carries the known probe position and rotation (encoded
+    into its declared format) plus zeroed gripper qpos; any other proprioception
+    channel is length-correct zeros (only its length and rotation, where present,
+    are checked). Each camera is a deterministic per-pixel gradient so shape is
+    genuinely exercised by distinct values rather than a uniform fill, and each
+    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
+    """
+    proprio = contract.proprioception
+    state: dict[str, np.ndarray] = {}
+    for name in Proprioception.model_fields:
+        spec = getattr(proprio, name)
+        if spec is None:
+            continue
+        if name == "ee_pose" and isinstance(spec, EEObservationSpec):
+            state[name] = _probe_ee_pose(spec)
+        elif name == "joint_pos" and isinstance(spec, JointObservationSpec):
+            state[name] = np.asarray(_probe_joint_step(spec), dtype=np.float32)
+        else:
+            state[name] = np.asarray(spec.example(), dtype=np.float32)
+    sensors = {
+        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
+    }
+    instruction = "" if contract.instruction else None
+    return Observation(
+        state=state,
+        sensors=sensors,
+        instruction=instruction,
+        extrinsics=_probe_extrinsics(contract),
+    )
 
 
 def _probe_extrinsics(contract: ObservationSpace) -> dict[str, np.ndarray]:
@@ -857,7 +1092,14 @@ def _probe_ee_pose(spec: EEObservationSpec) -> np.ndarray:
     pos_len, _, _ = ee_step_layout(spec.rotation, None)
     rotation = convert(_PROBE_ROTVEC, RotationFormat.AXIS_ANGLE, spec.rotation)
     gripper_qpos = [0.0] * (spec.gripper.dim if spec.gripper is not None else 0)
-    return np.asarray([*_PROBE_POSITION[:pos_len], *rotation, *gripper_qpos], dtype=np.float32)
+    values: list[float] = []
+    for arm in range(spec.arm_count):
+        # Offset the values for each arm, as the action probe does. If two arms held
+        # identical values, a swap would look the same as a correct pass-through.
+        values.extend(coord + arm for coord in _PROBE_POSITION[:pos_len])
+        values.extend(rotation)
+        values.extend(gripper_qpos)
+    return np.asarray(values, dtype=np.float32)
 
 
 def _gradient_frame(shape: tuple[int, ...], dtype: str) -> np.ndarray:
