@@ -967,9 +967,16 @@ class _ScriptedTransport:
 
     def __init__(self) -> None:
         self.sent: list[str] = []
+        self.width = 0
 
     def send(self, frame_type, payload) -> None:
+        from manifold.core.benchmark import Benchmark
+
         self.sent.append(str(frame_type))
+        if self.sent[-1] == "hello":
+            # Answer in the width the benchmark declares, as a real policy would.
+            benchmark = Benchmark.model_validate(payload["benchmark"])
+            self.width = benchmark.embodiment.action.expected_length()
 
     def recv(self):
         from manifold.core.values import Action
@@ -979,7 +986,7 @@ class _ScriptedTransport:
             return {"type": FrameType.READY, "payload": {}}
         return {
             "type": FrameType.ACTION,
-            "payload": bridge.encode_action(Action.from_array([0.0])),
+            "payload": bridge.encode_action(Action.from_array([0.0] * self.width)),
         }
 
 
@@ -1344,3 +1351,78 @@ def test_write_rollup_omits_an_unset_task_id(tmp_path):
 
     (written,) = json.loads(path.read_text())["records"]
     assert "task_id" not in written
+
+
+# --- a pairing misread by one side ----------------------------------------------
+#
+# Each side parses the other's HELLO with its own SDK. A field one side lacks is
+# dropped without error, so the two can disagree on a width while both believe the
+# pairing is sound. These pin the two places that disagreement is caught.
+
+
+def test_run_benchmark_refuses_an_action_the_benchmark_cannot_take(monkeypatch) -> None:
+    # A policy on an older SDK can drop `arm_count`, misread the benchmark's width and
+    # answer in the width it believes. Every action is held to the benchmark's own
+    # spec first, so the environment is never driven with one it cannot take.
+    from manifold.core.values import Action, Observation
+    from manifold.recipes import PairingRejected, run_benchmark, serving
+    from manifold.wire import FrameType, bridge
+
+    class _OneFloatShort(_ScriptedTransport):
+        def recv(self):
+            reply = super().recv()
+            if reply["type"] != FrameType.ACTION:
+                return reply
+            short = Action.from_array([0.0] * (self.width - 1))
+            return {**reply, "payload": bridge.encode_action(short)}
+
+    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
+    monkeypatch.setattr(
+        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _OneFloatShort())
+    )
+
+    def never_step(_action: Action) -> StepResult:
+        raise AssertionError("the environment was driven with an action it cannot take")
+
+    with pytest.raises(PairingRejected, match="cannot take"):
+        run_benchmark(
+            _fake_benchmark(),
+            lambda: Observation(),
+            never_step,
+            episodes=1,
+            max_steps=5,
+            port=9000,
+            on_event=lambda _m: None,
+        )
+
+
+def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> None:
+    # A newer benchmark may carry fields this server would silently drop, so it is
+    # refused before its payload is parsed -- the empty benchmark below would not
+    # survive parsing -- rather than paired against a benchmark it has misread.
+    from manifold.recipes import serving
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameType
+
+    class _NewerHello:
+        def recv(self):
+            payload = {"protocol_version": BRIDGE_PROTOCOL_VERSION + 1, "benchmark": {}}
+            return {"type": FrameType.HELLO, "payload": payload}
+
+        def send(self, *_args) -> None:
+            raise AssertionError("nothing is sent to a refused peer")
+
+    class _Unreachable:
+        @property
+        def signature(self):
+            raise AssertionError("a refused peer never reaches the gate")
+
+    monkeypatch.setattr(
+        serving.FrameChannel, "from_socket", staticmethod(lambda _conn: _NewerHello())
+    )
+    events: list[str] = []
+    # The endpoint and socket are never touched: the refusal comes before either.
+    closed = serving._serve_session(
+        cast(Any, _Unreachable()), None, cast(Any, None), "peer", events.append
+    )
+    assert closed is True
+    assert any("newer than this server" in event for event in events)

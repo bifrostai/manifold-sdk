@@ -75,16 +75,24 @@ class _Recorder:
 class _Policy:
     def __init__(self):
         self.sent = []
+        self.width = 0
 
     def send(self, kind, payload):
+        from manifold.core.benchmark import Benchmark
+
         self.sent.append(kind)
+        if kind == FrameType.HELLO:
+            # Answer in the width the benchmark declares, as a real policy would.
+            benchmark = Benchmark.model_validate(payload["benchmark"])
+            self.width = benchmark.embodiment.action.expected_length()
 
     def recv(self):
         from manifold.core.values import Action
 
         if self.sent[-1] == FrameType.HELLO:
             return {"type": FrameType.READY, "payload": {}}
-        return {"type": FrameType.ACTION, "payload": bridge.encode_action(Action.from_array([0]))}
+        action = Action.from_array([0.0] * self.width)
+        return {"type": FrameType.ACTION, "payload": bridge.encode_action(action)}
 
 
 def _execute(

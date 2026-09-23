@@ -33,6 +33,15 @@ so an old peer sees a colour-only `sensors` and runs. The key is omitted for an
 observation without depth, and `_decode_sensor` still accepts an `__ndarray__`
 node under `sensors`, so version 2 and 3 payloads decode unchanged.
 
+Version 5 is the case that rule does not cover: a field whose absence changes the
+meaning of fields a peer does understand. The HELLO's benchmark carries `arm_count`
+on each embodiment spec. A peer built before it drops the key, as pydantic does with
+any field it does not declare, and reads a two-armed action as one arm -- 13 floats
+where there are 14 -- without raising anything. So the version moves, a receiver
+refuses a sender newer than itself, and the benchmark refuses an action its own spec
+does not accept. The last of those is what protects a new benchmark from an old
+policy, since an old peer never reads this number at all.
+
 The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
 synchronous peer round-trips identically without a version bump.
@@ -70,7 +79,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # The frame-and-codec contract version. Bump when that contract changes.
-BRIDGE_PROTOCOL_VERSION = 4
+BRIDGE_PROTOCOL_VERSION = 5
 
 # A length prefix is a 4-byte big-endian unsigned integer, so a single frame is
 # capped at 4 GiB by the wire format alone — far above any real payload.
