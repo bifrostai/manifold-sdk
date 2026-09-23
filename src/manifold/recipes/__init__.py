@@ -25,6 +25,7 @@ from manifold.recipes.serving import (
     write_rollup,
 )
 from manifold.recipes.sharding import EpisodeCursor, shard_episode_ids
+from manifold.recipes.worker import WorkerEpisode, WorkerTask, run_worker
 
 __all__ = [
     "NO_RECORDER",
@@ -40,6 +41,8 @@ __all__ = [
     "Recorder",
     "SignatureSuggestion",
     "StepResult",
+    "WorkerEpisode",
+    "WorkerTask",
     "assert_shared_profile",
     "describe",
     "dump",
@@ -53,6 +56,7 @@ __all__ = [
     "run_benchmark",
     "run_episodes",
     "run_sharded_benchmark",
+    "run_worker",
     "serve",
     "shard_episode_ids",
     "write_rollup",
