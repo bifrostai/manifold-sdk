@@ -189,31 +189,33 @@ def _free_port() -> int:
         return cast(int, probe.getsockname()[1])
 
 
-def test_serve_accepts_connections_beyond_max_workers():
-    from manifold.recipes import serve
+def test_serve_accepts_connections_beyond_max_workers(monkeypatch):
+    from manifold.recipes import serve, serving
 
-    # None of these connections sends HELLO, so each started worker blocks in `recv`
-    # and holds its connection open. The accept loop reaches the last connection
-    # because `max_workers` no longer limits how many connections are served at once.
+    # Each connection goes to a handler that holds it open until the test ends.
+    # The accept loop reaches the last connection because `max_workers` no longer
+    # limits how many connections are served at once.
     connections = 12
     port = _free_port()
     accepted = threading.Semaphore(0)
     accepted_count = 0
     listening = threading.Event()
+    release = threading.Event()
 
-    def record(event: str) -> None:  # called from the accept loop and its workers
+    def hold(*args: Any) -> None:
         nonlocal accepted_count
+        accepted_count += 1
+        accepted.release()
+        release.wait(timeout=10)
+
+    def record(event: str) -> None:
         if event.startswith("listening on"):
             listening.set()
-        elif event.startswith("benchmark connected from"):
-            accepted_count += 1
-            accepted.release()
-            if accepted_count == connections:
-                raise KeyboardInterrupt
 
+    monkeypatch.setattr(serving, "_serve_connection", hold)
     server = threading.Thread(
         target=serve,
-        args=(cast(Any, SimpleNamespace()),),  # never read: the gate runs after HELLO
+        args=(cast(Any, SimpleNamespace()),),  # never read: no connection sends HELLO
         kwargs={"host": "127.0.0.1", "port": port, "max_workers": 1, "on_event": record},
         daemon=True,
     )
@@ -229,11 +231,48 @@ def test_serve_accepts_connections_beyond_max_workers():
                 f"the accept loop stopped after {accepted_so_far} of {connections} connections"
             )
     finally:
+        release.set()
         for client in clients:
             with suppress(OSError):
                 client.close()
-        server.join(timeout=5)
-    assert not server.is_alive(), "the server did not stop after accepting the test connections"
+    assert accepted_count == connections
+
+
+def test_serve_logs_nothing_for_a_connection_that_sends_no_frame():
+    """The Manifold CLI connects and closes to check that the server is up.
+    That check is not a benchmark, so it leaves no log lines."""
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    port = _free_port()
+    events: list[str] = []
+    listening = threading.Event()
+    spoke_closed = threading.Event()
+
+    def record(event: str) -> None:
+        events.append(event)
+        if event.startswith("listening on"):
+            listening.set()
+        if event.startswith("connection from") and event.endswith("closed"):
+            spoke_closed.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace()),),  # never read: no connection sends HELLO
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    probe = socket.create_connection(("127.0.0.1", port), timeout=5)
+    probe_addr = str(probe.getsockname())
+    probe.close()
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as speaker:
+        FrameChannel.from_socket(speaker).send(FrameType.BYE, {})
+        assert spoke_closed.wait(timeout=5), "the server never closed the second connection"
+
+    assert not any(probe_addr in event for event in events)
+    assert any(event.startswith("benchmark connected from") for event in events)
 
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
