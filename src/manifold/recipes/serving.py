@@ -167,11 +167,15 @@ def _serve_connection(
     pairing, a dropped socket, a malformed frame — is caught, logged, and confined
     here: it never propagates to the accept loop and so never kills the server or
     a sibling shard. The socket is always closed, even on error.
+
+    A connection that closes before it sends a frame leaves no log lines. The
+    Manifold CLI opens one to check that the server accepts connections.
     """
     try:
         with conn:
-            _serve_session(endpoint, pipeline, conn, emit)
-        emit(f"connection from {addr} closed")
+            spoke = _serve_session(endpoint, pipeline, conn, addr, emit)
+        if spoke:
+            emit(f"connection from {addr} closed")
     except Exception as exc:  # one shard's failure must not kill the server.
         emit(f"connection from {addr} errored, dropping it: {exc!r}")
 
@@ -180,9 +184,12 @@ def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     conn: socket.socket,
+    addr: Any,
     emit: Callable[[str], None],
-) -> None:
+) -> bool:
     """Run one runner connection: handshake, gate the pairing, then answer frames.
+
+    Returns False when the peer closed before it sent a frame, and True otherwise.
 
     Mints this connection's own `session` over the endpoint's shared model and its
     own `PipelineState`, so concurrent connections never interleave per-session
@@ -194,15 +201,18 @@ def _serve_session(
     """
     channel = FrameChannel.from_socket(conn)
     hello = channel.recv()
-    if hello is None or hello.get("type") != FrameType.HELLO:
+    if hello is None:
+        return False
+    emit(f"benchmark connected from {addr}")
+    if hello.get("type") != FrameType.HELLO:
         emit("expected a hello frame advertising the benchmark; closing")
-        return
+        return True
     benchmark = Benchmark.model_validate(hello["payload"]["benchmark"])
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
     if not _gate(signature, benchmark, resolved, emit):
-        return
+        return True
 
     # One PipelineState lives with this connection, not the endpoint, so a stateful
     # adapter's per-episode history never interleaves across concurrent connections.
@@ -217,7 +227,7 @@ def _serve_session(
         while True:
             frame = channel.recv()
             if frame is None or frame.get("type") == FrameType.BYE:
-                return
+                return True
             kind = frame.get("type")
             if kind == FrameType.RESET:
                 state.reset_lane(DEFAULT_LANE)
@@ -721,7 +731,6 @@ def serve(
         try:
             while True:
                 conn, addr = listener.accept()
-                emit(f"benchmark connected from {addr}")
                 worker = threading.Thread(
                     target=_serve_connection,
                     args=(endpoint, pipeline, conn, addr, emit),
