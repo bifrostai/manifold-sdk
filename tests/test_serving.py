@@ -9,8 +9,10 @@ torch).
 from __future__ import annotations
 
 import io
+import logging
 import socket
 import threading
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 from types import ModuleType, SimpleNamespace
@@ -273,6 +275,50 @@ def test_serve_logs_nothing_for_a_connection_that_sends_no_frame():
 
     assert not any(probe_addr in event for event in events)
     assert any(event.startswith("benchmark connected from") for event in events)
+
+
+def test_serve_prints_failures_and_logs_routine_events(capsys, caplog):
+    """`manifold policy serve` prints what the policy writes. By default, the
+    server prints only the listening line and failures, so a user sees a line
+    when a shard fails and none when it connects."""
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    caplog.set_level(logging.INFO, logger="manifold.recipes.serving")
+    port = _free_port()
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace()),),  # never read: no connection sends HELLO
+        kwargs={"host": "127.0.0.1", "port": port},
+        daemon=True,
+    ).start()
+    _wait_for_port(port)
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as speaker:
+        FrameChannel.from_socket(speaker).send(FrameType.BYE, {})
+        _wait_until(lambda: "connection from" in caplog.text)
+
+    printed = capsys.readouterr().out
+    assert f"listening on 127.0.0.1:{port} (TCP)" in printed
+    assert "expected a hello frame" in printed
+    assert "benchmark connected" not in printed
+    assert "benchmark connected" in caplog.text
+
+
+def _wait_for_port(port: int) -> None:
+    def accepts() -> bool:
+        with suppress(OSError), socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+        return False
+
+    _wait_until(accepts)
+
+
+def _wait_until(condition: Any, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "the condition did not hold in time"
+        time.sleep(0.05)
 
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------

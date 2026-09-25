@@ -26,6 +26,7 @@ plugs in. Compatibility-checking lives on the policy side (ADR-0001): `serve` ru
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import time
@@ -69,6 +70,34 @@ def _emit(message: str) -> None:
     with their own sink pass `on_event`.
     """
     print(message, flush=True)
+
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _ServeEvents:
+    """Where `serve` reports what happens to its connections.
+
+    `detail` gets routine events, such as a benchmark that connects and passes
+    the pairing check. `notice` gets the listening line and every failure.
+    """
+
+    detail: Callable[[str], None]
+    notice: Callable[[str], None]
+
+    @classmethod
+    def for_callback(cls, on_event: Callable[[str], None] | None) -> _ServeEvents:
+        """Send both kinds to `on_event`, or split them when it is None.
+
+        Without a callback, `notice` prints and `detail` goes to this module's
+        logger at INFO, which Python hides unless someone configures logging.
+        `manifold policy serve` prints what the policy writes, and it printed
+        several lines for each benchmark shard before this split.
+        """
+        if on_event is not None:
+            return cls(detail=on_event, notice=on_event)
+        return cls(detail=logger.info, notice=_emit)
 
 
 def _parse_server(server: str) -> tuple[str, int]:
@@ -159,7 +188,7 @@ def _serve_connection(
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     conn: socket.socket,
     addr: Any,
-    emit: Callable[[str], None],
+    events: _ServeEvents,
 ) -> None:
     """Own one runner connection end to end on its worker thread.
 
@@ -173,11 +202,11 @@ def _serve_connection(
     """
     try:
         with conn:
-            spoke = _serve_session(endpoint, pipeline, conn, addr, emit)
+            spoke = _serve_session(endpoint, pipeline, conn, addr, events)
         if spoke:
-            emit(f"connection from {addr} closed")
+            events.detail(f"connection from {addr} closed")
     except Exception as exc:  # one shard's failure must not kill the server.
-        emit(f"connection from {addr} errored, dropping it: {exc!r}")
+        events.notice(f"connection from {addr} errored, dropping it: {exc!r}")
 
 
 def _serve_session(
@@ -185,7 +214,7 @@ def _serve_session(
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     conn: socket.socket,
     addr: Any,
-    emit: Callable[[str], None],
+    events: _ServeEvents,
 ) -> bool:
     """Run one runner connection: handshake, gate the pairing, then answer frames.
 
@@ -203,15 +232,17 @@ def _serve_session(
     hello = channel.recv()
     if hello is None:
         return False
-    emit(f"benchmark connected from {addr}")
+    events.detail(f"benchmark connected from {addr}")
     if hello.get("type") != FrameType.HELLO:
-        emit("expected a hello frame advertising the benchmark; closing")
+        events.notice(
+            f"connection from {addr}: expected a hello frame advertising the benchmark; closing"
+        )
         return True
     benchmark = Benchmark.model_validate(hello["payload"]["benchmark"])
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
-    if not _gate(signature, benchmark, resolved, emit):
+    if not _gate(signature, benchmark, resolved, events):
         return True
 
     # One PipelineState lives with this connection, not the endpoint, so a stateful
@@ -240,7 +271,7 @@ def _serve_session(
                 )
                 channel.send(FrameType.ACTION, bridge.encode_action(action))
                 continue
-            emit(f"ignoring unexpected frame {kind!r}")
+            events.notice(f"ignoring unexpected frame {kind!r}")
     finally:
         # Retire the session's per-session scratch on teardown — see Session.close.
         session.close()
@@ -282,23 +313,23 @@ def _gate(
     signature: PolicySignature,
     benchmark: Benchmark,
     pipeline: Pipeline,
-    emit: Callable[[str], None],
+    events: _ServeEvents,
 ) -> bool:
     """Check and verify the pairing, emitting status; True iff READY may be sent."""
     report = check_compatibility(signature, benchmark, pipeline)
     verified = verify(signature, benchmark, pipeline)
-    emit(f"check_compatibility: {report.status.value}")
+    events.detail(f"check_compatibility: {report.status.value}")
     if report.lossless is not None:
         n_obs, n_act = len(pipeline.observation), len(pipeline.action)
-        emit(
+        events.detail(
             f"  pipeline: {n_obs} observation + {n_act} action adapter(s), "
             f"lossless={report.lossless}"
         )
-    emit(f"verify (synthetic data): {verified.summary()}")
+    events.detail(f"verify (synthetic data): {verified.summary()}")
     if report.ok and verified.ok:
         return True
     reasons = report.reasons + list(verified.reasons)
-    emit(f"incompatible — rejecting the pairing. reasons: {reasons}")
+    events.notice(f"incompatible — rejecting the pairing. reasons: {reasons}")
     return False
 
 
@@ -699,7 +730,7 @@ def serve(
     # TODO: max_workers is now ignored, but kept for backwards compatibility. Remove it
     # after all existing callers no longer pass max_workers.
     max_workers: int = 8,
-    on_event: Callable[[str], None] = _emit,
+    on_event: Callable[[str], None] | None = None,
 ) -> None:
     """Serve one loaded policy to many runner shards concurrently over the bridge.
 
@@ -717,9 +748,10 @@ def serve(
     `pipeline` may be None (empty pipeline), a callable invoked per connection with
     the benchmark (the dynamic-injection hook — the pipeline arrives with the job),
     or a `Pipeline` used as-is. `on_event` is called from worker threads, so a custom
-    sink must be concurrency-safe.
+    sink must be concurrency-safe. A custom sink gets every event. Without one, `serve`
+    prints the listening line and failures, and logs routine events at INFO.
     """
-    emit = on_event
+    events = _ServeEvents.for_callback(on_event)
     workers: list[threading.Thread] = []
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -727,13 +759,13 @@ def serve(
         # Request the platform's maximum backlog for connections that arrive between
         # accept iterations.
         listener.listen(socket.SOMAXCONN)
-        emit(f"listening on {host}:{port} (TCP)")
+        events.notice(f"listening on {host}:{port} (TCP)")
         try:
             while True:
                 conn, addr = listener.accept()
                 worker = threading.Thread(
                     target=_serve_connection,
-                    args=(endpoint, pipeline, conn, addr, emit),
+                    args=(endpoint, pipeline, conn, addr, events),
                     daemon=True,
                 )
                 workers.append(worker)
@@ -741,7 +773,7 @@ def serve(
                 # Drop references to workers that have finished.
                 workers = [w for w in workers if w.is_alive()]
         except KeyboardInterrupt:
-            emit("interrupted; shutting down")
+            events.notice("interrupted; shutting down")
     # The listener is closed; give all in-flight workers one second in total to
     # finish their current frame exchange. They are daemon threads, so the process
     # never hangs on a stuck connection.
@@ -1068,7 +1100,7 @@ def evaluate(
     emit = on_event
     resolved = _resolve_pipeline(pipeline, benchmark)
     signature = endpoint.signature
-    if not _gate(signature, benchmark, resolved, emit):
+    if not _gate(signature, benchmark, resolved, _ServeEvents(detail=emit, notice=emit)):
         raise PairingRejected("policy rejected the pairing (incompatible)")
     emit("policy confirmed the pairing (ready)")
 
@@ -1112,7 +1144,7 @@ def launch_server(
     # TODO: max_workers is now ignored, but kept for backwards compatibility. Remove it
     # after all existing callers no longer pass max_workers.
     max_workers: int = 8,
-    on_event: Callable[[str], None] = _emit,
+    on_event: Callable[[str], None] | None = None,
 ) -> None:
     """Build the shared policy from one-or-more pairings and serve it.
 
