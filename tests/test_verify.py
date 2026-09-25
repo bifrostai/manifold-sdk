@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,8 @@ from manifold.core import (
     Frame,
     GripperFormat,
     GripperObservationSpec,
+    JointActionSpace,
+    JointObservationSpec,
     ObservationAdapter,
     ObservationSpace,
     Pipeline,
@@ -29,7 +32,7 @@ from manifold.core import (
     UnifiedActionSpace,
     verify,
 )
-from manifold.lib.gripper import openness
+from manifold.lib.gripper import from_openness, openness
 from manifold.lib.rotation import convert
 
 
@@ -516,3 +519,264 @@ def test_probe_poses_are_distinct_and_only_for_calibrated_cameras() -> None:
     assert set(poses) == {"agentview", "wrist"}
     assert all(pose.shape == (4, 4) and pose.dtype == np.float64 for pose in poses.values())
     assert not np.array_equal(poses["agentview"], poses["wrist"])
+
+
+def _bimanual_benchmark(
+    rotation: RotationFormat = RotationFormat.AXIS_ANGLE,
+    gripper: GripperFormat = GripperFormat.SIGNED,
+) -> Benchmark:
+    embodiment = Embodiment(
+        name="two_arm",
+        action=EEActionSpace(rotation=rotation, gripper=gripper, arm_count=2, delta=True),
+        proprioception=Proprioception(
+            ee_pose=EEObservationSpec(
+                rotation=rotation, gripper=GripperObservationSpec(dim=2), arm_count=2
+            )
+        ),
+    )
+    return Benchmark(
+        name="two_arm_suite",
+        embodiment=embodiment,
+        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        instruction=False,
+    )
+
+
+def test_bimanual_pairing_checks_both_arms() -> None:
+    # An identity pipeline, so what is exercised is the probe and the per-arm
+    # comparison rather than any adapter. Both arms must appear in the report: before
+    # this, the probe carried one arm and the comparison read arm 0 only, so a
+    # right-arm corruption could not be seen.
+    bench = _bimanual_benchmark()
+    policy = _policy(
+        EEActionSpace(
+            rotation=RotationFormat.AXIS_ANGLE,
+            gripper=GripperFormat.SIGNED,
+            arm_count=2,
+            delta=True,
+        ),
+        proprio=Proprioception(
+            ee_pose=EEObservationSpec(
+                rotation=RotationFormat.AXIS_ANGLE,
+                gripper=GripperObservationSpec(dim=2),
+                arm_count=2,
+            )
+        ),
+        rotation=RotationFormat.AXIS_ANGLE,
+    )
+
+    report = verify(policy, bench, Pipeline())
+
+    assert report.ok, report.reasons
+    for name in (
+        "action.position.arm0",
+        "action.position.arm1",
+        "action.rotation.arm0",
+        "action.rotation.arm1",
+        "action.gripper.arm0",
+        "action.gripper.arm1",
+    ):
+        assert _check(report, name).passed, name
+
+
+def test_single_arm_check_names_are_unchanged() -> None:
+    # The report's check names are part of its contract, so a single-arm pairing must
+    # not grow a `.arm0` suffix just because the loop now exists.
+    report = verify(
+        _policy(_ee(), proprio=_franka_proprio(), rotation=RotationFormat.AXIS_ANGLE),
+        _benchmark(),
+        Pipeline(),
+    )
+
+    assert _check(report, "action.position").passed
+    assert all(".arm" not in check.name for check in report.checks)
+
+
+def _joint_bimanual_benchmark() -> Benchmark:
+    # ALOHA's layout, as ROBOTWIN declares it: two arms of six joints and a gripper.
+    embodiment = Embodiment(
+        name="two_arm_joint",
+        action=JointActionSpace(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2),
+        proprioception=Proprioception(
+            joint_pos=JointObservationSpec(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2)
+        ),
+    )
+    return Benchmark(
+        name="two_arm_joint_suite",
+        embodiment=embodiment,
+        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        instruction=False,
+    )
+
+
+def _joint_bimanual_policy() -> PolicySignature:
+    return _policy(
+        JointActionSpace(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2),
+        proprio=Proprioception(
+            joint_pos=JointObservationSpec(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2)
+        ),
+        rotation=RotationFormat.AXIS_ANGLE,
+    )
+
+
+def test_a_joint_pairing_is_compared_arm_by_arm() -> None:
+    # A joint pairing used to be length-only: four checks, none touching the layout.
+    # Each arm's joints and gripper now appear in the report, action and joint_pos alike.
+    report = verify(_joint_bimanual_policy(), _joint_bimanual_benchmark(), Pipeline())
+
+    assert report.ok, report.reasons
+    for name in (
+        "action.joints.arm0",
+        "action.joints.arm1",
+        "action.gripper.arm0",
+        "action.gripper.arm1",
+        "action.gripper.closed.arm0",
+        "action.gripper.closed.arm1",
+        "observation.joint_pos.arm0",
+        "observation.joint_pos.arm1",
+    ):
+        assert _check(report, name).passed, name
+
+
+def test_verify_catches_transposed_arms_on_a_joint_pairing() -> None:
+    # A runner that swaps the two arms keeps the length, so a length-only check passed
+    # it. The probe gives every joint of every arm its own value, so the swap shows.
+    class SwapsTheArms(ActionAdapter):
+        from_spec = JointActionSpace
+        to_spec = JointActionSpace
+        lossless = True
+
+        def applies(self, source: Any) -> bool:
+            return isinstance(source, JointActionSpace)
+
+        def produce(self, source: Any) -> JointActionSpace:
+            return source
+
+        def adapt(self, values: Any, *, source: Any) -> list[float]:
+            arm, step = source.per_arm_length(), source.per_step_length()
+            out: list[float] = []
+            for base in range(0, source.expected_length(), step):
+                out.extend(float(v) for v in values[base + arm : base + 2 * arm])
+                out.extend(float(v) for v in values[base : base + arm])
+            return out
+
+    report = verify(
+        _joint_bimanual_policy(),
+        _joint_bimanual_benchmark(),
+        Pipeline(action=[SwapsTheArms()]),
+    )
+
+    assert not report.ok
+    assert not _check(report, "action.joints.arm0").passed
+
+
+def test_verify_catches_an_arm_whose_gripper_is_never_opened() -> None:
+    # The probe used to key openness on (step x arms + arm), whose parity is the arm's
+    # whenever arm_count is even: arm 0 was always probed open and arm 1 always closed.
+    # An adapter jamming arm 1 shut therefore passed every gripper check. Keyed on the
+    # step, every arm is probed open.
+    class ClampsArmOneShut(ActionAdapter):
+        from_spec = EEActionSpace
+        to_spec = EEActionSpace
+        lossless = True
+
+        def applies(self, source: Any) -> bool:
+            return isinstance(source, EEActionSpace)
+
+        def produce(self, source: Any) -> EEActionSpace:
+            return source
+
+        def adapt(self, values: Any, *, source: Any) -> list[float]:
+            out = [float(v) for v in values]
+            arm, step = source.per_arm_length(), source.per_step_length()
+            for base in range(0, source.expected_length(), step):
+                out[base + 2 * arm - 1] = from_openness(0.0, source.gripper)
+            return out
+
+    bench = _bimanual_benchmark()
+    action = EEActionSpace(
+        rotation=RotationFormat.AXIS_ANGLE,
+        gripper=GripperFormat.SIGNED,
+        arm_count=2,
+        delta=True,
+        chunk_size=4,
+    )
+    bench = bench.model_copy(
+        update={"embodiment": bench.embodiment.model_copy(update={"action": action})}
+    )
+    policy = _policy(
+        action,
+        proprio=bench.embodiment.proprioception,
+        rotation=RotationFormat.AXIS_ANGLE,
+    )
+
+    report = verify(policy, bench, Pipeline(action=[ClampsArmOneShut()]))
+
+    assert not report.ok
+    assert not _check(report, "action.gripper.step0.arm1").passed
+
+
+def test_verify_catches_an_ee_pose_corrupted_on_the_second_arm() -> None:
+    # The ee_pose comparison read arm 0 only, so a chain that zeroed arm 1 passed both
+    # the position and the rotation check. Every arm is now compared on its own slice.
+    class ZeroesArmOnePose(ObservationAdapter):
+        from_spec = ObservationSpace
+        to_spec = ObservationSpace
+        lossless = True
+
+        def applies(self, source: Any) -> bool:
+            return isinstance(source, ObservationSpace)
+
+        def produce(self, source: Any) -> ObservationSpace:
+            return source
+
+        def adapt(self, observation: Any, /, *, source: Any) -> Any:
+            arm = source.proprioception.ee_pose.per_arm_length()
+            values = np.array(observation.state["ee_pose"], dtype=np.float32)
+            values[arm : 2 * arm] = 0.0
+            return replace(observation, state={**observation.state, "ee_pose": values})
+
+    bench = _bimanual_benchmark()
+    policy = _policy(
+        bench.embodiment.action,
+        proprio=bench.embodiment.proprioception,
+        rotation=RotationFormat.AXIS_ANGLE,
+    )
+
+    report = verify(policy, bench, Pipeline(observation=[ZeroesArmOnePose()]))
+
+    assert not report.ok
+    assert _check(report, "observation.ee_pose.position.arm0").passed
+    assert not _check(report, "observation.ee_pose.position.arm1").passed
+
+
+def test_bimanual_rotation_adapter_converts_both_arms() -> None:
+    # The end-to-end proof for the adapters: policy emits AXIS_ANGLE, benchmark wants
+    # QUATERNION, and RotationFormatAdapter bridges. Before the per-arm loop it strode
+    # one arm per chunk step, so it converted arm 0 and passed arm 1 through in the
+    # source encoding -- which verify now sees as a failed arm1 rotation check.
+    bench = _bimanual_benchmark(rotation=RotationFormat.QUATERNION)
+    policy = _policy(
+        EEActionSpace(
+            rotation=RotationFormat.AXIS_ANGLE,
+            gripper=GripperFormat.SIGNED,
+            arm_count=2,
+            delta=True,
+        ),
+        proprio=Proprioception(
+            ee_pose=EEObservationSpec(
+                rotation=RotationFormat.QUATERNION,
+                gripper=GripperObservationSpec(dim=2),
+                arm_count=2,
+            )
+        ),
+        rotation=RotationFormat.QUATERNION,
+    )
+    pipeline = Pipeline(action=[RotationFormatAdapter(target=RotationFormat.QUATERNION)])
+
+    report = verify(policy, bench, pipeline)
+
+    assert report.ok, report.reasons
+    assert _check(report, "action.rotation.arm0").passed
+    assert _check(report, "action.rotation.arm1").passed
+    assert _check(report, "action.position.arm1").passed

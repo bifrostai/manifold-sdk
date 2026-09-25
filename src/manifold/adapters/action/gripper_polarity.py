@@ -48,14 +48,16 @@ class GripperPolarityAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Remap the gripper element of each per-step block to the target encoding."""
+        """Remap every arm's gripper element to the target encoding."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperPolarityAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the remap below assumes the declared length
-        # The gripper is the last element of each per-step block.
-        per_step = source.expected_length() // source.chunk_size
-        for gripper_index in range(per_step - 1, len(out), per_step):
+        # The gripper is the last element of each arm's values, and a step holds
+        # `arm_count` of them. Striding by the whole step would remap only the last
+        # arm's gripper and hand the others on in the source encoding.
+        per_arm = source.per_arm_length()
+        for gripper_index in range(per_arm - 1, len(out), per_arm):
             out[gripper_index] = remap(out[gripper_index], source.gripper, self.target)
         return out
 

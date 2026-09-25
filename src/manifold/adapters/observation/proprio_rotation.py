@@ -93,16 +93,26 @@ class ProprioRotationAdapter(ObservationAdapter):
         ee_pose = self._spec(source).proprioception.ee_pose
         if ee_pose is None:
             raise TypeError("ProprioRotationAdapter needs a proprioception with an ee_pose")
-        block = [float(v) for v in observation.state["ee_pose"]]
+        values = [float(v) for v in observation.state["ee_pose"]]
+        # The loop below takes exactly `arm_count` arms, so a value longer than the spec
+        # declares would lose its tail without a word; refuse it by name instead.
+        ee_pose.validate_value(values)
         # Only the position and rotation lengths are needed to slice out the
         # rotation block; the gripper slot (the discarded third element) does not
         # affect those, so pass None rather than the GripperObservationSpec.
         pos_len, rot_len, _ = ee_step_layout(ee_pose.rotation, None)
-        reencoded = (
-            block[:pos_len]  # position
-            + self._encode_rotation(block[pos_len : pos_len + rot_len], ee_pose.rotation)
-            + block[pos_len + rot_len :]  # gripper, if any
-        )
+        # One arm's values, which is what the layout repeats. Treating the whole
+        # value as one arm would transform arm 0 and pass every other arm through
+        # untouched -- the halves of one robot then disagree.
+        per_arm = ee_pose.per_arm_length()
+        reencoded: list[float] = []
+        for arm in range(ee_pose.arm_count):
+            arm_values = values[arm * per_arm : (arm + 1) * per_arm]
+            reencoded += (
+                arm_values[:pos_len]  # position
+                + self._encode_rotation(arm_values[pos_len : pos_len + rot_len], ee_pose.rotation)
+                + arm_values[pos_len + rot_len :]  # gripper, if any
+            )
         state = {**observation.state, "ee_pose": np.asarray(reencoded, dtype=np.float32)}
         return replace(observation, state=state)
 

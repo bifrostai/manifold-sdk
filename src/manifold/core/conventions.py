@@ -113,12 +113,31 @@ def rotation_dims(rotation: RotationFormat) -> int:
 
 
 def ee_step_layout(rotation: RotationFormat, gripper: GripperFormat | None) -> tuple[int, int, int]:
-    """Per-step float counts of an end-effector value: (position, rotation, gripper).
+    """Float counts for ONE arm of an end-effector value: (position, rotation, gripper).
 
     Position is always 3 (xyz). The single source of truth for how an EE pose or
     action is laid out, used by the specs and by the adapters that slice it.
+
+    Every term is per arm, so the three sum to one arm's width. A robot with several
+    arms repeats the whole group once per arm; that multiplication belongs to the
+    spec's `arm_count`, never to one term of this tuple.
     """
     return 3, rotation_dims(rotation), (1 if gripper is not None else 0)
+
+
+def check_dof_divides_across_arms(dof: int, arm_count: int) -> None:
+    """Raise unless `dof` joints split into `arm_count` equal arms.
+
+    A joint layout gives each arm `dof // arm_count` joints followed by its gripper, so
+    a remainder leaves the last arm short and puts every later gripper one slot off,
+    on every step of every episode. It holds whether or not a gripper is set:
+    `arm_count` says where the arms split, and a gripper does not move that.
+
+    Arms of unequal size are not describable by one `dof`; such a robot declares a
+    single arm.
+    """
+    if dof % arm_count:
+        raise ValueError(f"dof={dof} does not divide into {arm_count} equal arms")
 
 
 def check_length(value: Any, expected: int, label: str) -> None:
@@ -139,6 +158,7 @@ __all__ = [
     "Frame",
     "GripperFormat",
     "RotationFormat",
+    "check_dof_divides_across_arms",
     "check_length",
     "ee_step_layout",
     "rotation_dims",

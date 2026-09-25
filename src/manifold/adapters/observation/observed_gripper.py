@@ -10,10 +10,11 @@ runner, the benchmark declares its observed gripper `encoding` on the
 encoding via `lib.gripper.remap` — the same openness round-trip the action-side
 gripper adapters use, so the obs and action sides cannot drift.
 
-The gripper occupies the trailing `gripper.dim` floats of the `ee_pose` value (after
-position and rotation); each is remapped in place. Position, rotation, and every other
-channel pass through. Because `remap` is a lossless representation conversion between
-two continuous encodings, this adapter is declared lossless.
+Each arm's gripper occupies the last `gripper.dim` floats of that arm's values in
+`ee_pose` (after its position and rotation); each is remapped in place. Position,
+rotation, and every other channel pass through. Because `remap` is a lossless
+representation conversion between two continuous encodings, this adapter is declared
+lossless.
 
 Parameterized by the target encoding: ``ObservedGripperAdapter(target=GripperFormat.
 UNSIGNED)``. It only fires when the reported gripper declares an `encoding` that
@@ -80,13 +81,20 @@ class ObservedGripperAdapter(ObservationAdapter):
         if ee_pose is None or ee_pose.gripper is None or ee_pose.gripper.encoding is None:
             raise TypeError("ObservedGripperAdapter needs an ee_pose with an encoded gripper")
         source_encoding = ee_pose.gripper.encoding
-        block = [float(v) for v in observation.state["ee_pose"]]
+        values = [float(v) for v in observation.state["ee_pose"]]
+        # The loop below takes exactly `arm_count` arms, so a value longer than the spec
+        # declares would lose its tail without a word; refuse it by name instead.
+        ee_pose.validate_value(values)
         pos_len, rot_len, _ = ee_step_layout(ee_pose.rotation, None)
-        # The gripper occupies the trailing `gripper.dim` floats, after pose.
-        gripper_start = pos_len + rot_len
-        for i in range(gripper_start, gripper_start + ee_pose.gripper.dim):
-            block[i] = remap(block[i], source_encoding, self.target)
-        state = {**observation.state, "ee_pose": np.asarray(block, dtype=np.float32)}
+        # Each arm's gripper occupies the last `gripper.dim` floats of its values.
+        # Remapping only the first would leave the other arm reporting its openness in
+        # the source encoding, which reads as a working gripper with inverted polarity.
+        per_arm = ee_pose.per_arm_length()
+        for arm in range(ee_pose.arm_count):
+            gripper_start = arm * per_arm + pos_len + rot_len
+            for i in range(gripper_start, gripper_start + ee_pose.gripper.dim):
+                values[i] = remap(values[i], source_encoding, self.target)
+        state = {**observation.state, "ee_pose": np.asarray(values, dtype=np.float32)}
         return replace(observation, state=state)
 
     @staticmethod

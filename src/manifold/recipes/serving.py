@@ -51,6 +51,7 @@ from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, brid
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
+    from manifold.core.embodiment.spec import ValueSpec
     from manifold.core.native_layout import NativeLayout
     from manifold.core.observation_space import ObservationSpace
     from manifold.core.policy import PolicySignature
@@ -207,6 +208,16 @@ def _serve_session(
     if hello.get("type") != FrameType.HELLO:
         emit("expected a hello frame advertising the benchmark; closing")
         return True
+    # A newer sender may carry fields this server would silently drop, so refuse it
+    # before parsing rather than pair against a benchmark it has misread. An older
+    # one is fine: a field it lacks takes its default here.
+    version = hello["payload"].get("protocol_version", 0)
+    if version > BRIDGE_PROTOCOL_VERSION:
+        emit(
+            f"benchmark speaks bridge protocol {version}, newer than this server's "
+            f"{BRIDGE_PROTOCOL_VERSION}; closing rather than drop what it cannot read"
+        )
+        return True
     benchmark = Benchmark.model_validate(hello["payload"]["benchmark"])
 
     signature = endpoint.signature
@@ -323,6 +334,7 @@ def _run_episode(
     *,
     episode_idx: int,
     benchmark_name: str,
+    action_space: ValueSpec,
     recorder: EpisodeRecorder = NO_RECORDER,
     live_view: LiveViewPublisher | None,
 ) -> EpisodeRecord:
@@ -360,6 +372,16 @@ def _run_episode(
             if reply is None or reply.get("type") != FrameType.ACTION:
                 raise PairingRejected("expected an action frame from the policy")
             action = bridge.decode_action(reply["payload"])
+            # The policy gated this pairing against the benchmark as IT parsed it. A
+            # policy on an older SDK can have dropped a field and misread the width,
+            # then answered in the width it believes -- so the action is held to the
+            # benchmark's own spec before the environment is ever driven with it.
+            try:
+                action_space.validate_value(action.values)
+            except (TypeError, ValueError) as exc:
+                raise PairingRejected(
+                    f"policy returned an action the benchmark cannot take: {exc}"
+                ) from exc
             if steps == 0:
                 initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
             result = step(action)
@@ -859,6 +881,7 @@ def _run_connected(
                 image_format,
                 episode_idx=episode_id,
                 benchmark_name=benchmark.name,
+                action_space=benchmark.embodiment.action,
                 recorder=recorder,
                 live_view=live_view,
             )
