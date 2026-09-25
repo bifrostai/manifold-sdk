@@ -120,6 +120,41 @@ def over_shoulder_left(
     )
 
 
+def wrist_left(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The left arm's wrist-mounted camera, at the given shape.
+
+    Distinct from `wrist()` rather than a parameter on it: on a bimanual robot the
+    two wrist views are different channels a policy consumes side by side, and a
+    single `wrist` name could only carry one of them.
+    """
+    return Camera(
+        name="wrist_left",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
+    )
+
+
+def wrist_right(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The right arm's wrist-mounted camera, at the given shape."""
+    return Camera(
+        name="wrist_right",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
+    )
+
+
 def wrist(
     shape: tuple[int, ...],
     calibration: CameraCalibration | None = None,
@@ -160,4 +195,6 @@ __all__ = [
     "over_shoulder_left",
     "wrist",
     "wrist_depth",
+    "wrist_left",
+    "wrist_right",
 ]
