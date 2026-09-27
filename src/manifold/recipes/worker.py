@@ -2,7 +2,7 @@
 
 `run_worker` registers the workload with the runner and claims one task at a
 time. It reuses one policy connection to execute every task, reports the
-result, and waits for scheduler acceptance before claiming the next task.
+result, and waits for task server acceptance before claiming the next task.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class WorkerEpisode:
 
 @dataclass(frozen=True)
 class WorkerTask:
-    """One scheduler-assigned attempt and its output directory."""
+    """One attempt assigned by the task server and its output directory."""
 
     item_id: str
     attempt_id: str
@@ -54,7 +54,7 @@ def run_worker(
     step: Callable[[Action], StepResult],
     *,
     server: str,
-    scheduler_address: str,
+    task_server_address: str,
     worker_id: str,
     episodes: Sequence[WorkerEpisode],
     max_steps: int,
@@ -62,14 +62,14 @@ def run_worker(
     artifacts: Callable[[WorkerTask], Sequence[Path]],
     image_format: ImageFormat = "raw",
 ) -> BenchmarkResult:
-    """Execute scheduler assignments with one policy connection.
+    """Execute task server assignments with one policy connection.
 
-    Send results after closing each replay, then wait for scheduler acceptance
+    Send results after closing each replay, then wait for task server acceptance
     before claiming again.
     """
-    host, separator, port = scheduler_address.rpartition(":")
+    host, separator, port = task_server_address.rpartition(":")
     if not separator or not host:
-        raise ValueError("scheduler_address must be host:port")
+        raise ValueError("task_server_address must be host:port")
     with socket.create_connection((host, int(port))) as sock:
         channel = FrameChannel.from_socket(sock)
         channel.send(
@@ -80,7 +80,7 @@ def run_worker(
                 "episodes": [asdict(episode) for episode in episodes],
             },
         )
-        _receive_scheduler_frame(channel, "ready")
+        _receive_task_server_frame(channel, "ready")
         worker_run = _WorkerRun(channel, reset, recorder, artifacts)
         run_episodes(
             benchmark,
@@ -116,20 +116,20 @@ class _WorkerRun:
         while True:
             request_id = str(uuid4())
             self.channel.send("claim", {"request_id": request_id})
-            reply = _receive_scheduler_frame(self.channel)
+            reply = _receive_task_server_frame(self.channel)
             payload = reply["payload"]
             if payload["request_id"] != request_id:
-                raise ValueError("scheduler claim request ID mismatch")
+                raise ValueError("task server claim request ID mismatch")
             if reply["type"] == "done":
                 return
             if reply["type"] == "wait":
                 delay = payload["retry_after_sec"]
                 if not isinstance(delay, (int, float)) or not 0 <= delay <= 60:
-                    raise ValueError("scheduler retry_after_sec must be between 0 and 60")
+                    raise ValueError("task server retry_after_sec must be between 0 and 60")
                 time.sleep(delay)
                 continue
             if reply["type"] != "work":
-                raise ValueError(f"unexpected scheduler response {reply['type']}")
+                raise ValueError(f"unexpected task server response {reply['type']}")
             self.current_task = _parse_task_assignment(payload)
             self.current_recorder = self.recorder_factory(self.current_task)
             yield self.current_task.episode_idx
@@ -178,20 +178,22 @@ class _WorkerRun:
                 "artifacts": artifacts,
             },
         )
-        accepted = _receive_scheduler_frame(self.channel, "accepted")["payload"]
+        accepted = _receive_task_server_frame(self.channel, "accepted")["payload"]
         if accepted["item_id"] != task.item_id or accepted["attempt_id"] != task.attempt_id:
-            raise ValueError("scheduler accepted a different item or attempt")
+            raise ValueError("task server accepted a different item or attempt")
         self.records.append(record)
 
 
-def _receive_scheduler_frame(channel: FrameChannel, expected: str | None = None) -> dict[str, Any]:
+def _receive_task_server_frame(
+    channel: FrameChannel, expected: str | None = None
+) -> dict[str, Any]:
     frame = channel.recv()
     if frame is None:
-        raise RuntimeError("scheduler disconnected")
+        raise RuntimeError("task server disconnected")
     if frame["type"] == "error":
         raise RuntimeError(frame["payload"]["message"])
     if expected is not None and frame["type"] != expected:
-        raise ValueError(f"expected scheduler {expected}, got {frame['type']}")
+        raise ValueError(f"expected task server {expected}, got {frame['type']}")
     return frame
 
 
