@@ -1,4 +1,7 @@
+import json
+
 import numpy as np
+import pytest
 
 from manifold.adapters.action import BasePinWiden, GripperPolarityAdapter
 from manifold.adapters.observation import Rotate180Cameras
@@ -297,15 +300,13 @@ def test_base_pin_widen_produces_the_exact_benchmark_action_space() -> None:
     assert adapter.produce(arm) == PANDA_OMRON_WHOLE_BODY.action
 
 
-def test_base_pin_widen_appends_the_pin_tail_per_step() -> None:
-    # A 2-step chunk of the 7-D arm action widens to 2 x 12, each arm block followed
-    # by the [0, 0, 0, 0, -1] base pin.
-    arm = _panda_omron_arm().model_copy(update={"chunk_size": 2})
+def test_base_pin_widen_appends_the_pin_tail() -> None:
+    # The 7-D arm action widens to 12, followed by the [0, 0, 0, 0, -1] base pin.
+    arm = _panda_omron_arm()
     adapter = BasePinWiden(width=12)
-    step_a = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
-    step_b = [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7]
-    out = adapter.adapt([*step_a, *step_b], source=arm)
-    assert out == [*step_a, 0.0, 0.0, 0.0, 0.0, -1.0, *step_b, 0.0, 0.0, 0.0, 0.0, -1.0]
+    action = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7]
+    out = adapter.adapt(action, source=arm)
+    assert out == [*action, 0.0, 0.0, 0.0, 0.0, -1.0]
 
 
 def test_base_pin_widen_does_not_apply_to_a_full_width_action() -> None:
@@ -515,3 +516,43 @@ def test_an_extrinsic_frame_mismatch_is_incompatible() -> None:
         ]
     )
     assert check_compatibility(policy, LIBERO).status is Compatibility.INCOMPATIBLE
+
+
+def test_a_signature_executing_more_moves_than_it_predicts_is_rejected() -> None:
+    with pytest.raises(ValueError, match="execution_steps=11, chunk_size=10"):
+        PolicySignature(action_space=_ee(), chunk_size=10, execution_steps=11)
+
+
+def test_a_signature_executing_zero_moves_is_rejected() -> None:
+    with pytest.raises(ValueError, match="execution_steps=0"):
+        PolicySignature(action_space=_ee(), chunk_size=10, execution_steps=0)
+
+
+def test_a_signature_declares_its_chunk() -> None:
+    signature = PolicySignature(action_space=_ee(), chunk_size=10, execution_steps=5)
+    assert (signature.chunk_size, signature.execution_steps) == (10, 5)
+    default = PolicySignature(action_space=_ee())
+    assert (default.chunk_size, default.execution_steps) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    ("space", "fields"),
+    [
+        (EEActionSpace, {"rotation": "axis_angle", "chunk_size": 10}),
+        (JointActionSpace, {"dof": 7, "chunk_size": 2}),
+    ],
+)
+def test_a_chunked_action_space_points_at_the_signature(
+    space: type[EEActionSpace | JointActionSpace], fields: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError, match="`chunk_size` moved to `PolicySignature`"):
+        space.model_validate(fields)
+
+
+def test_a_benchmark_sending_the_legacy_chunk_size_of_one_still_parses() -> None:
+    # Older benchmark images send `chunk_size: 1` on the action space in HELLO.
+    payload = json.loads(LIBERO.model_dump_json())
+    payload["embodiment"]["action"]["chunk_size"] = 1
+    parsed = Benchmark.model_validate_json(json.dumps(payload))
+    assert parsed.embodiment.action == LIBERO.embodiment.action
+    assert "chunk_size" not in parsed.embodiment.action.model_dump()

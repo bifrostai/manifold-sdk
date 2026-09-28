@@ -38,24 +38,18 @@ from manifold.lib.gripper import from_openness
 
 def _threshold_gripper(
     out: list[float],
-    gripper_offset: int,
-    step_width: int,
-    chunk_size: int,
+    gripper_index: int,
     target: GripperFormat,
     cutoff: float,
 ) -> None:
-    """Threshold the gripper slot of each per-step block in place.
+    """Threshold the gripper slot of an action in place.
 
-    The gripper sits at `gripper_offset` within each `step_width`-wide step block;
-    there are `chunk_size` such blocks back to back. The head is a raw open-high
-    score (not yet in `target`'s range), so threshold it directly: above the cutoff
-    is open (openness 1.0), at or below is closed. Shared by both threshold adapters
-    so the EE and unified paths cannot drift.
+    The head is a raw open-high score (not yet in `target`'s range), so threshold
+    it directly: above the cutoff is open (openness 1.0), at or below is closed.
+    Shared by both threshold adapters so the EE and unified paths cannot drift.
     """
-    for step in range(chunk_size):
-        gripper_index = step * step_width + gripper_offset
-        openness = 1.0 if out[gripper_index] > cutoff else 0.0
-        out[gripper_index] = from_openness(openness, target)
+    openness = 1.0 if out[gripper_index] > cutoff else 0.0
+    out[gripper_index] = from_openness(openness, target)
 
 
 class GripperThresholdAdapter(ActionAdapter):
@@ -84,21 +78,13 @@ class GripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper element of each per-step block into the target."""
+        """Threshold the gripper element of the action into the target."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperThresholdAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the slice below assumes the declared length
-        # The gripper is the last element of each per-step block.
-        per_step = source.expected_length() // source.chunk_size
-        _threshold_gripper(
-            out,
-            gripper_offset=per_step - 1,
-            step_width=per_step,
-            chunk_size=source.chunk_size,
-            target=self.target,
-            cutoff=self.cutoff,
-        )
+        # The gripper is the last element of the action.
+        _threshold_gripper(out, gripper_index=len(out) - 1, target=self.target, cutoff=self.cutoff)
         return out
 
 
@@ -108,8 +94,8 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
     The whole-body counterpart of `GripperThresholdAdapter`: the RLDX/RoboCasa use
     case, where the policy emits a fixed-width buffer (e.g. 12-D) whose leading slots
     are an `EEActionSpace` payload carrying the gripper and the rest is padding. The
-    gripper sits at the payload's per-step boundary within each `width`-wide step,
-    located via the payload's `ee_step_layout` — never hardcoded.
+    gripper sits at the last slot of the payload within the `width`-wide action,
+    located via the payload's length — never hardcoded.
 
     It is declared with `from_spec = to_spec = UnifiedActionSpace` so it is reachable
     through `check_compatibility`, which matches an adapter by exact `from_spec` type.
@@ -149,13 +135,12 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"payload": new_payload})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper dim inside each per-step width-D block of the buffer.
+        """Threshold the gripper dim inside the width-D action.
 
-        The gripper sits at `payload.per_step_length() - 1` (the last dim of the EE
-        payload) within each `width`-wide step. The payload's per-step length must fit
-        within `width`; if it does not the layout is malformed and indexing the
-        gripper would read past the step, so raise rather than corrupt a neighbouring
-        dim.
+        The gripper sits at `payload.expected_length() - 1` (the last dim of the EE
+        payload). The payload's length must fit within `width`; if it does not the
+        layout is malformed and indexing the gripper would read into the padding, so
+        raise rather than corrupt a neighbouring dim.
         """
         if not isinstance(source, UnifiedActionSpace) or not isinstance(
             source.payload, EEActionSpace
@@ -169,21 +154,14 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
             raise TypeError("UnifiedGripperThresholdAdapter needs a unified payload with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)
-        per_step = payload.per_step_length()
-        if per_step > source.width:
+        arm = payload.expected_length()
+        if arm > source.width:
             raise ValueError(
-                f"unified payload per-step length {per_step} does not fit within "
-                f"the buffer width {source.width}: the gripper would index past the step"
+                f"unified payload length {arm} does not fit within "
+                f"the buffer width {source.width}: the gripper would index past the action"
             )
-        # Gripper offset within each width-D step: last dim of the arm payload.
-        _threshold_gripper(
-            out,
-            gripper_offset=per_step - 1,
-            step_width=source.width,
-            chunk_size=payload.chunk_size,
-            target=self.target,
-            cutoff=self.cutoff,
-        )
+        # The gripper is the last dim of the arm payload.
+        _threshold_gripper(out, gripper_index=arm - 1, target=self.target, cutoff=self.cutoff)
         return out
 
 

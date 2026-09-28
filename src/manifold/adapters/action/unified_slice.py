@@ -1,7 +1,7 @@
 """Slice a unified action buffer down to its end-effector payload.
 
 A multi-embodiment base model (pi0.5 at width 32, RDT-1B at width 128) emits a
-fixed-width buffer per step: the real action occupies the leading slots and the
+fixed-width buffer per action: the real action occupies the leading slots and the
 rest is zero padding. This adapter drops the padding, producing the embodiment's
 action. It is lossless — the padding contains nothing to preserve.
 
@@ -35,17 +35,11 @@ class UnifiedSliceAdapter(ActionAdapter):
         return self._unified(source)[1]
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Keep the leading payload slots of each step; drop the padding."""
+        """Keep the leading payload slots of the action; drop the padding."""
         unified, payload = self._unified(source)
         buffer = [float(v) for v in values]
-        unified.validate_value(buffer)  # full width * chunk length, per the unified spec
-        chunk = payload.chunk_size
-        per_step = payload.expected_length() // chunk
-        out: list[float] = []
-        for step in range(chunk):
-            start = step * unified.width
-            out.extend(buffer[start : start + per_step])
-        return out
+        unified.validate_value(buffer)  # the full width, per the unified spec
+        return buffer[: payload.expected_length()]
 
     @staticmethod
     def _unified(source: BaseModel) -> tuple[UnifiedActionSpace, EEActionSpace]:

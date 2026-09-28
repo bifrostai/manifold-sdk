@@ -306,23 +306,6 @@ def test_gripper_threshold_is_lossy_and_terminates() -> None:
     assert not adapter.applies(produced)
 
 
-def test_gripper_threshold_thresholds_every_chunk_step() -> None:
-    # A 2-step chunk with one open head and one closed head: each step's gripper is
-    # thresholded independently into the target.
-    adapter = GripperThresholdAdapter(target=GripperFormat.SIGNED_OPEN_LOW)
-    source = EEActionSpace(
-        rotation=RotationFormat.AXIS_ANGLE,
-        gripper=GripperFormat.UNSIGNED,
-        delta=True,
-        chunk_size=2,
-    )
-    step_open = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9]
-    step_closed = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
-    out = adapter.adapt([*step_open, *step_closed], source=source)
-    assert out[6] == -1.0  # open -> -1 under SIGNED_OPEN_LOW
-    assert out[13] == 1.0  # closed -> +1
-
-
 # --- FrameRebaseAdapter -------------------------------------------------------
 
 

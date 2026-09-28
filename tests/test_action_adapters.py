@@ -43,27 +43,26 @@ from manifold.core.sensor import Camera
 # ---------------------------------------------------------------------------
 
 
-def _ee_unsigned(chunk_size: int = 1) -> EEActionSpace:
+def _ee_unsigned() -> EEActionSpace:
     """Open-high UNSIGNED EE space: 3 pos + 3 axis-angle + 1 gripper = 7 D."""
     return EEActionSpace(
         rotation=RotationFormat.AXIS_ANGLE,
         gripper=GripperFormat.UNSIGNED,
         delta=True,
-        chunk_size=chunk_size,
     )
 
 
-def _unified_12d(chunk_size: int = 1) -> UnifiedActionSpace:
+def _unified_12d() -> UnifiedActionSpace:
     """12-D whole-body buffer with a 7-D UNSIGNED EE payload (RoboCasa shape).
 
-    Layout per step: [pos3, rot3, gripper1, base5] = 12 dims.
-    Gripper sits at index 6 within each 12-D block (payload._per_step_length()-1 = 6).
+    Layout of an action: [pos3, rot3, gripper1, base5] = 12 dims.
+    Gripper sits at index 6 (payload.expected_length() - 1 = 6).
     """
-    return UnifiedActionSpace(width=12, payload=_ee_unsigned(chunk_size=chunk_size))
+    return UnifiedActionSpace(width=12, payload=_ee_unsigned())
 
 
 def _one_step_values(gripper: float = 0.9) -> list[float]:
-    """7-D arm values + 5-D base-pin tail for one step of the 12-D buffer."""
+    """7-D arm values + 5-D base-pin tail for an action in the 12-D buffer."""
     arm = [0.1, -0.2, 0.3, 0.4, -0.4, 0.5, gripper]
     base = [0.0, 0.0, 0.0, 0.0, -1.0]
     return arm + base
@@ -144,7 +143,7 @@ def test_gripper_threshold_unified_adapt_binarizes_gripper_dim_open() -> None:
     out = adapter.adapt(values, source=source)
 
     assert len(out) == 12
-    # Gripper is at index 6 (payload._per_step_length() - 1).
+    # Gripper is at index 6 (payload.expected_length() - 1).
     assert out[6] == 1.0
     # All other dims pass through unchanged.
     assert out[:6] == values[:6]
@@ -160,26 +159,6 @@ def test_gripper_threshold_unified_adapt_binarizes_gripper_dim_closed() -> None:
     out = adapter.adapt(values, source=source)
 
     assert out[6] == -1.0
-
-
-def test_gripper_threshold_unified_adapt_chunk_size_2() -> None:
-    # Two-step chunk: each step's gripper (at index 6 within its 12-D block) is
-    # thresholded independently.
-    source = _unified_12d(chunk_size=2)
-    adapter = UnifiedGripperThresholdAdapter(target=GripperFormat.SIGNED)
-
-    step_open = _one_step_values(gripper=0.9)  # gripper → +1
-    step_closed = _one_step_values(gripper=0.1)  # gripper → -1
-    values = step_open + step_closed
-
-    out = adapter.adapt(values, source=source)
-
-    assert len(out) == 24
-    assert out[6] == 1.0  # step 0 gripper
-    assert out[18] == -1.0  # step 1 gripper (12 + 6)
-    # Other dims untouched.
-    assert out[:6] == values[:6]
-    assert out[7:12] == values[7:12]
 
 
 def test_gripper_threshold_unified_raises_when_payload_overflows_width() -> None:
@@ -223,16 +202,6 @@ def test_gripper_threshold_ee_path_adapt_closed() -> None:
     adapter = GripperThresholdAdapter(target=GripperFormat.SIGNED)
     out = adapter.adapt([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1], source=source)
     assert out[-1] == -1.0
-
-
-def test_gripper_threshold_ee_path_chunk_size_2() -> None:
-    source = _ee_unsigned(chunk_size=2)
-    adapter = GripperThresholdAdapter(target=GripperFormat.SIGNED_OPEN_LOW)
-    step_open = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.9]
-    step_closed = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.1]
-    out = adapter.adapt([*step_open, *step_closed], source=source)
-    assert out[6] == -1.0  # open → -1 under SIGNED_OPEN_LOW
-    assert out[13] == 1.0  # closed → +1
 
 
 # ---------------------------------------------------------------------------
@@ -332,22 +301,6 @@ def test_discrete_binarize_custom_low_high() -> None:
     assert adapter.adapt(values_low, source=source)[3] == 0.0
 
 
-def test_discrete_binarize_chunk_size_2_with_payload() -> None:
-    # Two-step 12-D buffer: dim_index=11 in each step.
-    source = _unified_12d(chunk_size=2)
-    adapter = DiscreteBinarize(dim_index=11)
-
-    step_high = [0.0] * 11 + [0.9]  # dim 11 → +1
-    step_low = [0.0] * 11 + [0.2]  # dim 11 → -1
-    values = step_high + step_low
-
-    out = adapter.adapt(values, source=source)
-
-    assert len(out) == 24
-    assert out[11] == 1.0  # step 0, dim 11
-    assert out[23] == -1.0  # step 1, dim 11 (12 + 11)
-
-
 def test_discrete_binarize_is_lossy() -> None:
     assert DiscreteBinarize.lossless is False
 
@@ -428,28 +381,27 @@ def test_unified_gripper_threshold_verifies_through_pipeline() -> None:
     assert any(c.name == "action.length" and c.passed for c in report.checks)
 
 
-def test_unified_gripper_threshold_thresholds_per_step_through_pipeline() -> None:
-    # Drive a probe whose two chunk steps carry an open then a closed gripper through
-    # the actual pipeline (threshold then slice) and confirm each step's gripper is
-    # binarized to the benchmark's SIGNED convention at the right offset. This is the
-    # per-step correctness the prompt asks the through-check test to confirm.
+@pytest.mark.parametrize(("gripper", "expected"), [(0.9, 1.0), (0.1, -1.0)])
+def test_unified_gripper_threshold_thresholds_through_pipeline(
+    gripper: float, expected: float
+) -> None:
+    # Drive an open and a closed action through the actual pipeline (threshold then
+    # slice) and confirm the gripper is binarized to the benchmark's SIGNED
+    # convention at the right offset.
     from manifold.core.state import PipelineState
     from manifold.core.values import Action
 
-    payload = _ee_unsigned(chunk_size=2)  # 7-D EE payload, two steps
-    source = UnifiedActionSpace(width=12, payload=payload)
+    source = UnifiedActionSpace(width=12, payload=_ee_unsigned())
     pipeline = Pipeline(
         action=[
             UnifiedGripperThresholdAdapter(target=GripperFormat.SIGNED),
             UnifiedSliceAdapter(),
         ]
     )
-    step_open = _one_step_values(gripper=0.9)  # 12-D: gripper 0.9 (open)
-    step_closed = _one_step_values(gripper=0.1)  # 12-D: gripper 0.1 (closed)
     result = pipeline.apply_action(
-        Action.from_array(step_open + step_closed), source=source, state=PipelineState()
+        Action.from_array(_one_step_values(gripper=gripper)), source=source, state=PipelineState()
     )
     out = [float(v) for v in result.values]
-    # After slicing to the 7-D EE payload, the gripper is the last dim of each step.
-    assert out[6] == 1.0  # step 0: open → SIGNED +1
-    assert out[13] == -1.0  # step 1: closed → SIGNED -1
+    # After slicing to the 7-D EE payload, the gripper is the last dim.
+    assert len(out) == 7
+    assert out[6] == expected

@@ -1,11 +1,11 @@
-"""Binarize one dimension of a UnifiedActionSpace per-step block.
+"""Binarize one dimension of a UnifiedActionSpace action.
 
 Some whole-body policies emit a control-mode or mode-select dimension whose
 continuous output must be snapped to a discrete low/high value before the
 benchmark's env can consume it. `DiscreteBinarize` applies that snap to a
-single named dimension inside a `UnifiedActionSpace`'s per-step width-D vector.
+single named dimension inside a `UnifiedActionSpace`'s width-D action.
 
-The adapter is parameterized by `dim_index` (0-based within the width-D step),
+The adapter is parameterized by `dim_index` (0-based within the width-D action),
 `threshold` (default 0.5), and `low`/`high` (default -1.0/+1.0). A value
 strictly above the threshold maps to `high`; at or below maps to `low`. All
 other dimensions in the buffer pass through unchanged.
@@ -26,7 +26,7 @@ from manifold.core.embodiment import UnifiedActionSpace
 
 
 class DiscreteBinarize(ActionAdapter):
-    """Binarize one dimension of a `UnifiedActionSpace` per-step vector.
+    """Binarize one dimension of a `UnifiedActionSpace` action.
 
     Value-only, single-pass, author-inserted: `produce` returns the source spec
     unchanged, so `applies` stays True after it runs and the adapter never reaches a
@@ -34,7 +34,7 @@ class DiscreteBinarize(ActionAdapter):
     walk (which visits each chain position once) and must be placed explicitly in the
     chain, not discovered by a re-applying resolver, which would loop here.
 
-    `dim_index` is the 0-based index within the per-step width-D vector to binarize;
+    `dim_index` is the 0-based index within the width-D action to binarize;
     it must satisfy ``0 <= dim_index < source.width``, or `applies` is False.
     `threshold` (default 0.5) is the decision boundary: values strictly above map to
     `high` (the "open"/"on" side, default +1.0); values at or below map to `low`
@@ -72,15 +72,13 @@ class DiscreteBinarize(ActionAdapter):
         return source
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Binarize `dim_index` of each per-step block; leave all other dims unchanged."""
+        """Binarize `dim_index` of the action; leave all other dims unchanged."""
         if not isinstance(source, UnifiedActionSpace):
             raise TypeError("DiscreteBinarize needs a UnifiedActionSpace source")
         out = [float(v) for v in values]
         source.validate_value(out)
-        chunk_size = source.payload.chunk_size if source.payload is not None else 1
-        for step in range(chunk_size):
-            idx = step * source.width + self.dim_index
-            out[idx] = self.high if out[idx] > self.threshold else self.low
+        idx = self.dim_index
+        out[idx] = self.high if out[idx] > self.threshold else self.low
         return out
 
 

@@ -1,7 +1,7 @@
 """Convert the rotation encoding of an end-effector action to a target format.
 
 A policy trained to emit euler-XYZ rotations can drive a benchmark that expects
-axis-angle (or quaternion, or 6D). Only the rotation portion of each step is
+axis-angle (or quaternion, or 6D). Only the rotation portion of the action is
 re-encoded; the position and gripper pass through. Re-encoding the same rotation
 in another format is lossless.
 
@@ -41,19 +41,15 @@ class RotationFormatAdapter(ActionAdapter):
         return source.model_copy(update={"rotation": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Re-encode the rotation of each per-step block; pass position and gripper through."""
+        """Re-encode the rotation of the action; pass position and gripper through."""
         if not isinstance(source, EEActionSpace):
             raise TypeError("RotationFormatAdapter transforms EEActionSpace only")
         buffer = [float(v) for v in values]
         source.validate_value(buffer)
         pos_len, rot_len, _ = ee_step_layout(source.rotation, source.gripper)
-        per_step = pos_len + rot_len + (1 if source.gripper is not None else 0)
-        out: list[float] = []
-        for step in range(source.chunk_size):
-            block = buffer[step * per_step : (step + 1) * per_step]
-            out.extend(block[:pos_len])  # position
-            out.extend(convert(block[pos_len : pos_len + rot_len], source.rotation, self.target))
-            out.extend(block[pos_len + rot_len :])  # gripper, if any
+        out = buffer[:pos_len]  # position
+        out.extend(convert(buffer[pos_len : pos_len + rot_len], source.rotation, self.target))
+        out.extend(buffer[pos_len + rot_len :])  # gripper, if any
         return out
 
 

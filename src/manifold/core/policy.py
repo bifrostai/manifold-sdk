@@ -1,8 +1,9 @@
 """What a policy declares about itself, so a pairing can be checked.
 
 A PolicySignature is the policy side of a pairing: the action space it was trained
-to emit and the composite observation it consumes (proprioception, the cameras
-with their conventions, and whether it needs a language instruction).
+to emit, how many actions a single inference call predicts and executes, the
+composite observation it consumes (proprioception, the cameras with their
+conventions, and whether it needs a language instruction).
 `check_compatibility` compares this against a benchmark before any rollout.
 
 This declares the signature only; the serving harness lives in
@@ -11,7 +12,7 @@ This declares the signature only; the serving harness lives in
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from manifold.core.embodiment import ActionSpace, Proprioception
 from manifold.core.observation_space import ObservationSpace
@@ -31,6 +32,13 @@ class PolicySignature(BaseModel):
     it. `observation_space` composes those channels into the same shape a
     `Benchmark` publishes, so matching stays at the channel seam.
 
+    `chunk_size` is the number of actions that the model predicts in a call. The
+    `action_space` describes the layout of each action. `execution_steps` is the
+    number of those actions that run before the next call. A policy that
+    predicts 10 actions and executes 5 declares `chunk_size=10,
+    execution_steps=5`. The server then calls the model once every 5 steps and
+    returns a stored action at the steps in between. Both fields default to 1.
+
     This models only the *encoding* the policy consumes and emits — shape and
     conventions. **Normalization** (the per-field statistics the policy was
     trained with) is not modeled here: it is policy-internal, so the
@@ -46,6 +54,18 @@ class PolicySignature(BaseModel):
     proprioception: Proprioception = Field(default_factory=Proprioception)
     cameras: list[Camera] = Field(default_factory=list)
     instruction: bool = True
+    chunk_size: int = 1
+    execution_steps: int = 1
+
+    @model_validator(mode="after")
+    def _check_chunk_fields(self) -> PolicySignature:
+        if not 1 <= self.execution_steps <= self.chunk_size:
+            raise ValueError(
+                f"`execution_steps` must be between 1 and `chunk_size` (got "
+                f"execution_steps={self.execution_steps}, chunk_size={self.chunk_size}); "
+                "a call cannot execute more actions than it predicts"
+            )
+        return self
 
     @property
     def observation_space(self) -> ObservationSpace:

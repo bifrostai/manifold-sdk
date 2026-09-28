@@ -35,16 +35,16 @@ from manifold.core.embodiment import EEActionSpace, UnifiedActionSpace
 
 # The trailing whole-body DOFs a 7-D arm action lacks, pinned to hold the mobile
 # base still: 4 base-motion DOFs at 0 plus a control-mode value of -1. Appended to
-# each per-step arm block to reach the env's 12-D whole-body action.
+# the arm action to reach the env's 12-D whole-body action.
 _BASE_PIN: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0, -1.0)
 
 
 class BasePinWiden(ActionAdapter):
     """Widen a 7-D arm `EEActionSpace` to a `width`-D unified buffer, pinning the base.
 
-    Each per-step arm block is followed by a constant base-pin tail so the emitted
-    action reaches the benchmark's whole-body width. `width` defaults to 12 (the
-    RoboCasa PandaOmron whole-body action); the tail length is `width - per_step`.
+    The arm action is followed by a constant base-pin tail so the emitted action
+    reaches the benchmark's whole-body width. `width` defaults to 12 (the RoboCasa
+    PandaOmron whole-body action); the tail length is `width` minus the arm length.
     """
 
     from_spec: ClassVar[type[BaseModel]] = EEActionSpace
@@ -58,13 +58,13 @@ class BasePinWiden(ActionAdapter):
     def applies(self, source: BaseModel) -> bool:
         """True when `source` is an arm action narrower than the target width.
 
-        The per-step arm length must leave room for the pin tail (and the pin must
-        fill exactly that room), so the widening is well-defined.
+        The arm length must leave room for the pin tail (and the pin must fill
+        exactly that room), so the widening is well-defined.
         """
         if not isinstance(source, EEActionSpace):
             return False
-        per_step = source.expected_length() // source.chunk_size
-        return per_step < self.width and per_step + len(self.pin) == self.width
+        arm = source.expected_length()
+        return arm < self.width and arm + len(self.pin) == self.width
 
     def produce(self, source: BaseModel) -> UnifiedActionSpace:
         """The unified whole-body buffer carrying this arm action unchanged as its payload."""
@@ -73,17 +73,12 @@ class BasePinWiden(ActionAdapter):
         return UnifiedActionSpace(width=self.width, payload=source)
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Append the base-pin tail to each per-step arm block, reaching `width` per step."""
+        """Append the base-pin tail to the arm action, reaching `width`."""
         if not isinstance(source, EEActionSpace):
             raise TypeError("BasePinWiden needs an EEActionSpace source")
         buffer = [float(v) for v in values]
-        source.validate_value(buffer)  # full per-step length * chunk, per the arm spec
-        per_step = source.expected_length() // source.chunk_size
-        out: list[float] = []
-        for step in range(source.chunk_size):
-            out.extend(buffer[step * per_step : (step + 1) * per_step])
-            out.extend(self.pin)
-        return out
+        source.validate_value(buffer)
+        return buffer + list(self.pin)
 
 
 __all__ = ["BasePinWiden"]

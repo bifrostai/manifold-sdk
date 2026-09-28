@@ -3,7 +3,7 @@
 A policy trained with one gripper convention (say a binary gripper that opens on
 the low value) can drive a benchmark that expects another (a signed gripper that
 opens on the high value). Everything else about the action stays the same; only
-the gripper element is remapped, per step. This is a lossless representation
+the gripper element is remapped. This is a lossless representation
 conversion.
 
 The adapter is parameterized by the target encoding: `GripperPolarityAdapter(
@@ -48,15 +48,13 @@ class GripperPolarityAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Remap the gripper element of each per-step block to the target encoding."""
+        """Remap the gripper element of the action to the target encoding."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperPolarityAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the remap below assumes the declared length
-        # The gripper is the last element of each per-step block.
-        per_step = source.expected_length() // source.chunk_size
-        for gripper_index in range(per_step - 1, len(out), per_step):
-            out[gripper_index] = remap(out[gripper_index], source.gripper, self.target)
+        # The gripper is the last element of the action.
+        out[-1] = remap(out[-1], source.gripper, self.target)
         return out
 
 

@@ -362,8 +362,8 @@ def test_probe_gripper_is_unambiguously_open() -> None:
 
 def test_always_open_gripper_adapter_is_caught_by_closed_probe() -> None:
     # An adapter that ignores its input gripper and always emits the open value.
-    # The open probe alone would pass it; the dedicated closed-gripper probe (and,
-    # for chunks, the alternating step) catches it.
+    # The open probe alone would pass it; the dedicated closed-gripper probe
+    # catches it.
     class AlwaysOpenGripperAdapter(ActionAdapter):
         from_spec = EEActionSpace
         to_spec = EEActionSpace
@@ -392,60 +392,6 @@ def test_always_open_gripper_adapter_is_caught_by_closed_probe() -> None:
 
     assert not report.ok
     assert not _check(report, "action.gripper.closed").passed
-
-
-def test_chunked_per_step_bug_is_caught() -> None:
-    # An adapter that converts step 0 correctly but zeroes the gripper of every
-    # later step. A first-step-only check would miss it; checking every step with a
-    # per-step-distinct probe catches it.
-    class CorruptsLaterStepsAdapter(ActionAdapter):
-        from_spec = EEActionSpace
-        to_spec = EEActionSpace
-        lossless = True
-
-        def applies(self, source: Any) -> bool:
-            return isinstance(source, EEActionSpace)
-
-        def produce(self, source: Any) -> EEActionSpace:
-            return source.model_copy(update={"gripper": GripperFormat.SIGNED_OPEN_LOW})
-
-        def adapt(self, values: Any, *, source: Any) -> list[float]:
-            per_step = source.expected_length() // source.chunk_size
-            out = list(values)
-            # Correctly remap step 0's gripper, but leave later steps' gripper at
-            # the raw (wrongly-labelled) value — a per-step corruption.
-            from manifold.lib.gripper import remap
-
-            out[per_step - 1] = remap(
-                out[per_step - 1], source.gripper, GripperFormat.SIGNED_OPEN_LOW
-            )
-            return out
-
-    chunked = EEActionSpace(
-        rotation=RotationFormat.AXIS_ANGLE, gripper=GripperFormat.SIGNED, delta=True, chunk_size=3
-    )
-    bench_chunked = EEActionSpace(
-        rotation=RotationFormat.AXIS_ANGLE,
-        gripper=GripperFormat.SIGNED_OPEN_LOW,
-        delta=True,
-        chunk_size=3,
-    )
-    embodiment = Embodiment(name="arm", action=bench_chunked, proprioception=_franka_proprio())
-    bench = Benchmark(
-        name="suite",
-        embodiment=embodiment,
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
-        instruction=False,
-    )
-    policy = _policy(chunked, proprio=_franka_proprio(), rotation=RotationFormat.AXIS_ANGLE)
-    pipeline = Pipeline(action=[CorruptsLaterStepsAdapter()])
-
-    report = verify(policy, bench, pipeline)
-
-    assert not report.ok
-    # Step 0's gripper is fine; a later step's is wrong.
-    assert _check(report, "action.gripper.step0").passed
-    assert not _check(report, "action.gripper.step1").passed
 
 
 class RequiresCameraPoseAdapter(ObservationAdapter):
