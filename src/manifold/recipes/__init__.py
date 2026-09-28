@@ -10,10 +10,9 @@ from manifold.recipes.pairing import Pairing, read_pairing
 from manifold.recipes.recording import NO_RECORDER, EpisodeRecorder
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
+    ActionQueue,
     BenchmarkResult,
-    ChunkEndpoint,
     EpisodeRecord,
-    OpenLoopChunkQueue,
     PairingRejected,
     PolicyProfile,
     StepResult,
@@ -30,12 +29,11 @@ from manifold.recipes.worker import WorkerEpisode, WorkerTask, run_worker
 
 __all__ = [
     "NO_RECORDER",
+    "ActionQueue",
     "BenchmarkResult",
-    "ChunkEndpoint",
     "EpisodeCursor",
     "EpisodeRecord",
     "EpisodeRecorder",
-    "OpenLoopChunkQueue",
     "Pairing",
     "PairingRejected",
     "PolicyProfile",

@@ -133,7 +133,7 @@ def _run_pack(
     under `not_checked` and excluded from the passed tally.
     """
     consumed = policy.observation_space
-    observation = _probe_observation(consumed)
+    observation = probe_observation(consumed)
     layout = getattr(pack, "layout", None)
     if layout is not None:
         # Augment the probe with a length-correct value for each layout-named STATE
@@ -520,39 +520,30 @@ def _run_action(
         return
     out = [float(v) for v in result.values]
 
-    # Compare every chunk step (each carries a distinct position and gripper openness),
-    # so a step-specific corruption is caught; the check names carry the step index.
-    src_pos, src_rot, src_grip = ee_step_layout(policy_action.rotation, policy_action.gripper)
-    tgt_pos, tgt_rot, tgt_grip = ee_step_layout(bench_action.rotation, bench_action.gripper)
-    src_step = src_pos + src_rot + src_grip
-    tgt_step = tgt_pos + tgt_rot + tgt_grip
-    for i in range(policy_action.chunk_size):
-        suffix = "" if policy_action.chunk_size == 1 else f".step{i}"
-        in_block = values[i * src_step : (i + 1) * src_step]
-        out_block = out[i * tgt_step : (i + 1) * tgt_step]
-        _compare_position(
-            f"action.position{suffix}", in_block[:src_pos], out_block[:tgt_pos], checks
-        )
-        _compare_rotation(
-            f"action.rotation{suffix}",
-            in_block[src_pos : src_pos + src_rot],
-            policy_action.rotation,
-            out_block[tgt_pos : tgt_pos + tgt_rot],
-            bench_action.rotation,
+    src_pos, src_rot, _ = ee_step_layout(policy_action.rotation, policy_action.gripper)
+    tgt_pos, tgt_rot, _ = ee_step_layout(bench_action.rotation, bench_action.gripper)
+    _compare_position("action.position", values[:src_pos], out[:tgt_pos], checks)
+    _compare_rotation(
+        "action.rotation",
+        values[src_pos : src_pos + src_rot],
+        policy_action.rotation,
+        out[tgt_pos : tgt_pos + tgt_rot],
+        bench_action.rotation,
+        checks,
+    )
+    if policy_action.gripper is not None and bench_action.gripper is not None:
+        _compare_gripper(
+            "action.gripper",
+            values[src_pos + src_rot],
+            policy_action.gripper,
+            out[tgt_pos + tgt_rot],
+            bench_action.gripper,
             checks,
         )
-        if policy_action.gripper is not None and bench_action.gripper is not None:
-            _compare_gripper(
-                f"action.gripper{suffix}",
-                in_block[src_pos + src_rot],
-                policy_action.gripper,
-                out_block[tgt_pos + tgt_rot],
-                bench_action.gripper,
-                checks,
-            )
 
-    # A single-step probe only sees the open gripper, so a separate closed-gripper
-    # probe gives the check both ends of the range (covering the chunk_size-1 case).
+    # The probe action carries an open gripper. A separate closed-gripper probe
+    # covers the other end of the range. An adapter that preserves open but
+    # mangles closed (e.g. one that always emits "open") fails that probe.
     if policy_action.gripper is not None and bench_action.gripper is not None:
         _check_closed_gripper(policy_action, bench_action, pipeline, checks)
 
@@ -563,7 +554,7 @@ def _check_closed_gripper(
     pipeline: Pipeline,
     checks: list[VerifyCheck],
 ) -> None:
-    """Run a closed-gripper probe and compare the first step's gripper openness."""
+    """Run a closed-gripper probe action and compare its gripper openness."""
     from manifold.lib.rotation import convert  # lazy — avoids circular import at module load
 
     assert policy_action.gripper is not None and bench_action.gripper is not None
@@ -571,12 +562,10 @@ def _check_closed_gripper(
     tgt_pos, tgt_rot, _ = ee_step_layout(bench_action.rotation, bench_action.gripper)
     rotation = convert(_PROBE_ROTVEC, RotationFormat.AXIS_ANGLE, policy_action.rotation)
     closed = from_openness(0.0, policy_action.gripper)
-    step = [*_PROBE_POSITION[:src_pos], *rotation, closed]
+    action = [*_PROBE_POSITION[:src_pos], *rotation, closed]
     try:
         result = pipeline.apply_action(
-            Action.from_array(step * policy_action.chunk_size),
-            source=policy_action,
-            state=PipelineState(),
+            Action.from_array(action), source=policy_action, state=PipelineState()
         )
     except Exception as exc:
         _fail(checks, "action.gripper.closed", "closed-gripper probe failed", exc)
@@ -584,7 +573,7 @@ def _check_closed_gripper(
     out = [float(v) for v in result.values]
     _compare_gripper(
         "action.gripper.closed",
-        step[src_pos + src_rot],
+        action[src_pos + src_rot],
         policy_action.gripper,
         out[tgt_pos + tgt_rot],
         bench_action.gripper,
@@ -599,7 +588,7 @@ def _run_observation(
     checks: list[VerifyCheck],
     not_checked: list[str],
 ) -> None:
-    observation = _probe_observation(bench_obs)
+    observation = probe_observation(bench_obs)
     in_ee = bench_obs.proprioception.ee_pose
     in_ee_values = (
         list(observation.state["ee_pose"])
@@ -755,25 +744,12 @@ def _compare_gripper(
     )
 
 
-def _step_openness(step: int) -> float:
-    """The probe gripper openness for chunk step `step`: alternating open/closed.
-
-    Alternating polarities across chunk steps means a multi-step probe exercises
-    both a fully-open and a fully-closed gripper, so an adapter that preserves open
-    but mangles closed (e.g. one that always emits "open") fails on the closed step.
-    A single-step probe (chunk_size 1) only sees the open value here; `_run_action`
-    runs a separate closed-gripper probe so that case still spans both ends.
-    """
-    return 1.0 if step % 2 == 0 else 0.0
-
-
 def _probe_action_values(spec: ValueSpec) -> list[float]:
     """An asymmetric probe action laid out under `spec`.
 
-    For an end-effector action, each chunk step carries the known probe rotation
-    (encoded into the spec's format), a per-step-distinct position (the base probe
-    position shifted by the step index, so a per-step bug that swaps or drops a
-    step is visible), and a per-step-alternating gripper openness. For any other
+    For an end-effector action, the probe holds the known probe position, the
+    probe rotation (encoded into the spec's format) and an open gripper.
+    `_check_closed_gripper` probes the closed end separately. For any other
     action space, a zero-filled value of the right length (length is all that side
     can check).
     """
@@ -783,46 +759,10 @@ def _probe_action_values(spec: ValueSpec) -> list[float]:
         return spec.example()
     pos_len, _, _ = ee_step_layout(spec.rotation, spec.gripper)
     rotation = convert(_PROBE_ROTVEC, RotationFormat.AXIS_ANGLE, spec.rotation)
-    out: list[float] = []
-    for step in range(spec.chunk_size):
-        position = [coord + step for coord in _PROBE_POSITION[:pos_len]]
-        out.extend(position)
-        out.extend(rotation)
-        if spec.gripper is not None:
-            out.append(from_openness(_step_openness(step), spec.gripper))
+    out = [*_PROBE_POSITION[:pos_len], *rotation]
+    if spec.gripper is not None:
+        out.append(from_openness(1.0, spec.gripper))
     return out
-
-
-def _probe_observation(contract: ObservationSpace) -> Observation:
-    """An asymmetric probe observation laid out under `contract`.
-
-    Proprioception ee_pose carries the known probe position and rotation (encoded
-    into its declared format) plus zeroed gripper qpos; any other proprioception
-    channel is length-correct zeros (only its length and rotation, where present,
-    are checked). Each camera is a deterministic per-pixel gradient so shape is
-    genuinely exercised by distinct values rather than a uniform fill, and each
-    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
-    """
-    proprio = contract.proprioception
-    state: dict[str, np.ndarray] = {}
-    for name in Proprioception.model_fields:
-        spec = getattr(proprio, name)
-        if spec is None:
-            continue
-        if name == "ee_pose" and isinstance(spec, EEObservationSpec):
-            state[name] = _probe_ee_pose(spec)
-        else:
-            state[name] = np.asarray(spec.example(), dtype=np.float32)
-    sensors = {
-        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
-    }
-    instruction = "" if contract.instruction else None
-    return Observation(
-        state=state,
-        sensors=sensors,
-        instruction=instruction,
-        extrinsics=_probe_extrinsics(contract),
-    )
 
 
 def _probe_extrinsics(contract: ObservationSpace) -> dict[str, np.ndarray]:
@@ -852,7 +792,7 @@ def _augment_probe_for_layout(
 
     A layout may pull state channels the `Proprioception` spec does not model (a
     mobile-base pose, a relative-EE quaternion riding in `obs.state` under its own
-    key), which `_probe_observation` cannot synthesize. Each such key is filled with a
+    key), which `probe_observation` cannot synthesize. Each such key is filled with a
     length-correct ramp sized from `_entry_width` so the structural pack can run; only
     the width matters, so the invented content is irrelevant.
 
@@ -936,6 +876,40 @@ def _gradient_frame(shape: tuple[int, ...], dtype: str) -> np.ndarray:
         # gradient does not align with any row/column stride of a typical frame.
         ramp = np.mod(ramp, 251.0)
     return ramp.reshape(shape).astype(np_dtype)
+
+
+def probe_observation(contract: ObservationSpace, *, instruction: str = "") -> Observation:
+    """An asymmetric probe observation laid out under `contract`.
+
+    Proprioception ee_pose carries the known probe position and rotation (encoded
+    into its declared format) plus zeroed gripper qpos; any other proprioception
+    channel is length-correct zeros (only its length and rotation, where present,
+    are checked). Each camera is a deterministic per-pixel gradient so shape is
+    genuinely exercised by distinct values rather than a uniform fill, and each
+    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
+    `instruction` is the text sent when the contract carries one; a caller that
+    runs a real model passes a non-empty placeholder, since some models reject an
+    empty instruction.
+    """
+    proprio = contract.proprioception
+    state: dict[str, np.ndarray] = {}
+    for name in Proprioception.model_fields:
+        spec = getattr(proprio, name)
+        if spec is None:
+            continue
+        if name == "ee_pose" and isinstance(spec, EEObservationSpec):
+            state[name] = _probe_ee_pose(spec)
+        else:
+            state[name] = np.asarray(spec.example(), dtype=np.float32)
+    sensors = {
+        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
+    }
+    return Observation(
+        state=state,
+        sensors=sensors,
+        instruction=instruction if contract.instruction else None,
+        extrinsics=_probe_extrinsics(contract),
+    )
 
 
 @dataclass(frozen=True)
@@ -1056,4 +1030,9 @@ def verify(
     return VerifyReport(checks=tuple(checks), not_checked=tuple(not_checked))
 
 
-__all__ = ["VerifyCheck", "VerifyReport", "verify"]
+__all__ = [
+    "VerifyCheck",
+    "VerifyReport",
+    "probe_observation",
+    "verify",
+]
