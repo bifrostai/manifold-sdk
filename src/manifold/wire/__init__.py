@@ -4,7 +4,8 @@
 and maps the SDK's domain types (`Observation`, `Action`) onto the wire, defines
 the frame types the two sides exchange, and handles length-prefixed stream
 framing. A benchmark runner and a policy server both speak this protocol, so it
-lives in the SDK in one place.
+lives in the SDK in one place. `task_server.py` defines the messages a benchmark
+worker and a task server exchange over the same framing.
 """
 
 from __future__ import annotations
@@ -33,6 +34,20 @@ from manifold.wire.codec import (
     unpack_ndarray,
     unpack_ndarray_full,
 )
+from manifold.wire.task_server import (
+    TaskServerAccepted,
+    TaskServerClaim,
+    TaskServerComplete,
+    TaskServerDone,
+    TaskServerError,
+    TaskServerFrameType,
+    TaskServerHello,
+    TaskServerReady,
+    TaskServerWait,
+    TaskServerWork,
+    WorkerArtifact,
+    WorkerEpisode,
+)
 
 __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
@@ -41,6 +56,18 @@ __all__ = [
     "FrameChannel",
     "FrameType",
     "ImageFormat",
+    "TaskServerAccepted",
+    "TaskServerClaim",
+    "TaskServerComplete",
+    "TaskServerDone",
+    "TaskServerError",
+    "TaskServerFrameType",
+    "TaskServerHello",
+    "TaskServerReady",
+    "TaskServerWait",
+    "TaskServerWork",
+    "WorkerArtifact",
+    "WorkerEpisode",
     "decode_action",
     "decode_observation",
     "decode_rtc_fields",

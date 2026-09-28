@@ -511,7 +511,7 @@ lane id; RTC needs the prefix + timestep.
 |---|---|---|
 | `core/` | kinds: `PolicySignature`, `Pipeline`, `NativeLayout`, `check_compatibility`, `verify` (pure, torch-free) | never |
 | `lib/` | pure helper math (rotation conversions, etc.) | never |
-| `wire/` | the msgpack codec and the public bridge protocol (data-plane serialization) | never |
+| `wire/` | the msgpack codec, the public bridge protocol and the task server protocol (data-plane serialization) | never |
 | catalog directories | one concrete embodiment / sensor / benchmark / policy / adapter per file | no |
 | `recipes/` | opinionated, swappable strategies: resolvers, the serving harness, `inspect`, `Session`/`PolicyEndpoint`, `evaluate` / `serve` | n/a |
 

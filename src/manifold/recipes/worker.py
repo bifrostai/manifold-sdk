@@ -14,8 +14,22 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from manifold.lib.compat import assert_never
 from manifold.recipes.serving import BenchmarkResult, run_episodes
-from manifold.wire import FrameChannel
+from manifold.wire import (
+    FrameChannel,
+    TaskServerAccepted,
+    TaskServerClaim,
+    TaskServerComplete,
+    TaskServerDone,
+    TaskServerError,
+    TaskServerFrameType,
+    TaskServerHello,
+    TaskServerWait,
+    TaskServerWork,
+    WorkerArtifact,
+    WorkerEpisode,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
@@ -25,15 +39,6 @@ if TYPE_CHECKING:
     from manifold.recipes.recording import EpisodeRecorder
     from manifold.recipes.serving import EpisodeRecord, StepResult
     from manifold.wire import ImageFormat
-
-
-@dataclass(frozen=True)
-class WorkerEpisode:
-    """One episode in the workload's ordered task and seed manifest."""
-
-    episode_idx: int
-    task_id: str
-    task_config: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -72,15 +77,11 @@ def run_worker(
         raise ValueError("task_server_address must be host:port")
     with socket.create_connection((host, int(port))) as sock:
         channel = FrameChannel.from_socket(sock)
-        channel.send(
-            "hello",
-            {
-                "worker_id": worker_id,
-                "benchmark_name": benchmark.name,
-                "episodes": [asdict(episode) for episode in episodes],
-            },
+        hello = TaskServerHello(
+            worker_id=worker_id, benchmark_name=benchmark.name, episodes=tuple(episodes)
         )
-        _receive_task_server_frame(channel, "ready")
+        channel.send(hello.frame_type, hello.to_payload())
+        _receive_task_server_frame(channel, TaskServerFrameType.READY)
         worker_run = _WorkerRun(channel, reset, recorder, artifacts)
         run_episodes(
             benchmark,
@@ -114,27 +115,26 @@ class _WorkerRun:
 
     def claim_episode_ids(self) -> Iterator[int]:
         while True:
-            request_id = str(uuid4())
-            self.channel.send("claim", {"request_id": request_id})
-            reply = _receive_task_server_frame(self.channel)
-            payload = reply["payload"]
-            if payload["request_id"] != request_id:
+            claim = TaskServerClaim(request_id=str(uuid4()))
+            self.channel.send(claim.frame_type, claim.to_payload())
+            response = _parse_claim_response(_receive_task_server_frame(self.channel))
+            if response.request_id != claim.request_id:
                 raise ValueError("task server claim request ID mismatch")
-            if reply["type"] == "done":
+            if isinstance(response, TaskServerDone):
                 return
-            if reply["type"] == "wait":
-                delay = payload["retry_after_sec"]
-                if not isinstance(delay, (int, float)) or not 0 <= delay <= 60:
+            elif isinstance(response, TaskServerWait):
+                delay = response.retry_after_sec
+                if not 0 <= delay <= 60:
                     raise ValueError("task server retry_after_sec must be between 0 and 60")
                 time.sleep(delay)
-                continue
-            if reply["type"] != "work":
-                raise ValueError(f"unexpected task server response {reply['type']}")
-            self.current_task = _parse_task_assignment(payload)
-            self.current_recorder = self.recorder_factory(self.current_task)
-            yield self.current_task.episode_idx
-            self.current_task = None
-            self.current_recorder = None
+            elif isinstance(response, TaskServerWork):
+                self.current_task = _worker_task_from_work(response)
+                self.current_recorder = self.recorder_factory(self.current_task)
+                yield self.current_task.episode_idx
+                self.current_task = None
+                self.current_recorder = None
+            else:
+                assert_never(response)
 
     def reset_episode(self, _episode_idx: int) -> Observation:
         assert self.current_task is not None
@@ -166,54 +166,68 @@ class _WorkerRun:
             if not resolved.is_file():
                 raise ValueError("worker artifact must be a file")
             artifacts.append(
-                {"episode_idx": record.episode_idx, "path": str(relative), "kind": "replay"}
+                WorkerArtifact(episode_idx=record.episode_idx, path=str(relative), kind="replay")
             )
         # The episode loop closes the recorder before invoking this callback.
-        self.channel.send(
-            "complete",
-            {
-                "item_id": task.item_id,
-                "attempt_id": task.attempt_id,
-                "results": [result],
-                "artifacts": artifacts,
-            },
+        complete = TaskServerComplete(
+            item_id=task.item_id,
+            attempt_id=task.attempt_id,
+            results=(result,),
+            artifacts=tuple(artifacts),
         )
-        accepted = _receive_task_server_frame(self.channel, "accepted")["payload"]
-        if accepted["item_id"] != task.item_id or accepted["attempt_id"] != task.attempt_id:
+        self.channel.send(complete.frame_type, complete.to_payload())
+        accepted = TaskServerAccepted.from_payload(
+            _receive_task_server_frame(self.channel, TaskServerFrameType.ACCEPTED)["payload"]
+        )
+        if accepted.item_id != task.item_id or accepted.attempt_id != task.attempt_id:
             raise ValueError("task server accepted a different item or attempt")
         self.records.append(record)
 
 
 def _receive_task_server_frame(
-    channel: FrameChannel, expected: str | None = None
+    channel: FrameChannel, expected: TaskServerFrameType | None = None
 ) -> dict[str, Any]:
     frame = channel.recv()
     if frame is None:
         raise RuntimeError("task server disconnected")
-    if frame["type"] == "error":
-        raise RuntimeError(frame["payload"]["message"])
+    if frame["type"] == TaskServerFrameType.ERROR:
+        raise RuntimeError(TaskServerError.from_payload(frame["payload"]).message)
     if expected is not None and frame["type"] != expected:
         raise ValueError(f"expected task server {expected}, got {frame['type']}")
     return frame
 
 
-def _parse_task_assignment(payload: dict[str, Any]) -> WorkerTask:
-    indices = payload["episode_indices"]
-    if len(indices) != 1 or type(indices[0]) is not int or indices[0] < 0:
+def _parse_claim_response(
+    frame: dict[str, Any],
+) -> TaskServerDone | TaskServerWait | TaskServerWork:
+    if frame["type"] == TaskServerFrameType.DONE:
+        return TaskServerDone.from_payload(frame["payload"])
+    if frame["type"] == TaskServerFrameType.WAIT:
+        return TaskServerWait.from_payload(frame["payload"])
+    if frame["type"] == TaskServerFrameType.WORK:
+        return TaskServerWork.from_payload(frame["payload"])
+    raise ValueError(f"unexpected task server response {frame['type']}")
+
+
+def _worker_task_from_work(work: TaskServerWork) -> WorkerTask:
+    indices = work.episode_indices
+    if len(indices) != 1 or indices[0] < 0:
         raise ValueError("worker requires one non-negative episode index per item")
-    output_dir = Path(payload["output_dir"])
+    output_dir = Path(work.output_dir)
     if not output_dir.is_absolute():
         raise ValueError("worker output_dir must be absolute")
-    for key in ("item_id", "attempt_id", "task_id"):
-        if not isinstance(payload[key], str) or not payload[key]:
+    for key, value in (
+        ("item_id", work.item_id),
+        ("attempt_id", work.attempt_id),
+        ("task_id", work.task_id),
+    ):
+        if not value:
             raise ValueError(f"worker {key} must be a non-empty string")
-    if not isinstance(payload["task_config"], dict):
-        raise TypeError("worker task_config must be a mapping")
     return WorkerTask(
-        item_id=payload["item_id"],
-        attempt_id=payload["attempt_id"],
-        task_id=payload["task_id"],
-        task_config=payload["task_config"],
+        item_id=work.item_id,
+        attempt_id=work.attempt_id,
+        task_id=work.task_id,
+        task_config=work.task_config,
         episode_idx=indices[0],
         output_dir=output_dir,
     )
