@@ -19,7 +19,7 @@ instance that was never sent steps 1 to 20. It answers from a blank state and
 returns a plausible action. Nothing raises, the rollout completes, and the score
 is indistinguishable from a weak policy's.
 
-Chunking itself is safe. `OpenLoopChunkQueue` holds the chunk buffer in the
+Chunking itself is safe. `ActionQueue` holds the chunk buffer in the
 driver, on this side of the network, so an upstream call carries only the native
 dict.
 

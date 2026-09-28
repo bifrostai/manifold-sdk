@@ -18,7 +18,7 @@ import numpy as np
 
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
-from manifold.recipes.serving import OpenLoopChunkQueue
+from manifold.recipes.serving import ActionQueue
 
 # Guards the one-per-process warning for a multi-row result under the default
 # chunk fields; sessions run on separate worker threads.
@@ -88,12 +88,12 @@ def check_chunk(action: Action, signature: PolicySignature) -> list[Action]:
     return [Action(values=row) for row in values]
 
 
-class FunctionSession(OpenLoopChunkQueue):
+class FunctionSession(ActionQueue):
     """A shard's session over a prediction function.
 
-    `OpenLoopChunkQueue` stores the actions from a `predict` call. The session
-    calls `predict` again after `signature.execution_steps` of them have run.
-    Each shard gets its own session, so shards keep separate actions.
+    `ActionQueue` stores the actions from a `predict` call. The session calls
+    `predict` again after `signature.execution_steps` of them have run. Each
+    shard gets its own session, so shards keep separate actions.
     """
 
     _endpoint: FunctionEndpoint

@@ -1,6 +1,6 @@
 """Unit tests for the open-loop chunk-queue Session base in recipes.serving.
 
-OpenLoopChunkQueue holds one raw model chunk and serves it
+ActionQueue holds one raw model chunk and serves it
 `signature.execution_steps` times before running a fresh forward — the reusable
 half of the serve loop a policy backend subclasses. These exercise that horizon
 logic against a fake endpoint (no model, no torch).
@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from manifold.recipes import OpenLoopChunkQueue, StepResult
+from manifold.recipes import ActionQueue, StepResult
 from manifold.recipes.serving import PolicyEndpoint
 
 
@@ -32,7 +32,7 @@ def _endpoint(execution_steps: int) -> PolicyEndpoint:
     )
 
 
-class _CountingQueue(OpenLoopChunkQueue):
+class _CountingQueue(ActionQueue):
     """A queue whose `_forward` returns a fresh sentinel and counts its calls."""
 
     def __init__(self, execution_steps: int) -> None:
@@ -69,7 +69,7 @@ def test_reset_clears_buffer_so_next_advance_forwards():
 
 
 def test_base_forward_raises_so_a_backend_cannot_silently_serve_stale():
-    q = OpenLoopChunkQueue(_endpoint(2))
+    q = ActionQueue(_endpoint(2))
     with pytest.raises(NotImplementedError):
         q.advance({})
 

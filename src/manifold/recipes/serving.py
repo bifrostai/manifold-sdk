@@ -488,7 +488,7 @@ class PolicyProfile(Protocol):
         ...
 
 
-class OpenLoopChunkQueue:
+class ActionQueue:
     """One connection's open-loop chunk buffer over a shared endpoint.
 
     A reusable `Session` implementation for a policy backend to subclass: it owns its
@@ -515,7 +515,7 @@ class OpenLoopChunkQueue:
         The one seam between backends. The base raises so a backend that leaves it
         unimplemented fails loudly rather than silently serving a stale buffer.
         """
-        raise NotImplementedError("OpenLoopChunkQueue subclass must implement _forward")
+        raise NotImplementedError("ActionQueue subclass must implement _forward")
 
     def advance(self, native: Any, /) -> tuple[Any, int]:
         """Serve the next open-loop step for `native`: return (raw_chunk, step).
@@ -1132,9 +1132,9 @@ def launch_server(
 
 
 __all__ = [
+    "ActionQueue",
     "BenchmarkResult",
     "EpisodeRecord",
-    "OpenLoopChunkQueue",
     "PairingRejected",
     "PolicyEndpoint",
     "PolicyProfile",
