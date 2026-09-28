@@ -1,9 +1,9 @@
 """Unit tests for the open-loop chunk-queue Session base in recipes.serving.
 
-OpenLoopChunkQueue holds one raw model chunk and serves it `exec_steps` times before
-running a fresh forward — the reusable half of the serve loop a policy backend
-subclasses. These exercise that horizon logic against a fake endpoint (no model, no
-torch).
+OpenLoopChunkQueue holds one raw model chunk and serves it
+`signature.execution_steps` times before running a fresh forward — the reusable
+half of the serve loop a policy backend subclasses. These exercise that horizon
+logic against a fake endpoint (no model, no torch).
 """
 
 from __future__ import annotations
@@ -21,13 +21,22 @@ import pytest
 from PIL import Image
 
 from manifold.recipes import OpenLoopChunkQueue, StepResult
+from manifold.recipes.serving import PolicyEndpoint
+
+
+def _endpoint(execution_steps: int) -> PolicyEndpoint:
+    """A fake endpoint that carries only the signature field that the queue reads."""
+    return cast(
+        PolicyEndpoint,
+        SimpleNamespace(signature=SimpleNamespace(execution_steps=execution_steps)),
+    )
 
 
 class _CountingQueue(OpenLoopChunkQueue):
     """A queue whose `_forward` returns a fresh sentinel and counts its calls."""
 
-    def __init__(self, exec_steps: int) -> None:
-        super().__init__(SimpleNamespace(profile=SimpleNamespace(exec_steps=exec_steps)))
+    def __init__(self, execution_steps: int) -> None:
+        super().__init__(_endpoint(execution_steps))
         self.forwards = 0
 
     def _forward(self, native, /):
@@ -36,20 +45,20 @@ class _CountingQueue(OpenLoopChunkQueue):
 
 
 def test_advance_forwards_on_drain_then_serves_buffered_steps():
-    q = _CountingQueue(exec_steps=3)
+    q = _CountingQueue(execution_steps=3)
     # First advance: empty buffer -> forward, step 0.
     assert q.advance({}) == ("chunk1", 0)
     # Next two: serve the buffered chunk at steps 1, 2 — no new forward.
     assert q.advance({}) == ("chunk1", 1)
     assert q.advance({}) == ("chunk1", 2)
     assert q.forwards == 1
-    # exec_steps=3 served -> horizon drained -> fresh forward, step resets to 0.
+    # execution_steps=3 served -> horizon drained -> fresh forward, step resets to 0.
     assert q.advance({}) == ("chunk2", 0)
     assert q.forwards == 2
 
 
 def test_reset_clears_buffer_so_next_advance_forwards():
-    q = _CountingQueue(exec_steps=5)
+    q = _CountingQueue(execution_steps=5)
     q.advance({})  # forward -> chunk1, step 0
     q.advance({})  # buffered -> chunk1, step 1
     assert q.forwards == 1
@@ -60,19 +69,19 @@ def test_reset_clears_buffer_so_next_advance_forwards():
 
 
 def test_base_forward_raises_so_a_backend_cannot_silently_serve_stale():
-    q = OpenLoopChunkQueue(SimpleNamespace(profile=SimpleNamespace(exec_steps=2)))
+    q = OpenLoopChunkQueue(_endpoint(2))
     with pytest.raises(NotImplementedError):
         q.advance({})
 
 
 def test_infer_is_the_unused_no_packing_path():
-    q = _CountingQueue(exec_steps=2)
+    q = _CountingQueue(execution_steps=2)
     with pytest.raises(NotImplementedError):
         q.infer(object())
 
 
 def test_close_is_a_noop_for_the_stateless_base():
-    q = _CountingQueue(exec_steps=2)
+    q = _CountingQueue(execution_steps=2)
     assert q.close() is None
 
 

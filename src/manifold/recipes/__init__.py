@@ -11,7 +11,6 @@ from manifold.recipes.recording import NO_RECORDER, EpisodeRecorder
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
     BenchmarkResult,
-    ChunkEndpoint,
     EpisodeRecord,
     OpenLoopChunkQueue,
     PairingRejected,
@@ -31,7 +30,6 @@ from manifold.recipes.worker import WorkerEpisode, WorkerTask, run_worker
 __all__ = [
     "NO_RECORDER",
     "BenchmarkResult",
-    "ChunkEndpoint",
     "EpisodeCursor",
     "EpisodeRecord",
     "EpisodeRecorder",

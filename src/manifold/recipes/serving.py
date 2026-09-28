@@ -488,20 +488,6 @@ class PolicyProfile(Protocol):
         ...
 
 
-class ChunkEndpoint(Protocol):
-    """Structural view of the endpoint `OpenLoopChunkQueue` holds.
-
-    Typing against this — rather than `PolicyEndpoint`, which does not declare
-    `.profile` — keeps the queue backend-agnostic. `profile` is `Any` because a
-    backend's profile is its own frozen dataclass; the queue only reads `exec_steps`.
-    """
-
-    @property
-    def profile(self) -> Any:
-        """The backend-specific profile this endpoint was loaded from."""
-        ...
-
-
 class OpenLoopChunkQueue:
     """One connection's open-loop chunk buffer over a shared endpoint.
 
@@ -511,11 +497,12 @@ class OpenLoopChunkQueue:
     they hold per-session model state.
     """
 
-    def __init__(self, endpoint: ChunkEndpoint) -> None:
+    def __init__(self, endpoint: PolicyEndpoint) -> None:
         self._endpoint = endpoint
-        self._profile = endpoint.profile
+        self._execution_steps = endpoint.signature.execution_steps
         # The buffered raw model chunk and the step pointer into it. None until the
-        # first advance; the pointer wraps at exec_steps, triggering a fresh forward.
+        # first advance; the pointer wraps at execution_steps, triggering a fresh
+        # forward.
         self._chunk: Any = None
         self._step = 0
 
@@ -530,10 +517,10 @@ class OpenLoopChunkQueue:
     def advance(self, native: dict[str, Any], /) -> tuple[Any, int]:
         """Serve the next open-loop step for `native`: return (raw_chunk, step).
 
-        When the horizon has drained (no buffered chunk, or `exec_steps` served), run
+        When the horizon has drained (no buffered chunk, or `execution_steps` served), run
         a fresh `_forward` and reset the step pointer; otherwise serve the next step.
         """
-        if self._chunk is None or self._step >= self._profile.exec_steps:
+        if self._chunk is None or self._step >= self._execution_steps:
             self._chunk = self._forward(native)
             self._step = 0
         step = self._step
@@ -1143,7 +1130,6 @@ def launch_server(
 
 __all__ = [
     "BenchmarkResult",
-    "ChunkEndpoint",
     "EpisodeRecord",
     "OpenLoopChunkQueue",
     "PairingRejected",
