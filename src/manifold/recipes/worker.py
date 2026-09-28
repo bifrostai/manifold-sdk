@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import socket
 import time
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from manifold.recipes.serving import BenchmarkResult, run_episodes
+from manifold.recipes.serving import BenchmarkResult, ResetResult, run_episodes
 from manifold.wire import FrameChannel
 
 if TYPE_CHECKING:
@@ -136,9 +136,10 @@ class _WorkerRun:
             self.current_task = None
             self.current_recorder = None
 
-    def reset_episode(self, _episode_idx: int) -> Observation:
+    def reset_episode(self, _episode_idx: int) -> ResetResult:
         assert self.current_task is not None
-        return self.reset_task(self.current_task)
+        task = self.current_task
+        return ResetResult(self.reset_task(task), task_id=task.task_id)
 
     def begin(self, episode_id: int) -> None:
         assert self.current_recorder is not None
@@ -155,7 +156,6 @@ class _WorkerRun:
     def report_episode(self, record: EpisodeRecord) -> None:
         assert self.current_task is not None
         task = self.current_task
-        record = replace(record, task_id=task.task_id)
         result = asdict(record)
         result["started_at"] = record.started_at.isoformat()
         result["ended_at"] = record.ended_at.isoformat()

@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from manifold.recipes import ActionQueue, StepResult
+from manifold.recipes import ActionQueue, ResetResult, StepResult
 from manifold.recipes.serving import PolicyEndpoint
 
 
@@ -99,6 +99,7 @@ def _records(episodes: int, *, successes: int):
             initialization_sec=0.0,
             started_at=moment,
             ended_at=moment,
+            task_id="task",
         )
         for idx in range(episodes)
     )
@@ -302,9 +303,9 @@ def test_run_episodes_drives_the_ids_it_is_given_in_order(monkeypatch):
     sock = _install_fake_transport(monkeypatch)
     seeded: list[int] = []
 
-    def reset_episode(episode_id: int) -> Observation:
+    def reset_episode(episode_id: int) -> ResetResult:
         seeded.append(episode_id)
-        return Observation()
+        return ResetResult(Observation(), task_id="task")
 
     events: list[str] = []
     result = run_episodes(
@@ -407,7 +408,9 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
     # act
     result = run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": source}, instruction="pick"),
+        lambda _episode: ResetResult(
+            Observation(sensors={"scene": source}, instruction="pick"), task_id="PickTask"
+        ),
         step,
         server="policy:9000",
         episode_ids=[7],
@@ -425,6 +428,7 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
     assert payload["episode_idx"] == 7
     assert payload["step"] == 0
     assert payload["task"] == "pick"
+    assert payload["task_id"] == "PickTask"
     assert (payload["width"], payload["height"]) == (455, 256)
     displayed = np.asarray(Image.open(io.BytesIO(payload["jpeg"])))
     assert displayed.shape == (256, 455, 3)
@@ -518,7 +522,7 @@ def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatc
     # act
     result = run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": image}),
+        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
         step,
         server="policy:9000",
         episode_ids=[0],
@@ -613,7 +617,7 @@ def test_run_episodes_retries_a_live_frame_when_sending_fails(monkeypatch):
 
     run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": image}),
+        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
         step,
         server="policy:9000",
         episode_ids=[0],
@@ -675,7 +679,7 @@ def test_run_episodes_rejects_a_boolean_live_view_acknowledgement(monkeypatch):
 
     run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": image}),
+        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
         step,
         server="policy:9000",
         episode_ids=[0],
@@ -689,7 +693,6 @@ def test_run_episodes_rejects_a_boolean_live_view_acknowledgement(monkeypatch):
 
 
 def test_run_episodes_requires_a_camera_when_the_live_view_server_is_set():
-    from manifold.core.values import Observation
     from manifold.recipes import run_episodes
 
     # act
@@ -697,7 +700,7 @@ def test_run_episodes_requires_a_camera_when_the_live_view_server_is_set():
     with pytest.raises(ValueError, match="camera is required"):
         run_episodes(
             _fake_benchmark(),
-            lambda _episode: cast(Observation, None),
+            lambda _episode: cast(ResetResult, None),
             _step,
             server="policy:9000",
             episode_ids=[],
@@ -729,7 +732,7 @@ def test_run_episodes_rejects_a_depth_live_view_camera():
     with pytest.raises(ValueError, match="must be RGB"):
         run_episodes(
             benchmark,
-            lambda _episode: Observation(),
+            lambda _episode: ResetResult(Observation(), task_id="task"),
             _step,
             server="policy:9000",
             episode_ids=[],
@@ -763,8 +766,9 @@ def test_run_episodes_validates_a_live_view_before_copying(monkeypatch):
     with live_server, pytest.raises(ValueError, match="shape mismatch"):
         run_episodes(
             benchmark,
-            lambda _episode: Observation(
-                sensors={"scene": np.zeros((1000, 1000, 3), dtype=np.uint8)}
+            lambda _episode: ResetResult(
+                Observation(sensors={"scene": np.zeros((1000, 1000, 3), dtype=np.uint8)}),
+                task_id="task",
             ),
             _step,
             server="policy:9000",
@@ -820,7 +824,7 @@ def test_run_episodes_closes_a_live_view_socket_during_a_partial_control_frame(
 
     run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": image}),
+        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
         step,
         server="policy:9000",
         episode_ids=[0],
@@ -835,13 +839,12 @@ def test_run_episodes_closes_a_live_view_socket_during_a_partial_control_frame(
 
 def test_run_episodes_rejects_ids_that_cannot_identify_an_episode():
     from manifold.core.benchmark import Benchmark
-    from manifold.core.values import Observation
     from manifold.recipes import run_episodes
 
     def dispatch(episode_ids: list[int]) -> None:
         run_episodes(
             cast(Benchmark, object()),
-            lambda _id: cast(Observation, object()),
+            lambda _id: cast(ResetResult, object()),
             _step,
             server="h:1",
             episode_ids=episode_ids,
@@ -861,9 +864,9 @@ def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monke
     sock = _install_fake_transport(monkeypatch)
     seeded: list[int] = []
 
-    def reset_episode(episode_id: int) -> Observation:
+    def reset_episode(episode_id: int) -> ResetResult:
         seeded.append(episode_id)
-        return Observation()
+        return ResetResult(Observation(), task_id="task")
 
     events: list[str] = []
     result = run_sharded_benchmark(
@@ -894,9 +897,9 @@ def test_run_sharded_benchmark_single_shard_runs_every_global_episode(monkeypatc
     _install_fake_transport(monkeypatch)
     seeded: list[int] = []
 
-    def reset_episode(episode_id: int) -> Observation:
+    def reset_episode(episode_id: int) -> ResetResult:
         seeded.append(episode_id)
-        return Observation()
+        return ResetResult(Observation(), task_id="task")
 
     run_sharded_benchmark(
         _fake_benchmark(),
@@ -927,7 +930,7 @@ def test_run_sharded_benchmark_updates_the_rollup_after_each_episode(monkeypatch
 
     run_sharded_benchmark(
         _fake_benchmark(),
-        lambda _id: Observation(),
+        lambda _id: ResetResult(Observation(), task_id="task"),
         _one_step_episodes(succeeding=1),
         server="h:1",
         total_episodes=6,
@@ -940,15 +943,38 @@ def test_run_sharded_benchmark_updates_the_rollup_after_each_episode(monkeypatch
     assert writes == [[1], [1, 3], [1, 3, 5]]
 
 
+def test_run_sharded_benchmark_writes_each_resets_task_id(monkeypatch, tmp_path):
+    import json
+
+    from manifold.core.values import Observation
+    from manifold.recipes import run_sharded_benchmark
+
+    _install_fake_transport(monkeypatch)
+
+    run_sharded_benchmark(
+        _fake_benchmark(),
+        lambda episode_id: ResetResult(Observation(), task_id=f"Task{episode_id}"),
+        _one_step_episodes(succeeding=1),
+        server="h:1",
+        total_episodes=4,
+        num_shards=2,
+        shard_index=0,
+        max_steps=1,
+        output_dir=tmp_path,
+    )
+
+    written = json.loads((tmp_path / "results" / "bench-1.json").read_text())
+    assert [record["task_id"] for record in written["records"]] == ["Task0", "Task2"]
+
+
 def test_run_sharded_benchmark_rejects_a_malformed_server():
     from manifold.core.benchmark import Benchmark
-    from manifold.core.values import Observation
     from manifold.recipes import run_sharded_benchmark
 
     with pytest.raises(ValueError):  # parsed before any connection is attempted
         run_sharded_benchmark(
             cast(Benchmark, object()),
-            lambda _id: cast(Observation, object()),
+            lambda _id: cast(ResetResult, object()),
             _step,
             server="no-port",
             total_episodes=1,
@@ -1000,7 +1026,7 @@ def _run_over_fake_transport(monkeypatch, *, step, episodes, max_steps, instruct
     _install_fake_transport(monkeypatch)
     return run_benchmark(
         _fake_benchmark(instruction=instruction),
-        lambda: Observation(instruction=instruction),
+        lambda: ResetResult(Observation(instruction=instruction), task_id="task"),
         step,
         episodes=episodes,
         max_steps=max_steps,
@@ -1181,7 +1207,7 @@ def test_a_recorder_is_begun_with_the_global_episode_id_of_each_episode(monkeypa
 
     run_sharded_benchmark(
         _fake_benchmark(),
-        lambda _id: Observation(),
+        lambda _id: ResetResult(Observation(), task_id="task"),
         _one_step_episodes(succeeding=0),
         server="h:1",
         total_episodes=10,
@@ -1283,6 +1309,7 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
         initialization_sec=3.0,
         started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
         ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
+        task_id="PickUpTheMugTask",
     )
 
     path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="libero")
@@ -1298,6 +1325,7 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
                 "initialization_sec": 3.0,
                 "started_at": "2026-01-01T12:00:00+00:00",
                 "ended_at": "2026-01-01T12:00:30+00:00",
+                "task_id": "PickUpTheMugTask",
             }
         ]
     }
@@ -1316,40 +1344,3 @@ def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
     assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
     assert datetime.fromisoformat(first["started_at"]).tzinfo is not None
     assert not (tmp_path / "results" / "bench.json.tmp").exists()
-
-
-def test_write_rollup_includes_a_set_task_id(tmp_path):
-    import json
-
-    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
-
-    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    record = EpisodeRecord(
-        episode_idx=0,
-        task_name="Pack boxed foods into the bin",
-        success=False,
-        steps=1,
-        initialization_sec=0.0,
-        started_at=moment,
-        ended_at=moment,
-        task_id="FoodPacking2BoxesTask",
-    )
-
-    path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="bench")
-
-    (written,) = json.loads(path.read_text())["records"]
-    assert written["task_id"] == "FoodPacking2BoxesTask"
-    assert written["task_name"] == "Pack boxed foods into the bin"
-
-
-def test_write_rollup_omits_an_unset_task_id(tmp_path):
-    import json
-
-    from manifold.recipes import BenchmarkResult, write_rollup
-
-    path = write_rollup(
-        BenchmarkResult(records=_records(1, successes=0)), tmp_path, benchmark_name="bench"
-    )
-
-    (written,) = json.loads(path.read_text())["records"]
-    assert "task_id" not in written
