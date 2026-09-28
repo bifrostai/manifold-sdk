@@ -133,7 +133,7 @@ def _run_pack(
     under `not_checked` and excluded from the passed tally.
     """
     consumed = policy.observation_space
-    observation = _probe_observation(consumed)
+    observation = probe_observation(consumed)
     layout = getattr(pack, "layout", None)
     if layout is not None:
         # Augment the probe with a length-correct value for each layout-named STATE
@@ -588,7 +588,7 @@ def _run_observation(
     checks: list[VerifyCheck],
     not_checked: list[str],
 ) -> None:
-    observation = _probe_observation(bench_obs)
+    observation = probe_observation(bench_obs)
     in_ee = bench_obs.proprioception.ee_pose
     in_ee_values = (
         list(observation.state["ee_pose"])
@@ -765,38 +765,6 @@ def _probe_action_values(spec: ValueSpec) -> list[float]:
     return out
 
 
-def _probe_observation(contract: ObservationSpace) -> Observation:
-    """An asymmetric probe observation laid out under `contract`.
-
-    Proprioception ee_pose carries the known probe position and rotation (encoded
-    into its declared format) plus zeroed gripper qpos; any other proprioception
-    channel is length-correct zeros (only its length and rotation, where present,
-    are checked). Each camera is a deterministic per-pixel gradient so shape is
-    genuinely exercised by distinct values rather than a uniform fill, and each
-    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
-    """
-    proprio = contract.proprioception
-    state: dict[str, np.ndarray] = {}
-    for name in Proprioception.model_fields:
-        spec = getattr(proprio, name)
-        if spec is None:
-            continue
-        if name == "ee_pose" and isinstance(spec, EEObservationSpec):
-            state[name] = _probe_ee_pose(spec)
-        else:
-            state[name] = np.asarray(spec.example(), dtype=np.float32)
-    sensors = {
-        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
-    }
-    instruction = "" if contract.instruction else None
-    return Observation(
-        state=state,
-        sensors=sensors,
-        instruction=instruction,
-        extrinsics=_probe_extrinsics(contract),
-    )
-
-
 def _probe_extrinsics(contract: ObservationSpace) -> dict[str, np.ndarray]:
     """One 4x4 camera-to-frame pose per calibrated camera, distinct per camera.
 
@@ -824,7 +792,7 @@ def _augment_probe_for_layout(
 
     A layout may pull state channels the `Proprioception` spec does not model (a
     mobile-base pose, a relative-EE quaternion riding in `obs.state` under its own
-    key), which `_probe_observation` cannot synthesize. Each such key is filled with a
+    key), which `probe_observation` cannot synthesize. Each such key is filled with a
     length-correct ramp sized from `_entry_width` so the structural pack can run; only
     the width matters, so the invented content is irrelevant.
 
@@ -908,6 +876,40 @@ def _gradient_frame(shape: tuple[int, ...], dtype: str) -> np.ndarray:
         # gradient does not align with any row/column stride of a typical frame.
         ramp = np.mod(ramp, 251.0)
     return ramp.reshape(shape).astype(np_dtype)
+
+
+def probe_observation(contract: ObservationSpace, *, instruction: str = "") -> Observation:
+    """An asymmetric probe observation laid out under `contract`.
+
+    Proprioception ee_pose carries the known probe position and rotation (encoded
+    into its declared format) plus zeroed gripper qpos; any other proprioception
+    channel is length-correct zeros (only its length and rotation, where present,
+    are checked). Each camera is a deterministic per-pixel gradient so shape is
+    genuinely exercised by distinct values rather than a uniform fill, and each
+    camera declaring calibration also carries a pose in `extrinsics`. No RNG.
+    `instruction` is the text sent when the contract carries one; a caller that
+    runs a real model passes a non-empty placeholder, since some models reject an
+    empty instruction.
+    """
+    proprio = contract.proprioception
+    state: dict[str, np.ndarray] = {}
+    for name in Proprioception.model_fields:
+        spec = getattr(proprio, name)
+        if spec is None:
+            continue
+        if name == "ee_pose" and isinstance(spec, EEObservationSpec):
+            state[name] = _probe_ee_pose(spec)
+        else:
+            state[name] = np.asarray(spec.example(), dtype=np.float32)
+    sensors = {
+        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
+    }
+    return Observation(
+        state=state,
+        sensors=sensors,
+        instruction=instruction if contract.instruction else None,
+        extrinsics=_probe_extrinsics(contract),
+    )
 
 
 @dataclass(frozen=True)
@@ -1028,4 +1030,9 @@ def verify(
     return VerifyReport(checks=tuple(checks), not_checked=tuple(not_checked))
 
 
-__all__ = ["VerifyCheck", "VerifyReport", "verify"]
+__all__ = [
+    "VerifyCheck",
+    "VerifyReport",
+    "probe_observation",
+    "verify",
+]

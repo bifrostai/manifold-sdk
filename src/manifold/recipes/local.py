@@ -14,9 +14,14 @@ from manifold.core.benchmark import Benchmark
 from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
-from manifold.recipes.function import FunctionEndpoint
+from manifold.core.verify import probe_observation
+from manifold.recipes.function import FunctionEndpoint, check_chunk
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import serve as serve_endpoint
+
+# The instruction the startup probe sends when the signature needs one. Some
+# models (pi05, for one) reject an empty instruction.
+_PROBE_INSTRUCTION = "probe"
 
 
 def _server_address(server: str) -> tuple[str, int]:
@@ -63,6 +68,17 @@ def _default_pool(
     return pool
 
 
+def _probe_predict(predict: Callable[[Observation], Action], signature: PolicySignature) -> None:
+    """Call `predict` once on a synthetic observation and check the result.
+
+    The values are discarded. A result that does not match the signature's
+    `chunk_size` and action space raises here, before `serve` binds the port,
+    so the script exits in the user's terminal instead of failing a run.
+    """
+    observation = probe_observation(signature.observation_space, instruction=_PROBE_INSTRUCTION)
+    check_chunk(predict(observation), signature)
+
+
 def serve(
     predict: Callable[[Observation], Action],
     signature: PolicySignature,
@@ -71,6 +87,14 @@ def serve(
     server: str | None = None,
 ) -> None:
     """Serve `predict` on the local address from `MANIFOLD_SERVER_URL`.
+
+    `predict` returns the actions from a model call. Under the default
+    `chunk_size=1`, it returns a single action as a flat vector or a single row.
+    Otherwise it returns a 2-D array with `signature.chunk_size` rows, and
+    `signature.action_space` describes each row. Each shard runs
+    `signature.execution_steps` of those actions before the next call. Before
+    `serve` opens the port, it calls `predict` once on a synthetic observation.
+    It raises `ValueError` if the result does not match the signature.
 
     Pass `pipeline` to choose the adapters yourself, as a `Pipeline` or as a
     function that builds one for each benchmark. Without it, the resolver
@@ -82,6 +106,7 @@ def serve(
     if address is None:
         raise ValueError("MANIFOLD_SERVER_URL is required")
     host, port = _server_address(address)
+    _probe_predict(predict, signature)
     serve_endpoint(
         FunctionEndpoint(predict, signature),
         pipeline=pipeline if pipeline is not None else _resolving_pipeline(signature),

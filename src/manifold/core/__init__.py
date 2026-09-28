@@ -55,7 +55,7 @@ from manifold.core.sensor import (
 )
 from manifold.core.state import DEFAULT_LANE, LaneKey, PipelineState
 from manifold.core.values import Action, Observation
-from manifold.core.verify import VerifyCheck, VerifyReport, verify
+from manifold.core.verify import VerifyCheck, VerifyReport, probe_observation, verify
 
 __all__ = [
     "DEFAULT_LANE",
@@ -108,5 +108,6 @@ __all__ = [
     "VerifyCheck",
     "VerifyReport",
     "check_compatibility",
+    "probe_observation",
     "verify",
 ]

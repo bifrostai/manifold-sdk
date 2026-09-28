@@ -506,15 +506,18 @@ class OpenLoopChunkQueue:
         self._chunk: Any = None
         self._step = 0
 
-    def _forward(self, native: dict[str, Any], /) -> Any:
+    def _forward(self, native: Any, /) -> Any:
         """Run the backend's shared-model forward on `native`; return the raw chunk.
+
+        `native` is the packed native dict for a container policy, or the
+        `Observation` for a prediction function.
 
         The one seam between backends. The base raises so a backend that leaves it
         unimplemented fails loudly rather than silently serving a stale buffer.
         """
         raise NotImplementedError("OpenLoopChunkQueue subclass must implement _forward")
 
-    def advance(self, native: dict[str, Any], /) -> tuple[Any, int]:
+    def advance(self, native: Any, /) -> tuple[Any, int]:
         """Serve the next open-loop step for `native`: return (raw_chunk, step).
 
         When the horizon has drained (no buffered chunk, or `execution_steps` served), run

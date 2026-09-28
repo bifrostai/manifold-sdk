@@ -128,3 +128,52 @@ def test_without_a_pipeline_the_server_resolves_one_per_benchmark(
     local.serve(_predict, signature, server="tcp:127.0.0.1:9")
 
     assert isinstance(served["pipeline"](LIBERO), Pipeline)
+
+
+def _chunk_predict(shape: tuple[int, ...]) -> Any:
+    def predict(_observation: Observation) -> Action:
+        return Action.from_array(np.zeros(shape, dtype=np.float32))
+
+    return predict
+
+
+@pytest.mark.parametrize(
+    ("shape", "message"),
+    [
+        ((8, 7), "returned 8 actions of 7 values"),
+        ((10, 6), "returned 10 actions of 6 values"),
+        ((7,), "returned a flat array of 7 values"),
+    ],
+)
+def test_serve_rejects_a_predict_that_misses_the_declared_chunk_before_binding(
+    monkeypatch: pytest.MonkeyPatch, shape: tuple[int, ...], message: str
+) -> None:
+    served: list[object] = []
+    monkeypatch.setattr(local, "serve_endpoint", lambda endpoint, **kwargs: served.append(endpoint))
+    signature = _signature(agentview((224, 224, 3))).model_copy(
+        update={"chunk_size": 10, "execution_steps": 5}
+    )
+
+    with pytest.raises(ValueError, match=message):
+        local.serve(_chunk_predict(shape), signature, server="tcp:127.0.0.1:9")
+
+    assert served == []
+
+
+def test_serve_probes_predict_once_with_a_placeholder_instruction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    served: list[object] = []
+    monkeypatch.setattr(local, "serve_endpoint", lambda endpoint, **kwargs: served.append(endpoint))
+    seen: list[Observation] = []
+
+    def predict(observation: Observation) -> Action:
+        seen.append(observation)
+        return _predict(observation)
+
+    local.serve(predict, _signature(agentview((224, 224, 3))), server="tcp:127.0.0.1:9")
+
+    assert len(seen) == 1
+    assert seen[0].instruction == "probe"
+    assert seen[0].sensors["agentview"].shape == (224, 224, 3)
+    assert len(served) == 1
