@@ -348,6 +348,7 @@ def _run_episode(
             episode_idx=episode_idx,
             step=0,
             task=task_name,
+            task_id=task_id,
         )
     steps = 0
     success = False
@@ -374,6 +375,7 @@ def _run_episode(
                     episode_idx=episode_idx,
                     step=steps,
                     task=task_name,
+                    task_id=task_id,
                 )
             # The budget is the third way an episode ends, and the only one a
             # recorder cannot see for itself.

@@ -407,7 +407,9 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
     # act
     result = run_episodes(
         benchmark,
-        lambda _episode: Observation(sensors={"scene": source}, instruction="pick"),
+        lambda _episode: Observation(
+            sensors={"scene": source}, instruction="pick", task_id="PickTask"
+        ),
         step,
         server="policy:9000",
         episode_ids=[7],
@@ -425,6 +427,7 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
     assert payload["episode_idx"] == 7
     assert payload["step"] == 0
     assert payload["task"] == "pick"
+    assert payload["task_id"] == "PickTask"
     assert (payload["width"], payload["height"]) == (455, 256)
     displayed = np.asarray(Image.open(io.BytesIO(payload["jpeg"])))
     assert displayed.shape == (256, 455, 3)
@@ -532,6 +535,8 @@ def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatc
     assert result.successes == 1
     assert not receiver.is_alive()
     assert [frame["sequence"] for frame in frames] == [1, 2]
+    # A reset without a task id sends frames without the key.
+    assert all("task_id" not in frame for frame in frames)
 
 
 def test_run_episodes_retries_a_live_frame_when_sending_fails(monkeypatch):
