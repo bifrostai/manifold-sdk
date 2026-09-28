@@ -37,12 +37,17 @@ class Observation:
     axis convention and the frame it maps into — is on the camera's
     `CameraCalibration`, where a check reads it (ADR 0008). Empty for a benchmark
     without calibration, which is every benchmark without depth.
+
+    `task_id` is the benchmark's own identifier for the task the episode runs. An
+    episode reads it from the observation its reset returns, and the policy never
+    receives it.
     """
 
     state: dict[str, np.ndarray] = field(default_factory=dict)
     sensors: dict[str, np.ndarray] = field(default_factory=dict)
     extrinsics: dict[str, np.ndarray] = field(default_factory=dict)
     instruction: str | None = None
+    task_id: str | None = None
 
     @classmethod
     def example(cls) -> Observation:

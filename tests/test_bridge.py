@@ -45,6 +45,12 @@ def _sample_observation() -> Observation:
     )
 
 
+def test_the_task_id_is_not_sent_to_the_policy() -> None:
+    obs = Observation(instruction="pick up the cube", task_id="PickCubeTask")
+
+    assert "task_id" not in encode_observation(obs)
+
+
 def test_observation_round_trips_raw() -> None:
     obs = _sample_observation()
     decoded = decode_observation(encode_observation(obs, image_format="raw"))

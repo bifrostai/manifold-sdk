@@ -122,6 +122,7 @@ def _run_episode_in_process(
     started_at = datetime.now(timezone.utc)
     observation = reset()
     task_name = observation.instruction or benchmark_name
+    task_id = observation.task_id
     steps = 0
     success = False
     initialization_sec = 0.0
@@ -151,6 +152,7 @@ def _run_episode_in_process(
         initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
+        task_id=task_id,
     )
 
 
@@ -339,6 +341,7 @@ def _run_episode(
     started_at = datetime.now(timezone.utc)
     observation = reset()
     task_name = observation.instruction or benchmark_name
+    task_id = observation.task_id
     if live_view is not None:
         live_view.publish(
             observation,
@@ -389,6 +392,7 @@ def _run_episode(
         initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
+        task_id=task_id,
     )
 
 
@@ -592,7 +596,8 @@ class EpisodeRecord:
 
     `task_id` is the benchmark's own identifier for the task, such as a class
     name. It is optional. Two tasks in a suite may share an instruction, and
-    `task_id` separates them. When it is unset, the rollup omits the key.
+    `task_id` separates them. It is the `task_id` of the observation the reset
+    returned. When it is unset, the rollup omits the key.
     """
 
     episode_idx: int

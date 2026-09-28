@@ -940,6 +940,30 @@ def test_run_sharded_benchmark_updates_the_rollup_after_each_episode(monkeypatch
     assert writes == [[1], [1, 3], [1, 3, 5]]
 
 
+def test_run_sharded_benchmark_writes_the_task_id_the_reset_returned(monkeypatch, tmp_path):
+    import json
+
+    from manifold.core.values import Observation
+    from manifold.recipes import run_sharded_benchmark
+
+    _install_fake_transport(monkeypatch)
+
+    run_sharded_benchmark(
+        _fake_benchmark(),
+        lambda episode_id: Observation(task_id=f"Task{episode_id}"),
+        _one_step_episodes(succeeding=1),
+        server="h:1",
+        total_episodes=4,
+        num_shards=2,
+        shard_index=0,
+        max_steps=1,
+        output_dir=tmp_path,
+    )
+
+    written = json.loads((tmp_path / "results" / "bench-1.json").read_text())
+    assert [record["task_id"] for record in written["records"]] == ["Task0", "Task2"]
+
+
 def test_run_sharded_benchmark_rejects_a_malformed_server():
     from manifold.core.benchmark import Benchmark
     from manifold.core.values import Observation
