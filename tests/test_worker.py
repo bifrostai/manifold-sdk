@@ -1,4 +1,4 @@
-"""Behaviour of scheduler assignments and result acceptance."""
+"""Behaviour of task server assignments and result acceptance."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from manifold.wire import FrameChannel, FrameType, bridge
 from tests.test_serving import _fake_benchmark, _FakeSocket
 
 
-class _Scheduler:
+class _TaskServer:
     def __init__(self, root: Path, events: list, *, ack="accepted", wait=False):
         self.root, self.events, self.ack, self.wait = root, events, ack, wait
         self.sent: list[tuple[str, dict[str, Any]]] = []
@@ -91,21 +91,21 @@ def _execute(
     monkeypatch, tmp_path, *, ack="accepted", wait=False, fail_close=False, fail_task=False
 ):
     events = []
-    scheduler = _Scheduler(tmp_path, events, ack=ack, wait=wait)
+    task_server = _TaskServer(tmp_path, events, ack=ack, wait=wait)
     policy = _Policy()
-    scheduler_socket = _FakeSocket()
+    task_server_socket = _FakeSocket()
     connections = []
 
     def policy_socket(*args):
         connections.append("policy")
         return _FakeSocket()
 
-    monkeypatch.setattr(worker.socket, "create_connection", lambda address: scheduler_socket)
+    monkeypatch.setattr(worker.socket, "create_connection", lambda address: task_server_socket)
     monkeypatch.setattr(serving.socket, "socket", policy_socket)
     monkeypatch.setattr(
         FrameChannel,
         "from_socket",
-        lambda sock, **kwargs: scheduler if sock is scheduler_socket else policy,
+        lambda sock, **kwargs: task_server if sock is task_server_socket else policy,
     )
 
     def reset(task):
@@ -123,7 +123,7 @@ def _execute(
             reset,
             step,
             server="policy:9000",
-            scheduler_address="scheduler:9001",
+            task_server_address="task-server:9001",
             worker_id="worker-1",
             episodes=[WorkerEpisode(i, str(i), {"task_id": i}) for i in [3, 7]],
             max_steps=1,
@@ -131,51 +131,51 @@ def _execute(
             artifacts=lambda task: [task.output_dir / "replay.mfr"],
         )
 
-    return run, scheduler, policy, connections, events
+    return run, task_server, policy, connections, events
 
 
-def test_worker_keeps_policy_connection_and_closes_replay_before_scheduler_acceptance(
+def test_worker_keeps_policy_connection_and_closes_replay_before_task_server_acceptance(
     monkeypatch, tmp_path
 ):
-    run, scheduler, policy, connections, events = _execute(monkeypatch, tmp_path, wait=True)
+    run, task_server, policy, connections, events = _execute(monkeypatch, tmp_path, wait=True)
     result = run()
     assert connections == ["policy"]
     assert [r.episode_idx for r in result.records] == [3, 7]
     assert policy.sent.count(FrameType.HELLO) == 1
     assert policy.sent.count(FrameType.RESET) == 2
     assert policy.sent[-1] == FrameType.BYE
-    completions = [payload for kind, payload in scheduler.sent if kind == "complete"]
+    completions = [payload for kind, payload in task_server.sent if kind == "complete"]
     assert [p["results"][0]["task_id"] for p in completions] == ["3", "7"]
     assert [p["artifacts"][0]["path"] for p in completions] == ["replay.mfr", "replay.mfr"]
     assert events.index("close") < events.index("complete")
     first_complete = events.index("complete")
     assert events[first_complete + 1] == "claim"
-    assert scheduler.sent[0][1]["episodes"][0]["episode_idx"] == 3
+    assert task_server.sent[0][1]["episodes"][0]["episode_idx"] == 3
 
 
 @pytest.mark.parametrize("fail_close,fail_task", [(True, False), (False, True)])
 def test_worker_does_not_submit_or_retry_after_task_or_replay_failure(
     monkeypatch, tmp_path, fail_close, fail_task
 ):
-    run, scheduler, _, _, events = _execute(
+    run, task_server, _, _, events = _execute(
         monkeypatch, tmp_path, fail_close=fail_close, fail_task=fail_task
     )
     with pytest.raises((OSError, RuntimeError)):
         run()
-    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim"]
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
     assert events.count("close") == 1
 
 
 def test_worker_does_not_claim_without_acceptance(monkeypatch, tmp_path):
-    run, scheduler, _, _, _ = _execute(monkeypatch, tmp_path, ack="done")
-    with pytest.raises(ValueError, match="expected scheduler accepted"):
+    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path, ack="done")
+    with pytest.raises(ValueError, match="expected task server accepted"):
         run()
-    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim", "complete"]
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
 
 
 def test_worker_rejects_stale_acceptance(monkeypatch, tmp_path):
-    run, scheduler, _, _, _ = _execute(monkeypatch, tmp_path)
-    receive = scheduler.recv
+    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path)
+    receive = task_server.recv
 
     def stale_ack():
         reply = receive()
@@ -183,14 +183,14 @@ def test_worker_rejects_stale_acceptance(monkeypatch, tmp_path):
             reply["payload"]["attempt_id"] = "expired-attempt"
         return reply
 
-    monkeypatch.setattr(scheduler, "recv", stale_ack)
+    monkeypatch.setattr(task_server, "recv", stale_ack)
     with pytest.raises(ValueError, match="different item or attempt"):
         run()
-    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim", "complete"]
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
 
 
 def test_worker_rejects_artifact_outside_attempt_directory(monkeypatch, tmp_path):
-    run, scheduler, _, _, _ = _execute(monkeypatch, tmp_path)
+    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path)
     outside = tmp_path / "another-attempt.mfr"
     outside.write_bytes(b"other attempt")
     original_end = _Recorder.end
@@ -204,10 +204,10 @@ def test_worker_rejects_artifact_outside_attempt_directory(monkeypatch, tmp_path
     monkeypatch.setattr(_Recorder, "end", close_with_symlink)
     with pytest.raises(ValueError):
         run()
-    assert [kind for kind, _ in scheduler.sent] == ["hello", "claim"]
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
 
 
-def test_worker_uses_length_prefixed_scheduler_frames(monkeypatch, tmp_path):
+def test_worker_uses_length_prefixed_task_server_frames(monkeypatch, tmp_path):
     import socket
     import threading
 
@@ -216,18 +216,18 @@ def test_worker_uses_length_prefixed_scheduler_frames(monkeypatch, tmp_path):
     from_socket = FrameChannel.from_socket
     policy = _Policy()
     events = []
-    scheduler = _Scheduler(tmp_path, events)
+    task_server = _TaskServer(tmp_path, events)
     errors = []
 
-    def schedule():
+    def serve():
         try:
             with server:
                 while True:
                     frame = server_channel.recv()
                     if frame is None:
                         return
-                    scheduler.send(frame["type"], frame["payload"])
-                    reply = scheduler.recv()
+                    task_server.send(frame["type"], frame["payload"])
+                    reply = task_server.recv()
                     if frame["type"] == "complete":
                         task = frame["payload"]
                         artifact = task["artifacts"][0]
@@ -246,7 +246,7 @@ def test_worker_uses_length_prefixed_scheduler_frames(monkeypatch, tmp_path):
         "from_socket",
         lambda sock, **kwargs: from_socket(sock, **kwargs) if sock is client else policy,
     )
-    thread = threading.Thread(target=schedule, daemon=True)
+    thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
         result = run_worker(
@@ -254,7 +254,7 @@ def test_worker_uses_length_prefixed_scheduler_frames(monkeypatch, tmp_path):
             lambda task: Observation(instruction="task"),
             lambda action: StepResult(Observation(), success=True, done=True),
             server="policy:9000",
-            scheduler_address="scheduler:9001",
+            task_server_address="task-server:9001",
             worker_id="worker-1",
             episodes=[WorkerEpisode(i, str(i), {"task_id": i}) for i in [3, 7]],
             max_steps=1,
