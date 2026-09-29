@@ -13,6 +13,7 @@ import socket
 import threading
 from contextlib import suppress
 from datetime import datetime, timezone
+from importlib.metadata import version
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -282,6 +283,88 @@ def test_serve_logs_nothing_for_a_connection_that_sends_no_frame():
         assert spoke_closed.wait(timeout=5), "the server never closed the second connection"
 
     assert not any(probe_addr in event for event in events)
+    assert any(event.startswith("benchmark connected from") for event in events)
+
+
+def test_serve_replies_to_get_signature_with_the_signature():
+    """The Manifold CLI asks for the signature once the server is up, and sends
+    it to Manifold. The server does not log the request, because the request
+    does not come from a benchmark."""
+    from manifold.core import EEActionSpace, PolicySignature, RotationFormat
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    signature = PolicySignature(
+        action_space=EEActionSpace(rotation=RotationFormat.AXIS_ANGLE, delta=True),
+        chunk_size=10,
+        execution_steps=5,
+    )
+    port = _free_port()
+    events: list[str] = []
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        events.append(event)
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace(signature=signature)),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        reply = channel.recv()
+
+    assert reply is not None
+    assert reply["type"] == FrameType.SIGNATURE
+    assert reply["payload"] == {
+        "signature": signature.model_dump(mode="json"),
+        "sdk_version": version("manifold-sdk"),
+    }
+    assert events == [event for event in events if event.startswith("listening on")]
+
+
+def test_serve_reads_the_next_frame_after_replying_to_get_signature():
+    """A benchmark can ask for the signature, choose its cameras, and then send
+    HELLO on the same connection."""
+    from manifold.core import EEActionSpace, PolicySignature, RotationFormat
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    signature = PolicySignature(action_space=EEActionSpace(rotation=RotationFormat.AXIS_ANGLE))
+    port = _free_port()
+    listening = threading.Event()
+    spoke_closed = threading.Event()
+    events: list[str] = []
+
+    def record(event: str) -> None:
+        events.append(event)
+        if event.startswith("listening on"):
+            listening.set()
+        if event.startswith("connection from") and event.endswith("closed"):
+            spoke_closed.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace(signature=signature)),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        assert channel.recv() is not None
+        channel.send(FrameType.BYE, {})
+        assert spoke_closed.wait(timeout=5), "the server never read the second frame"
+
     assert any(event.startswith("benchmark connected from") for event in events)
 
 

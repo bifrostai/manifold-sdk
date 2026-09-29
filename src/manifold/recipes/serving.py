@@ -33,6 +33,7 @@ from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -170,8 +171,10 @@ def _serve_connection(
     here: it never propagates to the accept loop and so never kills the server or
     a sibling shard. The socket is always closed, even on error.
 
-    A connection that closes before it sends a frame leaves no log lines. The
-    Manifold CLI opens one to check that the server accepts connections.
+    The server does not log a connection that closes before its first frame,
+    or a connection that only asks for the signature. The Manifold CLI opens
+    both kinds when serve starts: the first to check that the server is up, and
+    the second to read the signature.
     """
     try:
         with conn:
@@ -191,7 +194,8 @@ def _serve_session(
 ) -> bool:
     """Run one runner connection: handshake, gate the pairing, then answer frames.
 
-    Returns False when the peer closed before it sent a frame, and True otherwise.
+    Returns True when the peer sent a frame other than GET_SIGNATURE, and False
+    otherwise.
 
     Mints this connection's own `session` over the endpoint's shared model and its
     own `PipelineState`, so concurrent connections never interleave per-session
@@ -203,6 +207,17 @@ def _serve_session(
     """
     channel = FrameChannel.from_socket(conn)
     hello = channel.recv()
+    # A peer may send GET_SIGNATURE before HELLO. The CLI closes the connection
+    # after the reply, and a benchmark sends HELLO next.
+    while hello is not None and hello.get("type") == FrameType.GET_SIGNATURE:
+        channel.send(
+            FrameType.SIGNATURE,
+            {
+                "signature": endpoint.signature.model_dump(mode="json"),
+                "sdk_version": version("manifold-sdk"),
+            },
+        )
+        hello = channel.recv()
     if hello is None:
         return False
     emit(f"benchmark connected from {addr}")

@@ -274,6 +274,12 @@ class FrameType(StrEnum):
     benchmark then drives the loop: RESET at each episode start, OBSERVATION every
     step, and an ACTION comes back for each. Either side sends BYE for a clean
     shutdown.
+
+    Before HELLO, a peer may send GET_SIGNATURE. The policy replies SIGNATURE
+    with its `PolicySignature` and the SDK version, and keeps the connection
+    open. The Manifold CLI
+    asks when serve starts, then closes the connection. A benchmark may ask to
+    learn which cameras the policy reads, then send HELLO.
     """
 
     HELLO = "hello"  # benchmark advertises its contract on connect.
@@ -282,6 +288,8 @@ class FrameType(StrEnum):
     ACTION = "action"  # policy -> benchmark, one per observation.
     RESET = "reset"  # benchmark -> policy, at each episode start.
     BYE = "bye"  # either side, clean shutdown.
+    GET_SIGNATURE = "get_signature"  # any peer -> policy, before HELLO.
+    SIGNATURE = "signature"  # policy -> peer, the reply to GET_SIGNATURE.
 
 
 def encode_observation(
