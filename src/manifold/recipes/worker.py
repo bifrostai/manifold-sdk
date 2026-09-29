@@ -61,11 +61,14 @@ def run_worker(
     recorder: Callable[[WorkerTask], EpisodeRecorder],
     artifacts: Callable[[WorkerTask], Sequence[Path]],
     image_format: ImageFormat = "raw",
+    live_view_server: str | None = None,
+    live_view_camera: str | None = None,
 ) -> BenchmarkResult:
     """Execute task server assignments with one policy connection.
 
     Send results after closing each replay, then wait for task server acceptance
-    before claiming again.
+    before claiming again. `live_view_server` and `live_view_camera` configure the
+    optional latest-value channel as they do for `run_benchmark`.
     """
     host, separator, port = task_server_address.rpartition(":")
     if not separator or not host:
@@ -92,6 +95,8 @@ def run_worker(
             image_format=image_format,
             recorder=worker_run,
             on_episode=worker_run.report_episode,
+            live_view_server=live_view_server,
+            live_view_camera=live_view_camera,
         )
         return BenchmarkResult(records=tuple(worker_run.records))
 
