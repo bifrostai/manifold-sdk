@@ -102,7 +102,7 @@ def _run_episode_in_process(
     observation_source: ObservationSpace,
     signature: PolicySignature,
     state: PipelineState,
-    reset: Callable[[], Observation],
+    reset: Callable[[], ResetResult],
     step: Callable[[Action], StepResult],
     max_steps: int,
     *,
@@ -120,7 +120,8 @@ def _run_episode_in_process(
     state.reset_lane(DEFAULT_LANE)
     session.reset()
     started_at = datetime.now(timezone.utc)
-    observation = reset()
+    reset_result = reset()
+    observation, task_id = reset_result.observation, reset_result.task_id
     task_name = observation.instruction or benchmark_name
     steps = 0
     success = False
@@ -151,6 +152,7 @@ def _run_episode_in_process(
         initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
+        task_id=task_id,
     )
 
 
@@ -316,7 +318,7 @@ def _resolve_pipeline(
 
 def _run_episode(
     channel: Transport,
-    reset: Callable[[], Observation],
+    reset: Callable[[], ResetResult],
     step: Callable[[Action], StepResult],
     max_steps: int,
     image_format: ImageFormat,
@@ -337,7 +339,8 @@ def _run_episode(
     """
     channel.send(FrameType.RESET, {})
     started_at = datetime.now(timezone.utc)
-    observation = reset()
+    reset_result = reset()
+    observation, task_id = reset_result.observation, reset_result.task_id
     task_name = observation.instruction or benchmark_name
     if live_view is not None:
         live_view.publish(
@@ -345,6 +348,7 @@ def _run_episode(
             episode_idx=episode_idx,
             step=0,
             task=task_name,
+            task_id=task_id,
         )
     steps = 0
     success = False
@@ -371,6 +375,7 @@ def _run_episode(
                     episode_idx=episode_idx,
                     step=steps,
                     task=task_name,
+                    task_id=task_id,
                 )
             # The budget is the third way an episode ends, and the only one a
             # recorder cannot see for itself.
@@ -389,6 +394,7 @@ def _run_episode(
         initialization_sec=initialization_sec,
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
+        task_id=task_id,
     )
 
 
@@ -581,6 +587,19 @@ class StepResult:
 
 
 @dataclass(frozen=True)
+class ResetResult:
+    """The outcome of resetting the environment for one episode.
+
+    `observation` is the episode's first observation, which the runner sends to the
+    policy. `task_id` is the benchmark's own identifier for the episode's task. It
+    goes onto the episode record and each live view frame, and never to the policy.
+    """
+
+    observation: Observation
+    task_id: str
+
+
+@dataclass(frozen=True)
 class EpisodeRecord:
     """One finished episode, as the benchmark observed it.
 
@@ -591,8 +610,8 @@ class EpisodeRecord:
     sharded run partitions disjointly, so two shards never report the same one.
 
     `task_id` is the benchmark's own identifier for the task, such as a class
-    name. It is optional. Two tasks in a suite may share an instruction, and
-    `task_id` separates them. When it is unset, the rollup omits the key.
+    name. Two tasks in a suite may share an instruction, and `task_id` separates
+    them. It comes from the benchmark's `ResetResult`.
     """
 
     episode_idx: int
@@ -602,7 +621,7 @@ class EpisodeRecord:
     initialization_sec: float
     started_at: datetime
     ended_at: datetime
-    task_id: str | None = None
+    task_id: str
 
     @property
     def elapsed_sec(self) -> float:
@@ -655,8 +674,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
     This is the file a runner scans a benchmark worker's output directory for: a
     flat document keyed ``records``, one entry per episode, instants in ISO 8601.
     The runner derives ``elapsed_sec`` from the two instants, so the rollup does
-    not carry a duration free to disagree with them. ``task_id`` is written
-    only when a record sets it.
+    not carry a duration free to disagree with them.
     """
     records = [
         {
@@ -667,7 +685,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
             "initialization_sec": record.initialization_sec,
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
-            **({} if record.task_id is None else {"task_id": record.task_id}),
+            "task_id": record.task_id,
         }
         for record in result.records
     ]
@@ -742,7 +760,7 @@ def serve(
 
 def run_benchmark(
     benchmark: Benchmark,
-    reset: Callable[[], Observation],
+    reset: Callable[[], ResetResult],
     step: Callable[[Action], StepResult],
     *,
     episodes: int,
@@ -797,7 +815,7 @@ def run_benchmark(
 
 def _run_connected(
     benchmark: Benchmark,
-    reset_episode: Callable[[int], Observation],
+    reset_episode: Callable[[int], ResetResult],
     step: Callable[[Action], StepResult],
     *,
     episode_ids: Iterable[int],
@@ -886,7 +904,7 @@ def _live_view_context(
 
 def run_episodes(
     benchmark: Benchmark,
-    reset_episode: Callable[[int], Observation],
+    reset_episode: Callable[[int], ResetResult],
     step: Callable[[Action], StepResult],
     *,
     server: str,
@@ -952,7 +970,7 @@ def run_episodes(
 
 def run_sharded_benchmark(
     benchmark: Benchmark,
-    reset_episode: Callable[[int], Observation],
+    reset_episode: Callable[[int], ResetResult],
     step: Callable[[Action], StepResult],
     *,
     server: str,
@@ -1023,7 +1041,7 @@ def run_sharded_benchmark(
 def evaluate(
     endpoint: PolicyEndpoint,
     benchmark: Benchmark,
-    reset: Callable[[], Observation],
+    reset: Callable[[], ResetResult],
     step: Callable[[Action], StepResult],
     *,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
@@ -1138,6 +1156,7 @@ __all__ = [
     "PairingRejected",
     "PolicyEndpoint",
     "PolicyProfile",
+    "ResetResult",
     "Session",
     "StepResult",
     "Transport",

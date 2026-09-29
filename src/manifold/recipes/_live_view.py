@@ -78,6 +78,7 @@ class LiveViewPublisher:
         episode_idx: int,
         step: int,
         task: str,
+        task_id: str,
     ) -> None:
         """Copy the selected camera frame into the latest-value slot without encoding or I/O."""
         image = observation.sensors.get(self._camera.name)
@@ -92,6 +93,7 @@ class LiveViewPublisher:
                 episode_idx=episode_idx,
                 step=step,
                 task=task,
+                task_id=task_id,
                 captured_at=time.time(),
                 image=copied,
             )
@@ -175,6 +177,7 @@ class _PendingFrame:
     episode_idx: int
     step: int
     task: str
+    task_id: str
     captured_at: float
     image: np.ndarray
 
@@ -218,6 +221,7 @@ def _encode_frame(frame: _PendingFrame, camera: Camera) -> dict[str, Any] | None
         "episode_idx": frame.episode_idx,
         "step": frame.step,
         "task": frame.task,
+        "task_id": frame.task_id,
         "captured_at": frame.captured_at,
         "width": width,
         "height": height,
