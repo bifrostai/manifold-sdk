@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -88,7 +89,14 @@ class _Policy:
 
 
 def _execute(
-    monkeypatch, tmp_path, *, ack="accepted", wait=False, fail_close=False, fail_task=False
+    monkeypatch,
+    tmp_path,
+    *,
+    ack="accepted",
+    wait=False,
+    fail_close=False,
+    fail_task=False,
+    **options: Any,
 ):
     events = []
     task_server = _TaskServer(tmp_path, events, ack=ack, wait=wait)
@@ -129,6 +137,7 @@ def _execute(
             max_steps=1,
             recorder=lambda task: _Recorder(task, events, fail_close),
             artifacts=lambda task: [task.output_dir / "replay.mfr"],
+            **options,
         )
 
     return run, task_server, policy, connections, events
@@ -151,6 +160,29 @@ def test_worker_keeps_policy_connection_and_closes_replay_before_task_server_acc
     first_complete = events.index("complete")
     assert events[first_complete + 1] == "claim"
     assert task_server.sent[0][1]["episodes"][0]["episode_idx"] == 3
+
+
+def test_worker_publishes_each_claimed_task_to_the_live_view(monkeypatch, tmp_path):
+    run, _, _, _, _ = _execute(
+        monkeypatch, tmp_path, live_view_server="127.0.0.1:9002", live_view_camera="scene"
+    )
+    opened: list[tuple[str | None, str | None]] = []
+    published: list[tuple[int, int, str | None]] = []
+
+    class _Publisher:
+        def publish(self, observation, *, episode_idx, step, task, task_id):
+            published.append((episode_idx, step, task_id))
+
+    def live_view_context(benchmark, server, camera_name):
+        opened.append((server, camera_name))
+        return contextlib.nullcontext(_Publisher())
+
+    monkeypatch.setattr(serving, "_live_view_context", live_view_context)
+
+    run()
+
+    assert opened == [("127.0.0.1:9002", "scene")]
+    assert published == [(3, 0, "3"), (3, 1, "3"), (7, 0, "7"), (7, 1, "7")]
 
 
 @pytest.mark.parametrize("fail_close,fail_task", [(True, False), (False, True)])
