@@ -33,7 +33,7 @@ from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from importlib.metadata import version
+from importlib.metadata import distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
@@ -157,6 +157,20 @@ def _run_episode_in_process(
     )
 
 
+def _sdk_commit() -> str | None:
+    """Return the git commit the installed manifold-sdk was built from.
+
+    Users install the SDK from git pinned to a commit, so the commit identifies the
+    SDK where the package version does not. An install from a local directory
+    records no commit, and this returns None.
+    """
+    direct_url = distribution("manifold-sdk").read_text("direct_url.json")
+    if direct_url is None:
+        return None
+    commit = json.loads(direct_url).get("vcs_info", {}).get("commit_id")
+    return commit if isinstance(commit, str) else None
+
+
 def _serve_connection(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
@@ -214,7 +228,7 @@ def _serve_session(
             FrameType.SIGNATURE,
             {
                 "signature": endpoint.signature.model_dump(mode="json"),
-                "sdk_version": version("manifold-sdk"),
+                "sdk_version": _sdk_commit(),
             },
         )
         hello = channel.recv()

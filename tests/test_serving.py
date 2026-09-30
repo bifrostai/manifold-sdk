@@ -13,7 +13,6 @@ import socket
 import threading
 from contextlib import suppress
 from datetime import datetime, timezone
-from importlib.metadata import version
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -286,7 +285,35 @@ def test_serve_logs_nothing_for_a_connection_that_sends_no_frame():
     assert any(event.startswith("benchmark connected from") for event in events)
 
 
-def test_serve_replies_to_get_signature_with_the_signature():
+def _install_sdk_from(monkeypatch: pytest.MonkeyPatch, direct_url: str) -> None:
+    """Make the installed manifold-sdk report `direct_url` as its install origin."""
+    from manifold.recipes import serving
+
+    installed = SimpleNamespace(read_text=lambda name: direct_url)
+    monkeypatch.setattr(serving, "distribution", lambda name: installed)
+
+
+def test_sdk_commit_reads_the_commit_of_a_git_install(monkeypatch):
+    from manifold.recipes.serving import _sdk_commit
+
+    _install_sdk_from(
+        monkeypatch,
+        '{"url": "https://github.com/bifrostai/manifold-sdk.git",'
+        ' "vcs_info": {"vcs": "git", "commit_id": "3cba8f4e0c7d"}}',
+    )
+    assert _sdk_commit() == "3cba8f4e0c7d"
+
+
+def test_sdk_commit_is_none_for_a_local_install(monkeypatch):
+    from manifold.recipes.serving import _sdk_commit
+
+    _install_sdk_from(
+        monkeypatch, '{"url": "file:///src/manifold-sdk", "dir_info": {"editable": true}}'
+    )
+    assert _sdk_commit() is None
+
+
+def test_serve_replies_to_get_signature_with_the_signature(monkeypatch):
     """The Manifold CLI asks for the signature once the server is up, and sends
     it to Manifold. The server does not log the request, because the request
     does not come from a benchmark."""
@@ -294,6 +321,11 @@ def test_serve_replies_to_get_signature_with_the_signature():
     from manifold.recipes import serve
     from manifold.wire.bridge import FrameChannel, FrameType
 
+    _install_sdk_from(
+        monkeypatch,
+        '{"url": "https://github.com/bifrostai/manifold-sdk.git",'
+        ' "vcs_info": {"vcs": "git", "commit_id": "3cba8f4e0c7d"}}',
+    )
     signature = PolicySignature(
         action_space=EEActionSpace(rotation=RotationFormat.AXIS_ANGLE, delta=True),
         chunk_size=10,
@@ -325,7 +357,7 @@ def test_serve_replies_to_get_signature_with_the_signature():
     assert reply["type"] == FrameType.SIGNATURE
     assert reply["payload"] == {
         "signature": signature.model_dump(mode="json"),
-        "sdk_version": version("manifold-sdk"),
+        "sdk_version": "3cba8f4e0c7d",
     }
     assert events == [event for event in events if event.startswith("listening on")]
 
