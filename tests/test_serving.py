@@ -1209,6 +1209,9 @@ class _FakeSocket:
     def connect(self, address) -> None:
         self.address = address
 
+    def close(self) -> None:
+        return None
+
 
 def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch):
     from manifold.core.values import Observation
