@@ -1,8 +1,12 @@
 """Runner-assigned benchmark task execution.
 
-`run_worker` registers the workload with the runner and claims one task at a
-time. It reuses one policy connection to execute every task, reports the
-result, and waits for task server acceptance before claiming the next task.
+`WorkerSession` registers the workload with the task server, claims tasks and
+completes them. A task covers one or more episodes, and `WorkerSession.complete`
+sends the results of all of them in one `complete` message.
+
+`run_worker` executes one-episode tasks on a `WorkerSession`. It reuses one
+policy connection to execute every task, reports the result, and waits for task
+server acceptance before claiming the next task.
 """
 
 from __future__ import annotations
@@ -38,17 +42,24 @@ class WorkerEpisode:
 
 @dataclass(frozen=True)
 class WorkerTask:
-    """One attempt assigned by the task server and its output directory."""
+    """One attempt assigned by the task server, its episodes and its output directory."""
 
     item_id: str
     attempt_id: str
     task_id: str
     task_config: dict[str, Any]
-    episode_idx: int
+    episode_indices: tuple[int, ...]
     output_dir: Path
 
 
 class WorkerSession:
+    """A task server connection for claiming and completing tasks.
+
+    Connect, send `hello` and wait for `ready` on construction; close the
+    connection on exit. Use the session from any thread, but call `claim` and
+    `complete` from one thread at a time.
+    """
+
     def __init__(
         self,
         task_server_address: str,
@@ -83,9 +94,14 @@ class WorkerSession:
         self.close()
 
     def close(self) -> None:
+        """Close the task server connection."""
         self._sock.close()
 
     def claim(self) -> WorkerTask | None:
+        """Claim the next task, or return `None` once the task server replies `done`.
+
+        Sleep and claim again while the task server replies `wait`.
+        """
         while True:
             request_id = str(uuid4())
             self._channel.send("claim", {"request_id": request_id})
@@ -111,6 +127,12 @@ class WorkerSession:
         records: Sequence[EpisodeRecord],
         artifacts: Mapping[int, Sequence[Path]],
     ) -> None:
+        """Send the results of every episode in `task` and wait for acceptance.
+
+        Pass one record per index in `task.episode_indices`, and key `artifacts` by
+        episode index with that episode's replay files under `task.output_dir`.
+        Close each replay before calling this.
+        """
         results = []
         for record in records:
             result = asdict(record)
@@ -157,11 +179,12 @@ def run_worker(
     live_view_server: str | None = None,
     live_view_camera: str | None = None,
 ) -> BenchmarkResult:
-    """Execute task server assignments with one policy connection.
+    """Execute one-episode task server assignments with one policy connection.
 
-    Send results after closing each replay, then wait for task server acceptance
-    before claiming again. `live_view_server` and `live_view_camera` configure the
-    optional latest-value channel as they do for `run_benchmark`.
+    Refuse a task that covers more than one episode. Send results after closing
+    each replay, then wait for task server acceptance before claiming again.
+    `live_view_server` and `live_view_camera` configure the optional latest-value
+    channel as they do for `run_benchmark`.
     """
     with WorkerSession(
         task_server_address,
@@ -204,9 +227,14 @@ class _WorkerRun:
 
     def claim_episode_ids(self) -> Iterator[int]:
         while (task := self.session.claim()) is not None:
+            if len(task.episode_indices) != 1:
+                raise ValueError(
+                    f"run_worker requires one episode per task, got {len(task.episode_indices)}; "
+                    "use WorkerSession to claim tasks that cover several episodes"
+                )
             self.current_task = task
             self.current_recorder = self.recorder_factory(task)
-            yield task.episode_idx
+            yield task.episode_indices[0]
             self.current_task = None
             self.current_recorder = None
 
@@ -250,8 +278,6 @@ def _receive_task_server_frame(
 
 def _parse_task_assignment(payload: dict[str, Any]) -> WorkerTask:
     indices = payload["episode_indices"]
-    if len(indices) != 1 or type(indices[0]) is not int or indices[0] < 0:
-        raise ValueError("worker requires one non-negative episode index per item")
     output_dir = Path(payload["output_dir"])
     if not output_dir.is_absolute():
         raise ValueError("worker output_dir must be absolute")
@@ -265,13 +291,14 @@ def _parse_task_assignment(payload: dict[str, Any]) -> WorkerTask:
         attempt_id=payload["attempt_id"],
         task_id=payload["task_id"],
         task_config=payload["task_config"],
-        episode_idx=indices[0],
+        episode_indices=tuple(indices),
         output_dir=output_dir,
     )
 
 
 __all__ = [
     "WorkerEpisode",
+    "WorkerSession",
     "WorkerTask",
     "run_worker",
 ]
