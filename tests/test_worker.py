@@ -3,20 +3,40 @@
 from __future__ import annotations
 
 import contextlib
+import threading
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from manifold.core.values import Observation
-from manifold.recipes import StepResult, WorkerEpisode, run_worker, serving, worker
+from manifold.recipes import (
+    EpisodeRecord,
+    StepResult,
+    WorkerEpisode,
+    WorkerSession,
+    run_worker,
+    serving,
+    worker,
+)
 from manifold.wire import FrameChannel, FrameType, bridge
 from tests.test_serving import _fake_benchmark, _FakeSocket
 
 
 class _TaskServer:
-    def __init__(self, root: Path, events: list, *, ack="accepted", wait=False):
+    def __init__(
+        self,
+        root: Path,
+        events: list,
+        *,
+        ack="accepted",
+        wait=False,
+        tasks: Sequence[list[int]] = ([3], [7]),
+    ):
         self.root, self.events, self.ack, self.wait = root, events, ack, wait
+        self.tasks = tasks
         self.sent: list[tuple[str, dict[str, Any]]] = []
         self.assigned = 0
 
@@ -37,9 +57,10 @@ class _TaskServer:
         if self.wait:
             self.wait = False
             return {"type": "wait", "payload": {"request_id": request_id, "retry_after_sec": 0}}
-        if self.assigned == 2:
+        if self.assigned == len(self.tasks):
             return {"type": "done", "payload": {"request_id": request_id}}
-        idx = [3, 7][self.assigned]
+        indices = self.tasks[self.assigned]
+        idx = indices[0]
         self.assigned += 1
         return {
             "type": "work",
@@ -49,7 +70,7 @@ class _TaskServer:
                 "attempt_id": f"attempt-{idx}",
                 "task_id": str(idx),
                 "task_config": {"suite": "libero_10", "task_id": idx, "seed": 2},
-                "episode_indices": [idx],
+                "episode_indices": indices,
                 "output_dir": str(self.root / f"attempt-{idx}"),
             },
         }
@@ -96,10 +117,11 @@ def _execute(
     wait=False,
     fail_close=False,
     fail_task=False,
+    tasks: Sequence[list[int]] = ([3], [7]),
     **options: Any,
 ):
     events = []
-    task_server = _TaskServer(tmp_path, events, ack=ack, wait=wait)
+    task_server = _TaskServer(tmp_path, events, ack=ack, wait=wait, tasks=tasks)
     policy = _Policy()
     task_server_socket = _FakeSocket()
     connections = []
@@ -117,7 +139,7 @@ def _execute(
     )
 
     def reset(task):
-        events.append(("reset", task.episode_idx, task.task_config))
+        events.append(("reset", task.episode_indices[0], task.task_config))
         return Observation(instruction=f"task {task.task_id}")
 
     def step(action):
@@ -239,9 +261,16 @@ def test_worker_rejects_artifact_outside_attempt_directory(monkeypatch, tmp_path
     assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
 
 
+def test_worker_refuses_a_task_with_more_than_one_episode(monkeypatch, tmp_path):
+    run, task_server, _, _, events = _execute(monkeypatch, tmp_path, tasks=[[3, 4]])
+    with pytest.raises(ValueError, match="one episode per task, got 2"):
+        run()
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
+    assert "close" not in events
+
+
 def test_worker_uses_length_prefixed_task_server_frames(monkeypatch, tmp_path):
     import socket
-    import threading
 
     client, server = socket.socketpair()
     server_channel = FrameChannel.from_socket(server)
@@ -299,3 +328,83 @@ def test_worker_uses_length_prefixed_task_server_frames(monkeypatch, tmp_path):
     assert not thread.is_alive()
     assert errors == []
     assert [record.task_id for record in result.records] == ["3", "7"]
+
+
+def _open_session(monkeypatch, task_server):
+    task_server_socket = _FakeSocket()
+    monkeypatch.setattr(worker.socket, "create_connection", lambda address: task_server_socket)
+    monkeypatch.setattr(FrameChannel, "from_socket", lambda sock, **kwargs: task_server)
+    return WorkerSession(
+        "task-server:9001",
+        worker_id="worker-1",
+        benchmark_name="fake",
+        episodes=[WorkerEpisode(i, "3", {"task_id": 3}) for i in [3, 4, 5]],
+    )
+
+
+def _record(episode_idx):
+    now = datetime.now(timezone.utc)
+    return EpisodeRecord(
+        episode_idx=episode_idx,
+        task_name="task 3",
+        success=True,
+        steps=1,
+        initialization_sec=0.0,
+        started_at=now,
+        ended_at=now,
+        task_id="3",
+    )
+
+
+def test_session_completes_a_multi_episode_task_in_one_message_from_another_thread(
+    monkeypatch, tmp_path
+):
+    task_server = _TaskServer(tmp_path, [], tasks=[[3, 4, 5]])
+    claimed = []
+    errors = []
+
+    def coordinate():
+        try:
+            with _open_session(monkeypatch, task_server) as session:
+                task = session.claim()
+                assert task is not None
+                claimed.append(task)
+                task.output_dir.mkdir(parents=True)
+                replays = {}
+                for idx in task.episode_indices:
+                    replay = task.output_dir / f"episode-{idx}.mfr"
+                    replay.write_bytes(b"closed")
+                    replays[idx] = [replay]
+                session.complete(task, [_record(idx) for idx in task.episode_indices], replays)
+        except BaseException as error:
+            errors.append(error)
+
+    thread = threading.Thread(target=coordinate)
+    thread.start()
+    thread.join(timeout=5)
+
+    assert errors == []
+    assert [task.episode_indices for task in claimed] == [(3, 4, 5)]
+    completions = [payload for kind, payload in task_server.sent if kind == "complete"]
+    assert len(completions) == 1
+    assert [result["episode_idx"] for result in completions[0]["results"]] == [3, 4, 5]
+    assert [(a["episode_idx"], a["path"]) for a in completions[0]["artifacts"]] == [
+        (3, "episode-3.mfr"),
+        (4, "episode-4.mfr"),
+        (5, "episode-5.mfr"),
+    ]
+
+
+def test_session_claims_again_after_wait(monkeypatch, tmp_path):
+    task_server = _TaskServer(tmp_path, [], wait=True)
+    with _open_session(monkeypatch, task_server) as session:
+        task = session.claim()
+    assert task is not None
+    assert task.episode_indices == (3,)
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "claim"]
+
+
+def test_session_claim_returns_none_on_done(monkeypatch, tmp_path):
+    task_server = _TaskServer(tmp_path, [], tasks=[])
+    with _open_session(monkeypatch, task_server) as session:
+        assert session.claim() is None
