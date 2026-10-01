@@ -62,6 +62,16 @@ _ALWAYS_UNDETERMINED: list[UndeterminedField] = [
         ),
     ),
     UndeterminedField(
+        name="arm_count",
+        note=(
+            "lerobot records the action width. It does not record how many arms that "
+            "width covers, or how each arm's joints and gripper are ordered within "
+            "it. A 14-dim ALOHA checkpoint holds two arms, each with six joints and "
+            "a gripper. Set arm_count, then check the ordering against the robot's "
+            "action convention."
+        ),
+    ),
+    UndeterminedField(
         name="channel_order",
         note=(
             "lerobot does not record RGB vs BGR channel order. "

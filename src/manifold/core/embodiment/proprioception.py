@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from manifold.core.conventions import Frame, GripperFormat, RotationFormat, ee_step_layout
 from manifold.core.embodiment.spec import ValueSpec
@@ -39,30 +39,59 @@ class GripperObservationSpec(ValueSpec):
 class EEObservationSpec(ValueSpec):
     """The end-effector state the robot reports.
 
-    One value carries, in order: 3 floats for Cartesian position (xyz, meters),
-    the rotation (3, 4, or 6 floats per `rotation`), and the gripper finger joint
-    positions if `gripper` is set (`gripper.dim` floats, e.g. 2 for a parallel-jaw).
+    Each arm contributes, in order: 3 floats for Cartesian position (xyz, meters),
+    the rotation (3, 4, or 6 floats per `rotation`), and that arm's finger joint
+    positions if `gripper` is set (`gripper.dim` floats, for example 2 for a
+    parallel-jaw gripper). A value holds `arm_count` of those groups back to back.
+
+    `arm_count` counts the arms. When `gripper` is set, each arm has a gripper.
+    `gripper.dim` counts the fingers on a gripper. Those are three separate numbers,
+    and none of them stands in for another. A bimanual robot with parallel-jaw
+    grippers therefore reports 2 x 2 = 4 finger values, which come from two grippers
+    of two fingers.
     """
 
     rotation: RotationFormat
     gripper: GripperObservationSpec | None = None
+    arm_count: int = Field(default=1, ge=1)
     frame: Frame = Frame.WORLD
 
-    def expected_length(self) -> int:
-        """Floats in one EE value: position, rotation, then optional gripper qpos."""
+    def per_arm_length(self) -> int:
+        """Floats one arm contributes: position, rotation, then its gripper's fingers."""
         pose_len = sum(ee_step_layout(self.rotation, None))
         return pose_len + (self.gripper.dim if self.gripper is not None else 0)
 
+    def expected_length(self) -> int:
+        """Floats in one EE value: every arm's position, rotation and finger qpos."""
+        return self.per_arm_length() * self.arm_count
+
 
 class JointObservationSpec(ValueSpec):
-    """The joint angles the robot reports: `dof` angles, then an optional gripper."""
+    """The joint angles the robot reports: `dof` angles across `arm_count` arms.
+
+    The layout matches `JointActionSpace`. Each arm's `dof // arm_count` joints are
+    followed by that arm's gripper, if `gripper` is set. The robot reports its state
+    in the same layout that it accepts commands in.
+    """
 
     dof: int = Field(ge=1)
     gripper: GripperFormat | None = None
+    arm_count: int = Field(default=1, ge=1)
+
+    def per_arm_length(self) -> int:
+        """Floats one arm contributes: its joints, then its gripper if set."""
+        return self.dof // self.arm_count + (1 if self.gripper else 0)
 
     def expected_length(self) -> int:
-        """Floats in one joint value: the joint angles, then an optional gripper."""
-        return self.dof + (1 if self.gripper else 0)
+        """Floats in one joint value: every joint, then one gripper per arm if set."""
+        return self.dof + (self.arm_count if self.gripper else 0)
+
+    @model_validator(mode="after")
+    def _check_dof_divides_across_arms(self) -> JointObservationSpec:
+        """Refuse a `dof` that cannot split into `arm_count` equal arms."""
+        if self.dof % self.arm_count:
+            raise ValueError(f"dof={self.dof} does not divide into {self.arm_count} equal arms")
+        return self
 
 
 class Proprioception(BaseModel):

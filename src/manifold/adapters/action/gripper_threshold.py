@@ -78,13 +78,23 @@ class GripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper element of the action into the target."""
+        """Threshold the gripper element of each arm into the target encoding."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperThresholdAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the slice below assumes the declared length
-        # The gripper is the last element of the action.
-        _threshold_gripper(out, gripper_index=len(out) - 1, target=self.target, cutoff=self.cutoff)
+        # The gripper is the last element of each arm's values, and a bimanual action
+        # holds `arm_count` of those groups. If the action were treated as a single
+        # arm, only the trailing gripper would be thresholded. The other arms would
+        # keep the source encoding, so the two arms would use different conventions.
+        per_arm = source.per_arm_length()
+        for arm in range(source.arm_count):
+            _threshold_gripper(
+                out,
+                gripper_index=arm * per_arm + per_arm - 1,
+                target=self.target,
+                cutoff=self.cutoff,
+            )
         return out
 
 
@@ -93,14 +103,14 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
 
     The whole-body counterpart of `GripperThresholdAdapter`: the RLDX/RoboCasa use
     case, where the policy emits a fixed-width buffer (e.g. 12-D) whose leading slots
-    are an `EEActionSpace` payload carrying the gripper and the rest is padding. The
-    gripper sits at the last slot of the payload within the `width`-wide action,
-    located via the payload's length — never hardcoded.
+    are an `EEActionSpace` payload that carries the grippers, and the rest is padding.
+    The gripper of each arm ends that arm's values within the payload. The adapter
+    finds it through the payload's `per_arm_length()`, and never at a fixed index.
 
     It is declared with `from_spec = to_spec = UnifiedActionSpace` so it is reachable
     through `check_compatibility`, which matches an adapter by exact `from_spec` type.
     Polarity and lossy semantics are identical to the EE adapter: it shares
-    `_threshold_gripper`, so the two cannot drift.
+    `_threshold_gripper`, and both walk every arm of the payload.
     """
 
     from_spec: ClassVar[type[BaseModel]] = UnifiedActionSpace
@@ -135,12 +145,12 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
         return source.model_copy(update={"payload": new_payload})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Threshold the gripper dim inside the width-D action.
+        """Threshold the gripper of each arm inside the width-D action.
 
-        The gripper sits at `payload.expected_length() - 1` (the last dim of the EE
-        payload). The payload's length must fit within `width`; if it does not the
-        layout is malformed and indexing the gripper would read into the padding, so
-        raise rather than corrupt a neighbouring dim.
+        The gripper of arm `n` is the last dim of that arm's values in the payload, at
+        `n * per_arm + per_arm - 1`. The payload's length must fit within `width`. If
+        it does not fit, the layout is wrong, and a gripper index would reach into the
+        padding. Raise in that case, rather than overwrite a neighbouring dim.
         """
         if not isinstance(source, UnifiedActionSpace) or not isinstance(
             source.payload, EEActionSpace
@@ -154,14 +164,23 @@ class UnifiedGripperThresholdAdapter(ActionAdapter):
             raise TypeError("UnifiedGripperThresholdAdapter needs a unified payload with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)
-        arm = payload.expected_length()
-        if arm > source.width:
+        payload_len = payload.expected_length()
+        if payload_len > source.width:
             raise ValueError(
-                f"unified payload length {arm} does not fit within "
+                f"unified payload length {payload_len} does not fit within "
                 f"the buffer width {source.width}: the gripper would index past the action"
             )
-        # The gripper is the last dim of the arm payload.
-        _threshold_gripper(out, gripper_index=arm - 1, target=self.target, cutoff=self.cutoff)
+        # Run once for each arm, at that arm's gripper index. If the index came from
+        # the whole payload, only the last arm would be thresholded, and the other
+        # arms would keep their raw scores.
+        per_arm = payload.per_arm_length()
+        for arm in range(payload.arm_count):
+            _threshold_gripper(
+                out,
+                gripper_index=arm * per_arm + per_arm - 1,
+                target=self.target,
+                cutoff=self.cutoff,
+            )
         return out
 
 

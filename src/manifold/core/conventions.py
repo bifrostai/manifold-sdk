@@ -113,10 +113,14 @@ def rotation_dims(rotation: RotationFormat) -> int:
 
 
 def ee_step_layout(rotation: RotationFormat, gripper: GripperFormat | None) -> tuple[int, int, int]:
-    """Per-step float counts of an end-effector value: (position, rotation, gripper).
+    """Float counts for one arm of an end-effector value: (position, rotation, gripper).
 
-    Position is always 3 (xyz). The single source of truth for how an EE pose or
-    action is laid out, used by the specs and by the adapters that slice it.
+    Position is always 3 (xyz). The specs and the adapters both read this function,
+    so they cannot disagree about how a pose or an action is laid out.
+
+    The three counts describe one arm, so they add up to the width of one arm. A
+    robot may have several arms. It then repeats that group once for each arm. The
+    spec multiplies the result by `arm_count`, and this function does not.
     """
     return 3, rotation_dims(rotation), (1 if gripper is not None else 0)
 
