@@ -97,6 +97,52 @@ def agentview_right(
     )
 
 
+def front(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The low scene camera looking along the work surface, at the given shape.
+
+    This is RoboTwin's `front_camera`. It sits at table height in front of the arms,
+    and it looks across the surface rather than down onto it.
+
+    All three scene views share shape, dtype and mount. The name is therefore the only
+    field that records where a camera points, so each view needs a name of its own.
+    """
+    return Camera(
+        name="front",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
+def head(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The close third-person working view over the workspace, at the given shape.
+
+    This is RoboTwin's `head_camera`. It sits above and behind the table, framed on
+    the arms' reach at 37 degrees.
+
+    It does not reuse `agentview`. RoboTwin publishes two third-person views, and a
+    policy must be able to tell them apart. If both were called `agentview`, a policy
+    could be trained on the close view and then paired against the wide one. Shape,
+    dtype and mount would all agree, so nothing would report the mismatch.
+    """
+    return Camera(
+        name="head",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
 def over_shoulder_left(
     shape: tuple[int, ...],
     calibration: CameraCalibration | None = None,
@@ -117,6 +163,41 @@ def over_shoulder_left(
         calibration=calibration,
         orientation=orientation,
         mount=Mount.SCENE,
+    )
+
+
+def wrist_left(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The left arm's wrist-mounted camera, at the given shape.
+
+    This is a separate function from `wrist()`, and not a parameter on it. On a
+    bimanual robot, a policy reads the two wrist views as two channels at the same
+    time. A single `wrist` name could hold only one of them.
+    """
+    return Camera(
+        name="wrist_left",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
+    )
+
+
+def wrist_right(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The right arm's wrist-mounted camera, at the given shape."""
+    return Camera(
+        name="wrist_right",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
     )
 
 
@@ -157,7 +238,11 @@ __all__ = [
     "agentview_depth",
     "agentview_left",
     "agentview_right",
+    "front",
+    "head",
     "over_shoulder_left",
     "wrist",
     "wrist_depth",
+    "wrist_left",
+    "wrist_right",
 ]
