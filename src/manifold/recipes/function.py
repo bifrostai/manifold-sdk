@@ -6,6 +6,9 @@ signature declares `chunk_size > 1`, `predict` returns a 2-D array with
 session stores the rows and calls `predict` again after `execution_steps` of
 them have run. With the default `chunk_size=1`, `predict` returns a single
 action as a flat vector or a single row.
+
+A stateful policy is a class with `reset` and `predict` methods. Each session
+creates its own instance and calls `reset` at the start of every episode.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import threading
 import warnings
 from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 
@@ -128,8 +132,49 @@ class FunctionEndpoint:
         raise NotImplementedError("FunctionEndpoint does not use native model inputs")
 
 
+class StatefulSession(FunctionSession):
+    """A shard's session over its own instance of a stateful policy class."""
+
+    _endpoint: StatefulEndpoint
+
+    def __init__(self, endpoint: StatefulEndpoint) -> None:
+        super().__init__(endpoint)
+        self._policy = endpoint.policy()
+
+    def _forward(self, observation: Observation, /) -> list[Action]:
+        """Call the instance's `predict` and return its actions, checked against the signature."""
+        return check_chunk(self._policy.predict(observation), self._endpoint.signature)
+
+    def reset(self) -> None:
+        """Drop the stored actions and call the instance's `reset`."""
+        super().reset()
+        self._policy.reset()
+
+
+class StatefulEndpoint:
+    """Create sessions for a stateful policy class, with an instance for each session."""
+
+    def __init__(
+        self,
+        policy: type[Any],
+        signature: PolicySignature,
+    ) -> None:
+        self.policy = policy
+        self.signature = signature
+
+    def session(self) -> StatefulSession:
+        """Create one policy session."""
+        return StatefulSession(self)
+
+    def forward(self, _native: dict[str, object], /) -> object:
+        """Reject native model requests."""
+        raise NotImplementedError("StatefulEndpoint does not use native model inputs")
+
+
 __all__ = [
     "FunctionEndpoint",
     "FunctionSession",
+    "StatefulEndpoint",
+    "StatefulSession",
     "check_chunk",
 ]

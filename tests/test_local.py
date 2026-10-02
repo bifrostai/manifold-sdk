@@ -20,6 +20,7 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Camera, CameraOrientation
 from manifold.core.values import Action, Observation
+from manifold.recipes.function import StatefulEndpoint
 from manifold.recipes.local import _default_pool
 from manifold.recipes.resolve import resolve
 from manifold.sensors.cameras import agentview, wrist
@@ -177,3 +178,54 @@ def test_serve_probes_predict_once_with_a_placeholder_instruction(
     assert seen[0].instruction == "probe"
     assert seen[0].sensors["agentview"].shape == (224, 224, 3)
     assert len(served) == 1
+
+
+class _Policy:
+    """Stateful class where reset() is called at the start of every episode.
+
+    Do not load weights in this class.
+    """
+
+    created = 0
+
+    def __init__(self) -> None:
+        type(self).created += 1
+        self.resets = 0
+
+    def reset(self) -> None:
+        self.resets += 1
+
+    def predict(self, observation: Observation) -> Action:
+        assert self.resets == 1
+        return _predict(observation)
+
+
+def test_serve_probes_a_stateful_class_on_its_own_reset_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    served: list[object] = []
+    monkeypatch.setattr(local, "serve_endpoint", lambda endpoint, **kwargs: served.append(endpoint))
+    monkeypatch.setattr(_Policy, "created", 0)
+
+    local.serve(_Policy, _signature(agentview((224, 224, 3))), server="tcp:127.0.0.1:9")
+
+    assert _Policy.created == 1
+    assert isinstance(served[0], StatefulEndpoint)
+    assert served[0].policy is _Policy
+
+
+class _NoReset:
+    def predict(self, observation: Observation) -> Action:
+        return _predict(observation)
+
+
+def test_serve_rejects_a_class_without_reset_before_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    served: list[object] = []
+    monkeypatch.setattr(local, "serve_endpoint", lambda endpoint, **kwargs: served.append(endpoint))
+
+    with pytest.raises(TypeError, match=r"_NoReset must define reset\(\) and predict\(\)"):
+        local.serve(_NoReset, _signature(agentview((224, 224, 3))), server="tcp:127.0.0.1:9")
+
+    assert served == []

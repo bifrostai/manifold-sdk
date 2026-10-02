@@ -7,7 +7,7 @@ import manifold.recipes.function as function
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
-from manifold.recipes.function import FunctionEndpoint, check_chunk
+from manifold.recipes.function import FunctionEndpoint, StatefulEndpoint, check_chunk
 
 # A FRANKA_EE_DELTA action holds 7 values.
 _WIDTH = 7
@@ -132,3 +132,49 @@ def test_check_chunk_rejects_a_flat_move_of_the_wrong_width() -> None:
 def test_check_chunk_rejects_a_three_dimensional_result() -> None:
     with pytest.raises(ValueError, match=r"shape \(1, 10, 7\)"):
         check_chunk(Action.from_array(np.zeros((1, 10, _WIDTH))), _signature(10, 5))
+
+
+class _Counter:
+    """Stateful class where reset() is called at the start of every episode.
+
+    Do not load weights in this class.
+    """
+
+    def reset(self) -> None:
+        self.steps = 0
+
+    def predict(self, _observation: Observation) -> Action:
+        self.steps += 1
+        return Action.from_array(np.full(_WIDTH, self.steps, dtype=np.float32))
+
+
+def test_a_stateful_policy_keeps_its_state_within_an_episode() -> None:
+    session = StatefulEndpoint(_Counter, _signature()).session()
+    session.reset()
+
+    served = [float(session.infer(Observation()).values[0]) for _ in range(3)]
+
+    assert served == [1.0, 2.0, 3.0]
+
+
+def test_reset_starts_the_stateful_policy_over() -> None:
+    session = StatefulEndpoint(_Counter, _signature()).session()
+    session.reset()
+    session.infer(Observation())
+    session.infer(Observation())
+
+    session.reset()
+
+    assert float(session.infer(Observation()).values[0]) == 1.0
+
+
+def test_each_session_gets_its_own_stateful_instance() -> None:
+    endpoint = StatefulEndpoint(_Counter, _signature())
+    first, second = endpoint.session(), endpoint.session()
+    first.reset()
+    second.reset()
+
+    first.infer(Observation())
+    first.infer(Observation())
+
+    assert float(second.infer(Observation()).values[0]) == 1.0
