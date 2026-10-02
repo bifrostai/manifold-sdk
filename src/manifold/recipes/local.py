@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from collections.abc import Callable
+from typing import Any
 
 from manifold.adapters.observation.camera_resolution import ResizeCameras
 from manifold.adapters.observation.camera_rotate_180 import Rotate180Cameras
@@ -15,7 +17,7 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
 from manifold.core.verify import probe_observation
-from manifold.recipes.function import FunctionEndpoint, check_chunk
+from manifold.recipes.function import FunctionEndpoint, StatefulEndpoint, check_chunk
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import serve as serve_endpoint
 
@@ -79,22 +81,65 @@ def _probe_predict(predict: Callable[[Observation], Action], signature: PolicySi
     check_chunk(predict(observation), signature)
 
 
+def _stateful_predict(policy: type[Any]) -> Callable[[Observation], Action]:
+    """Create an instance of `policy`, call its `reset`, and return its `predict`.
+
+    Raises `TypeError` if the class lacks a `reset` or a `predict` method.
+    """
+    missing = [name for name in ("reset", "predict") if not callable(getattr(policy, name, None))]
+    if missing:
+        raise TypeError(
+            f"{policy.__name__} must define reset() and predict(); it lacks "
+            f"{' and '.join(f'{name}()' for name in missing)}"
+        )
+    instance = policy()
+    instance.reset()
+    return instance.predict
+
+
 def serve(
-    predict: Callable[[Observation], Action],
+    policy: Callable[[Observation], Action] | type[Any],
     signature: PolicySignature,
     *,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
     server: str | None = None,
 ) -> None:
-    """Serve `predict` on the local address from `MANIFOLD_SERVER_URL`.
+    """Serve `policy` on the local address from `MANIFOLD_SERVER_URL`.
 
-    `predict` returns the actions from a model call. Under the default
+    `policy` is either a stateless `predict` function, or a stateful class
+    that implements `reset()` and `predict()`. Each shard gets its own
+    instance of the class, and `reset()` is called at the start of every
+    episode. Load all weights at the top level of the script, outside the
+    function or the class.
+
+    ```python
+    model = load_model("checkpoint/")
+
+    class Policy:
+        \"\"\"Stateful class where reset() is called at the start of every episode.
+
+        Do not load weights in this class.
+        \"\"\"
+
+        def reset(self):
+            self.hidden = None
+
+        def predict(self, obs):
+            actions, self.hidden = model(obs, self.hidden)
+            return actions
+
+    manifold.serve(Policy, signature)
+    ```
+
+    A model call returns the actions. Under the default
     `chunk_size=1`, it returns a single action as a flat vector or a single row.
     Otherwise it returns a 2-D array with `signature.chunk_size` rows, and
     `signature.action_space` describes each row. Each shard runs
     `signature.execution_steps` of those actions before the next call. Before
-    `serve` opens the port, it calls `predict` once on a synthetic observation.
-    It raises `ValueError` if the result does not match the signature.
+    `serve` opens the port, it calls `predict` once on a synthetic observation,
+    with a separate instance for a class. It raises `ValueError` if the result
+    does not match the signature, and `TypeError` if a class lacks `reset()`
+    or `predict()`.
 
     Pass `pipeline` to choose the adapters yourself, as a `Pipeline` or as a
     function that builds one for each benchmark. Without it, the resolver
@@ -106,9 +151,14 @@ def serve(
     if address is None:
         raise ValueError("MANIFOLD_SERVER_URL is required")
     host, port = _server_address(address)
-    _probe_predict(predict, signature)
+    if inspect.isclass(policy):
+        _probe_predict(_stateful_predict(policy), signature)
+        endpoint: FunctionEndpoint | StatefulEndpoint = StatefulEndpoint(policy, signature)
+    else:
+        _probe_predict(policy, signature)
+        endpoint = FunctionEndpoint(policy, signature)
     serve_endpoint(
-        FunctionEndpoint(predict, signature),
+        endpoint,
         pipeline=pipeline if pipeline is not None else _resolving_pipeline(signature),
         host=host,
         port=port,
