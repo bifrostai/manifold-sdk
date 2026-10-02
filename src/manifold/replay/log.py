@@ -1,11 +1,11 @@
 """The replay log: simulator state a benchmark writes for its replay.
 
 A log is one episode's worth of what a rendered replay needs and no policy reads
-- the scene's geometry, a pose per body per step, and whatever images, scalars
-and text the benchmark chose to publish. It is written to the results directory
-the runner already mounts, never onto the bridge (ADR 0003), and the runner turns
-it into a Rerun recording. `replay_log_path` returns the path, beside the
-rollup `write_rollup` writes.
+- the scene's geometry, a pose per body per step, whatever images, scalars
+and text the benchmark chose to publish, and the Manifold events of each step. It is
+written to the results directory the runner already mounts, never onto the bridge
+(ADR 0003), and the runner turns it into a Rerun recording. `replay_log_path`
+returns the path, beside the rollup `write_rollup` writes.
 
 The framing is the wire's: `pack_stream_frame` puts a four-byte big-endian length
 in front of a msgpack body, and arrays are encoded as the codec's `__ndarray__`
@@ -49,7 +49,24 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from PIL import Image
 
-from manifold.lib.compat import StrEnum
+from manifold.lib.compat import StrEnum, assert_never
+from manifold.replay.events import (
+    EpisodeEnded,
+    EpisodeStarted,
+    GripperAction,
+    GripperCommanded,
+    GripperFullyClosed,
+    ManifoldEvent,
+    ManifoldEventKind,
+    Note,
+    ObjectDisplaced,
+    ObjectFact,
+    ObjectOccurrence,
+    RelationFact,
+    Severity,
+    Stacked,
+    StackOrder,
+)
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -66,14 +83,16 @@ if TYPE_CHECKING:
 
 # The log's own contract version, independent of the bridge protocol's. This is what
 # a writer stamps.
-REPLAY_LOG_VERSION = 4
+REPLAY_LOG_VERSION = 5
 
 # The versions a reader accepts, which is more than the one it writes.
 # Every field 4 added over 3 — the header's `cameras` and a step's `extrinsics` — is
 # absent-means-empty, so a reader treats a 3 as a log without camera calibration and
 # without camera poses, which is exactly what it is. Refusing it instead would strand every log
 # already on disk over a field they could not have carried.
-_READABLE_LOG_VERSIONS = frozenset({3, 4})
+# 5 requires a step's `events`; a 3 or a 4 reads as a log whose steps carry none.
+_READABLE_LOG_VERSIONS = frozenset({3, 4, 5})
+_FIRST_VERSION_WITH_EVENTS = 5
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -358,6 +377,8 @@ class ReplayStep:
     encoded_images: dict[str, EncodedImage] = field(default_factory=dict)
     scalars: dict[str, float] = field(default_factory=dict)
     text: dict[str, str] = field(default_factory=dict)
+    # What happened on this step, in the order the benchmark recorded it.
+    events: tuple[ManifoldEvent, ...] = ()
 
 
 @dataclass(frozen=True, eq=False)
@@ -511,8 +532,13 @@ class ReplayLogWriter:
         images: Mapping[str, np.ndarray] | None = None,
         scalars: Mapping[str, float] | None = None,
         text: Mapping[str, str] | None = None,
+        events: Sequence[ManifoldEvent] = (),
     ) -> None:
         """Write one step frame, numbering it after the steps already written.
+
+        `events` is what happened on this step, in order. The key is omitted when
+        there are none, so a log from a benchmark that records no events is
+        byte-for-byte what it was before the field existed.
 
         `extrinsics` is each camera's camera-to-world pose for this step. Pass the
         full set every step; only the cameras whose pose CHANGED are stored, and
@@ -544,6 +570,7 @@ class ReplayLogWriter:
         moved = self._moved_extrinsics(extrinsics or {})
         if moved:
             payload["extrinsics"] = {name: _pack_pose(pose) for name, pose in moved.items()}
+        payload["events"] = [_pack_event(event) for event in events]
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
 
@@ -642,7 +669,7 @@ def read_replay_log(path: Path) -> ReplayLog:
             if kind == ReplayFrameType.SCENE:
                 bodies = _read_scene(payload)
             elif kind == ReplayFrameType.STEP:
-                step = _read_step(payload)
+                step = _read_step(payload, version)
                 carried.update(step.extrinsics)
                 # A copy per step, not the shared dict: a consumer that mutates one
                 # step's extrinsics must not rewrite every later step's too.
@@ -667,6 +694,36 @@ def _pack_part(part: ScenePart) -> dict[str, Any]:
         "orientation": _pack_array(part.orientation, _POSE_DTYPE),
         "color": [float(channel) for channel in part.color],
     }
+
+
+def _pack_fact(event: ObjectFact | RelationFact | Stacked) -> dict[str, Any]:
+    if isinstance(event, ObjectFact):
+        return {"object": event.object, "holds": event.holds}
+    if isinstance(event, RelationFact):
+        return {"object": event.object, "reference": event.reference, "holds": event.holds}
+    order = None if event.order is None else str(event.order)
+    return {"objects": list(event.objects), "order": order, "holds": event.holds}
+
+
+def _pack_event(event: ManifoldEvent) -> dict[str, Any]:
+    tag = {"kind": str(event.kind)}
+    if isinstance(event, EpisodeStarted):
+        return tag | {"instruction": event.instruction, "attributes": dict(event.attributes)}
+    if isinstance(event, EpisodeEnded):
+        return tag | {"success": event.success}
+    if isinstance(event, (ObjectFact, RelationFact, Stacked)):
+        return tag | _pack_fact(event)
+    if isinstance(event, GripperCommanded):
+        return tag | {"action": str(event.action)}
+    if isinstance(event, ObjectOccurrence):
+        return tag | {"object": event.object}
+    if isinstance(event, ObjectDisplaced):
+        return tag | {"object": event.object, "distance": float(event.distance)}
+    if isinstance(event, GripperFullyClosed):
+        return tag
+    if isinstance(event, Note):
+        return tag | {"text": event.text, "severity": str(event.severity)}
+    return assert_never(event)
 
 
 def _pack_pose(pose: Pose) -> dict[str, Any]:
@@ -948,7 +1005,7 @@ def _compressed_image(node: Any) -> EncodedImage | None:
     return None
 
 
-def _read_step(payload: dict[str, Any]) -> ReplayStep:
+def _read_step(payload: dict[str, Any], version: int) -> ReplayStep:
     index = payload.get("index")
     if not isinstance(index, int):
         raise ValueError("step 'index' must be an int")  # noqa: TRY004
@@ -959,11 +1016,16 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
     # Absent on a step where no camera moved, and on every step of a log written
     # before the field existed.
     raw_extrinsics = payload.get("extrinsics", {})
+    if version >= _FIRST_VERSION_WITH_EVENTS and "events" not in payload:
+        raise ValueError("a step must carry 'events'")
+    raw_events = payload.get("events", [])
     if not all(
         isinstance(node, dict)
         for node in (raw_poses, raw_images, raw_scalars, raw_text, raw_extrinsics)
     ):
         raise ValueError("a step's poses, extrinsics, images, scalars and text must be dicts")
+    if not isinstance(raw_events, list):
+        raise ValueError("a step's events must be a list")  # noqa: TRY004
     encoded = {name: _compressed_image(node) for name, node in raw_images.items()}
     return ReplayStep(
         index=index,
@@ -973,7 +1035,96 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
         encoded_images={name: found for name, found in encoded.items() if found is not None},
         scalars={name: float(value) for name, value in raw_scalars.items()},
         text={name: str(value) for name, value in raw_text.items()},
+        events=tuple(_read_event(node) for node in raw_events),
     )
+
+
+def _field(node: dict[str, Any], name: str, kind: type, *, optional: bool = False) -> Any:
+    value = node.get(name)
+    if value is None and optional:
+        return None
+    if not isinstance(value, kind):
+        raise ValueError(f"an event's {name!r} must be a {kind.__name__}")  # noqa: TRY004
+    return value
+
+
+def _names(node: dict[str, Any], name: str) -> dict[str, str]:
+    value = _field(node, name, dict)
+    if not all(isinstance(k, str) and isinstance(v, str) for k, v in value.items()):
+        raise ValueError(f"an event's {name!r} must map names to strings")
+    return value
+
+
+def _read_stacked(node: dict[str, Any]) -> Stacked:
+    objects = _field(node, "objects", list)
+    if not all(isinstance(name, str) for name in objects):
+        raise ValueError("a stack's 'objects' must be names")
+    order = _field(node, "order", str, optional=True)
+    return Stacked(
+        objects=tuple(objects),
+        holds=_field(node, "holds", bool),
+        order=None if order is None else StackOrder(order),
+    )
+
+
+# The fact and occurrence classes by the tag they store, for the reader to rebuild them.
+_OBJECT_FACTS = {cls.kind: cls for cls in ObjectFact.__subclasses__()}
+_RELATION_FACTS = {cls.kind: cls for cls in RelationFact.__subclasses__()}
+_OBJECT_OCCURRENCES = {cls.kind: cls for cls in ObjectOccurrence.__subclasses__()}
+
+
+def _read_named(
+    tag: ManifoldEventKind, node: dict[str, Any]
+) -> ObjectFact | RelationFact | Stacked | ObjectOccurrence | None:
+    if tag in _OBJECT_FACTS:
+        return _OBJECT_FACTS[tag](
+            object=_field(node, "object", str), holds=_field(node, "holds", bool)
+        )
+    if tag in _RELATION_FACTS:
+        return _RELATION_FACTS[tag](
+            object=_field(node, "object", str),
+            reference=_field(node, "reference", str),
+            holds=_field(node, "holds", bool),
+        )
+    if tag in _OBJECT_OCCURRENCES:
+        return _OBJECT_OCCURRENCES[tag](object=_field(node, "object", str))
+    if tag == ManifoldEventKind.STACKED:
+        return _read_stacked(node)
+    return None
+
+
+def _read_event(node: Any) -> ManifoldEvent:
+    # The tag is read off an untrusted frame, so a miss is a malformed log.
+    if not isinstance(node, dict):
+        raise ValueError("an event must be a dict")  # noqa: TRY004
+    try:
+        tag = ManifoldEventKind(node.get("kind"))
+    except ValueError:
+        raise ValueError(f"an event of unknown kind {node.get('kind')!r}") from None
+    named = _read_named(tag, node)
+    if named is not None:
+        return named
+    if tag == ManifoldEventKind.EPISODE_STARTED:
+        return EpisodeStarted(
+            instruction=_field(node, "instruction", str),
+            attributes=_names(node, "attributes"),
+        )
+    if tag == ManifoldEventKind.EPISODE_ENDED:
+        return EpisodeEnded(success=_field(node, "success", bool))
+    if tag == ManifoldEventKind.GRIPPER_COMMANDED:
+        return GripperCommanded(action=GripperAction(_field(node, "action", str)))
+    if tag == ManifoldEventKind.OBJECT_DISPLACED:
+        return ObjectDisplaced(
+            object=_field(node, "object", str), distance=_field(node, "distance", float)
+        )
+    if tag == ManifoldEventKind.GRIPPER_FULLY_CLOSED:
+        return GripperFullyClosed()
+    if tag == ManifoldEventKind.NOTE:
+        return Note(
+            text=_field(node, "text", str),
+            severity=Severity(_field(node, "severity", str)),
+        )
+    raise ValueError(f"an event of unknown kind {tag!r}")
 
 
 def _read_pose(node: Any) -> Pose:
