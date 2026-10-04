@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import Callable
-from typing import Any
 
 from manifold.adapters.observation.camera_resolution import ResizeCameras
 from manifold.adapters.observation.camera_rotate_180 import Rotate180Cameras
@@ -17,7 +16,12 @@ from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
 from manifold.core.verify import probe_observation
-from manifold.recipes.function import FunctionEndpoint, StatefulEndpoint, check_chunk
+from manifold.recipes.function import (
+    FunctionEndpoint,
+    StatefulEndpoint,
+    _StatefulPolicy,
+    check_chunk,
+)
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import serve as serve_endpoint
 
@@ -81,7 +85,7 @@ def _probe_predict(predict: Callable[[Observation], Action], signature: PolicySi
     check_chunk(predict(observation), signature)
 
 
-def _stateful_predict(policy: type[Any]) -> Callable[[Observation], Action]:
+def _stateful_predict(policy: type[_StatefulPolicy]) -> Callable[[Observation], Action]:
     """Create an instance of `policy`, call its `reset`, and return its `predict`.
 
     Raises `TypeError` if the class lacks a `reset` or a `predict` method.
@@ -98,7 +102,7 @@ def _stateful_predict(policy: type[Any]) -> Callable[[Observation], Action]:
 
 
 def serve(
-    policy: Callable[[Observation], Action] | type[Any],
+    policy: Callable[[Observation], Action] | type[_StatefulPolicy],
     signature: PolicySignature,
     *,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,

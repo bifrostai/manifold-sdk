@@ -16,7 +16,7 @@ from __future__ import annotations
 import threading
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Protocol
 
 import numpy as np
 
@@ -132,6 +132,17 @@ class FunctionEndpoint:
         raise NotImplementedError("FunctionEndpoint does not use native model inputs")
 
 
+class _StatefulPolicy(Protocol):
+    """Stateful class where reset() is called at the start of every episode.
+
+    Do not load weights in this class.
+    """
+
+    def reset(self) -> None: ...
+
+    def predict(self, observation: Observation, /) -> Action: ...
+
+
 class StatefulSession(FunctionSession):
     """A shard's session over its own instance of a stateful policy class."""
 
@@ -156,7 +167,7 @@ class StatefulEndpoint:
 
     def __init__(
         self,
-        policy: type[Any],
+        policy: type[_StatefulPolicy],
         signature: PolicySignature,
     ) -> None:
         self.policy = policy
