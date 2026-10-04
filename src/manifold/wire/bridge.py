@@ -48,6 +48,12 @@ READY includes the policy's `protocol_version`, so that a benchmark can
 tell which version the policy speaks. A policy at version 5 or older may
 send READY without it.
 
+The ACTION `handling_sec` and `forward_pass` fields are additive top-level keys
+under the rule. An older benchmark ignores them, and `decode_policy_step_timing`
+returns None for an older policy's action, which omits them. The timing does not
+change what the benchmark does, so a malformed timing decodes to None rather than
+failing the episode.
+
 The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
 synchronous peer round-trips identically without a version bump.
@@ -63,6 +69,7 @@ import io
 import math
 import socket
 import struct
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -324,6 +331,20 @@ class ReadyPayload(BaseModel):
     protocol_version: int = 5
 
 
+@dataclass(frozen=True)
+class PolicyStepTiming:
+    """How long the policy took to answer one observation.
+
+    `handling_sec` runs on the policy's clock from reading the OBSERVATION frame
+    to encoding the ACTION frame. `forward_pass` is True when the step ran the
+    model, False when it served a buffered step of an earlier chunk, and None when
+    the policy's session does not report which.
+    """
+
+    handling_sec: float
+    forward_pass: bool | None
+
+
 def encode_observation(
     observation: Observation,
     *,
@@ -439,22 +460,26 @@ def decode_observation(payload: dict[str, Any]) -> Observation:
 
 def encode_action(
     action: Action,
+    timing: PolicyStepTiming,
     *,
     action_prefix: np.ndarray | None = None,
     timestep: int | None = None,
 ) -> dict[str, Any]:
-    """Encode an Action into a frame payload, preserving its shape.
+    """Encode an Action and the policy's timing of it into a frame payload.
 
     The values are flattened onto the wire but the declared shape is carried
     alongside, so a chunked (chunk, dim) action keeps its layout. See
-    `decode_action` for how the receiving side consumes a chunk.
+    `decode_action` for how the receiving side consumes a chunk, and
+    `decode_policy_step_timing` for the timing.
 
     `action_prefix` and `timestep` are the same forward-looking RTC fields
     `encode_observation` carries (see the module docstring): the current
     synchronous loop passes neither, so the payload omits them.
     """
     wrapper = pack_ndarray(action.values.reshape(-1).tolist(), shape=list(action.values.shape))
-    payload: dict[str, Any] = {"action": wrapper}
+    payload: dict[str, Any] = {"action": wrapper, "handling_sec": timing.handling_sec}
+    if timing.forward_pass is not None:
+        payload["forward_pass"] = timing.forward_pass
     _attach_rtc_fields(payload, action_prefix=action_prefix, timestep=timestep)
     return payload
 
@@ -475,6 +500,24 @@ def decode_action(payload: dict[str, Any]) -> Action:
     if values is None:
         raise ValueError("action 'action' is not a decodable ndarray wrapper")
     return Action.from_array(values)
+
+
+def decode_policy_step_timing(payload: dict[str, Any]) -> PolicyStepTiming | None:
+    """Decode the policy's timing of one step from an ACTION payload.
+
+    Returns None when `handling_sec` is missing or is not a number, as in an action
+    from a policy built before it. A `forward_pass` that is missing or is not a bool
+    decodes to None.
+    """
+    handling_sec = payload.get("handling_sec")
+    # `bool` is an `int` subclass, so a flag sent as the duration is refused here.
+    if not isinstance(handling_sec, (int, float)) or isinstance(handling_sec, bool):
+        return None
+    forward_pass = payload.get("forward_pass")
+    return PolicyStepTiming(
+        handling_sec=float(handling_sec),
+        forward_pass=forward_pass if isinstance(forward_pass, bool) else None,
+    )
 
 
 def pack_stream_frame(
@@ -649,9 +692,11 @@ __all__ = [
     "FrameChannel",
     "FrameType",
     "HelloPayload",
+    "PolicyStepTiming",
     "ReadyPayload",
     "decode_action",
     "decode_observation",
+    "decode_policy_step_timing",
     "decode_rtc_fields",
     "encode_action",
     "encode_observation",

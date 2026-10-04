@@ -114,7 +114,8 @@ class _Policy:
         if self.sent[-1] == FrameType.HELLO:
             return {"type": FrameType.READY, "payload": {}}
         action = Action.from_array([0.0] * self.width)
-        return {"type": FrameType.ACTION, "payload": bridge.encode_action(action)}
+        timing = bridge.PolicyStepTiming(handling_sec=0.0, forward_pass=True)
+        return {"type": FrameType.ACTION, "payload": bridge.encode_action(action, timing)}
 
 
 def _execute(
@@ -361,6 +362,7 @@ def _record(episode_idx):
         started_at=now,
         ended_at=now,
         task_id="3",
+        timings=None,
     )
 
 
