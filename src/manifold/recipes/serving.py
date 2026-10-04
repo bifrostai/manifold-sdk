@@ -31,11 +31,13 @@ import threading
 import time
 from collections.abc import Sequence
 from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from importlib.metadata import distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+import numpy as np
 
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
@@ -98,6 +100,17 @@ def _validated_episode_ids(episode_ids: Iterable[int]) -> Iterator[int]:
         yield episode_id
 
 
+@dataclass(frozen=True)
+class _PolicyStep:
+    """The action one inference step returns, and whether the step ran the model.
+
+    `forward_pass` is None for a session that is not an `ActionQueue`.
+    """
+
+    action: Action
+    forward_pass: bool | None
+
+
 def _run_episode_in_process(
     session: Session,
     pipeline: Pipeline,
@@ -133,7 +146,7 @@ def _run_episode_in_process(
         for _ in range(max_steps):
             action = _infer_step(
                 session, observation, pipeline, observation_source, signature, state
-            )
+            ).action
             if steps == 0:
                 initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
             result = step(action)
@@ -155,6 +168,7 @@ def _run_episode_in_process(
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
         task_id=task_id,
+        timings=None,
     )
 
 
@@ -278,11 +292,16 @@ def _serve_session(
                 session.reset()
                 continue
             if kind == FrameType.OBSERVATION:
+                received_at = time.perf_counter()
                 observation = bridge.decode_observation(frame.get("payload", {}))
-                action = _infer_step(
+                policy_step = _infer_step(
                     session, observation, resolved, observation_source, signature, state
                 )
-                channel.send(FrameType.ACTION, bridge.encode_action(action))
+                timing = bridge.PolicyStepTiming(
+                    handling_sec=time.perf_counter() - received_at,
+                    forward_pass=policy_step.forward_pass,
+                )
+                channel.send(FrameType.ACTION, bridge.encode_action(policy_step.action, timing))
                 continue
             emit(f"ignoring unexpected frame {kind!r}")
     finally:
@@ -297,7 +316,7 @@ def _infer_step(
     observation_source: ObservationSpace,
     signature: PolicySignature,
     state: PipelineState,
-) -> Action:
+) -> _PolicyStep:
     """One policy-side inference step: the full benchmark->model->benchmark fold.
 
     The shared kernel `serve` runs per OBSERVATION frame and `evaluate` per in-process
@@ -317,9 +336,11 @@ def _infer_step(
     else:
         # The no-packing degenerate: the session answers the observation directly.
         action = session.infer(observation)
-    return pipeline.apply_action(
+    forward_pass = session.forward_pass if isinstance(session, ActionQueue) else None
+    action = pipeline.apply_action(
         action, source=signature.action_space, state=state, lane=DEFAULT_LANE
     )
+    return _PolicyStep(action=action, forward_pass=forward_pass)
 
 
 def _gate(
@@ -379,6 +400,10 @@ def _run_episode(
     `recorder` is driven around the same loop: begun once the reset is through, told
     of each step, and ended however the episode leaves - the budget running out, the
     driver reporting done, or `step` raising.
+
+    Each step's round trip is timed on the benchmark's clock from encoding the
+    observation to receiving the action. `_episode_timings` subtracts the
+    policy's handling time from it.
     """
     channel.send(FrameType.RESET, {})
     started_at = datetime.now(timezone.utc)
@@ -396,17 +421,23 @@ def _run_episode(
     steps = 0
     success = False
     initialization_sec = 0.0
+    round_trips: list[float] = []
+    policy_timings: list[bridge.PolicyStepTiming | None] = []
     try:
         recorder.begin(episode_idx)
         for _ in range(max_steps):
+            sent_at = time.perf_counter()
             channel.send(
                 FrameType.OBSERVATION,
                 bridge.encode_observation(observation, image_format=image_format),
             )
             reply = channel.recv()
+            round_trip = time.perf_counter() - sent_at
             if reply is None or reply.get("type") != FrameType.ACTION:
                 raise PairingRejected("expected an action frame from the policy")
             action = bridge.decode_action(reply["payload"])
+            round_trips.append(round_trip)
+            policy_timings.append(bridge.decode_policy_step_timing(reply["payload"]))
             # The policy checked this pairing against the benchmark as the policy
             # parsed it. A policy on an older SDK may have dropped a field, misread the
             # width, and replied in that wrong width. Check the action against the
@@ -448,6 +479,41 @@ def _run_episode(
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
         task_id=task_id,
+        timings=_episode_timings(round_trips, policy_timings),
+    )
+
+
+def _episode_timings(
+    round_trips: Sequence[float],
+    policy_timings: Sequence[bridge.PolicyStepTiming | None],
+) -> EpisodeTimings | None:
+    """Summarise an episode's per-step timings, or return None.
+
+    Returns None when any step's action omits the policy's timing, as an older
+    policy's action does, or when the episode has no steps. Inference covers the
+    steps that ran a forward pass, and every step when the policy does not report
+    which. The network time of a step is its round trip less the policy's handling
+    time. Each is a duration on one clock, so the subtraction is correct when the
+    two machines' clocks differ.
+    """
+    timed = [timing for timing in policy_timings if timing is not None]
+    if len(timed) != len(policy_timings):
+        return None
+    inference = [timing.handling_sec for timing in timed if timing.forward_pass is not False]
+    if len(inference) == 0:
+        return None
+    network = [
+        round_trip - timing.handling_sec
+        for round_trip, timing in zip(round_trips, timed, strict=True)
+    ]
+    return EpisodeTimings(
+        forward_passes=len(inference),
+        inference_p50_sec=float(np.percentile(inference, 50)),
+        inference_p95_sec=float(np.percentile(inference, 95)),
+        inference_max_sec=max(inference),
+        network_p50_sec=float(np.percentile(network, 50)),
+        network_p95_sec=float(np.percentile(network, 95)),
+        network_max_sec=max(network),
     )
 
 
@@ -564,6 +630,9 @@ class ActionQueue:
         # forward.
         self._chunk: Any = None
         self._step = 0
+        # Whether the latest `advance` ran `_forward`. `serve` reports it with each
+        # step's timing.
+        self.forward_pass = False
 
     def _forward(self, native: Any, /) -> Any:
         """Run the backend's shared-model forward on `native`; return the raw chunk.
@@ -582,7 +651,8 @@ class ActionQueue:
         When the horizon has drained (no buffered chunk, or `execution_steps` served), run
         a fresh `_forward` and reset the step pointer; otherwise serve the next step.
         """
-        if self._chunk is None or self._step >= self._execution_steps:
+        self.forward_pass = self._chunk is None or self._step >= self._execution_steps
+        if self.forward_pass:
             self._chunk = self._forward(native)
             self._step = 0
         step = self._step
@@ -653,6 +723,25 @@ class ResetResult:
 
 
 @dataclass(frozen=True)
+class EpisodeTimings:
+    """Summary statistics of one episode's inference and network step times.
+
+    Inference covers the steps that ran a forward pass, or every step when the
+    policy does not report which, and `forward_passes` counts those steps. Network
+    covers every step, and includes encoding, any bridge between the two, and the
+    transport.
+    """
+
+    forward_passes: int
+    inference_p50_sec: float
+    inference_p95_sec: float
+    inference_max_sec: float
+    network_p50_sec: float
+    network_p95_sec: float
+    network_max_sec: float
+
+
+@dataclass(frozen=True)
 class EpisodeRecord:
     """One finished episode, as the benchmark observed it.
 
@@ -665,6 +754,10 @@ class EpisodeRecord:
     `task_id` is the benchmark's own identifier for the task, such as a class
     name. Two tasks in a suite may share an instruction, and `task_id` separates
     them. It comes from the benchmark's `ResetResult`.
+
+    `timings` is None for an episode `evaluate` drove in-process, for an episode
+    whose policy did not report its timing of every step, and for an episode
+    without a step.
     """
 
     episode_idx: int
@@ -675,6 +768,7 @@ class EpisodeRecord:
     started_at: datetime
     ended_at: datetime
     task_id: str
+    timings: EpisodeTimings | None
 
     @property
     def elapsed_sec(self) -> float:
@@ -727,7 +821,9 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
     This is the file a runner scans a benchmark worker's output directory for: a
     flat document keyed ``records``, one entry per episode, instants in ISO 8601.
     The runner derives ``elapsed_sec`` from the two instants, so the rollup does
-    not carry a duration free to disagree with them.
+    not carry a duration free to disagree with them. ``timings`` is null when
+    ``EpisodeRecord.timings`` is None. The runner reports each episode without
+    ``timings`` and publishes ``timings`` separately.
     """
     records = [
         {
@@ -739,6 +835,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
             "started_at": record.started_at.isoformat(),
             "ended_at": record.ended_at.isoformat(),
             "task_id": record.task_id,
+            "timings": None if record.timings is None else asdict(record.timings),
         }
         for record in result.records
     ]
@@ -1207,6 +1304,7 @@ __all__ = [
     "ActionQueue",
     "BenchmarkResult",
     "EpisodeRecord",
+    "EpisodeTimings",
     "PairingRejected",
     "PolicyEndpoint",
     "PolicyProfile",

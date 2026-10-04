@@ -12,8 +12,10 @@ from manifold.wire import (
     MAX_FRAME_BYTES,
     FrameChannel,
     FrameType,
+    PolicyStepTiming,
     decode_action,
     decode_observation,
+    decode_policy_step_timing,
     decode_rtc_fields,
     encode_action,
     encode_observation,
@@ -21,6 +23,9 @@ from manifold.wire import (
     read_stream_frame,
 )
 from manifold.wire import codec as wire
+
+# A policy's timing of a step, for tests that do not read it.
+_TIMING = PolicyStepTiming(handling_sec=0.0, forward_pass=True)
 
 
 def _reader(data: bytes):
@@ -119,13 +124,13 @@ def test_observation_without_instruction_round_trips() -> None:
 
 def test_action_round_trips_1d() -> None:
     action = Action.from_array(np.array([0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 1.0], dtype=np.float32))
-    decoded = decode_action(encode_action(action))
+    decoded = decode_action(encode_action(action, _TIMING))
     assert np.allclose(decoded.values, action.values)
 
 
 def test_chunked_action_decodes_to_first_step() -> None:
     chunk = np.arange(3 * 7, dtype=np.float32).reshape(3, 7)
-    decoded = decode_action(encode_action(Action(values=chunk)))
+    decoded = decode_action(encode_action(Action(values=chunk), _TIMING))
     # unpack_ndarray returns only the first step of a chunk.
     assert np.allclose(decoded.values, chunk[0])
 
@@ -154,7 +159,7 @@ def test_observation_rtc_fields_round_trip() -> None:
 def test_action_rtc_fields_round_trip() -> None:
     action = Action.from_array(np.array([0.1, -0.2, 0.3], dtype=np.float32))
     prefix = np.array([1.0, 2.0], dtype=np.float32)
-    payload = encode_action(action, action_prefix=prefix, timestep=11)
+    payload = encode_action(action, _TIMING, action_prefix=prefix, timestep=11)
     decoded_prefix, decoded_timestep = decode_rtc_fields(payload)
     assert decoded_prefix is not None
     assert np.array_equal(decoded_prefix, prefix)
@@ -163,8 +168,41 @@ def test_action_rtc_fields_round_trip() -> None:
     assert np.allclose(decode_action(payload).values, [0.1, -0.2, 0.3])
 
 
+def test_policy_step_timing_round_trips_beside_the_action() -> None:
+    timing = PolicyStepTiming(handling_sec=0.125, forward_pass=False)
+    payload = encode_action(Action.from_array([0.1, 0.2]), timing)
+
+    assert decode_policy_step_timing(payload) == timing
+    assert np.allclose(decode_action(payload).values, [0.1, 0.2])
+
+
+def test_an_action_from_an_older_policy_decodes_without_timing() -> None:
+    payload = encode_action(Action.from_array([0.1]), _TIMING)
+    del payload["handling_sec"], payload["forward_pass"]
+
+    assert decode_policy_step_timing(payload) is None
+
+
+@pytest.mark.parametrize("handling_sec", [None, True, "0.1"])
+def test_an_action_with_a_malformed_handling_time_decodes_without_timing(handling_sec) -> None:
+    payload = encode_action(Action.from_array([0.1]), _TIMING) | {"handling_sec": handling_sec}
+
+    assert decode_policy_step_timing(payload) is None
+
+
+def test_a_timing_without_a_forward_pass_flag_decodes_with_the_flag_unknown() -> None:
+    payload = encode_action(
+        Action.from_array([0.1]), PolicyStepTiming(handling_sec=0.2, forward_pass=None)
+    )
+
+    assert "forward_pass" not in payload
+    assert decode_policy_step_timing(payload) == PolicyStepTiming(
+        handling_sec=0.2, forward_pass=None
+    )
+
+
 def test_action_without_rtc_fields_decodes_to_none() -> None:
-    payload = encode_action(Action.from_array(np.array([0.0], dtype=np.float32)))
+    payload = encode_action(Action.from_array(np.array([0.0], dtype=np.float32)), _TIMING)
     assert "action_prefix" not in payload
     assert "timestep" not in payload
     assert decode_rtc_fields(payload) == (None, None)
@@ -502,7 +540,7 @@ def test_frame_channel_round_trips_several_frames() -> None:
 
     sender.send(FrameType.HELLO, {"contract": "demo"})
     sender.send(FrameType.OBSERVATION, encode_observation(obs))
-    sender.send(FrameType.ACTION, encode_action(Action.from_array([0.0, 1.0, 2.0])))
+    sender.send(FrameType.ACTION, encode_action(Action.from_array([0.0, 1.0, 2.0]), _TIMING))
 
     hello = receiver.recv()
     assert hello is not None
@@ -605,7 +643,7 @@ def test_two_frame_channels_are_isolated_over_separate_socketpairs() -> None:
 
         # Send an observation on A and an action on B.
         chan_a_send.send(FrameType.OBSERVATION, encode_observation(obs_a))
-        chan_b_send.send(FrameType.ACTION, encode_action(action_b))
+        chan_b_send.send(FrameType.ACTION, encode_action(action_b, _TIMING))
 
         # Close the sending sides so recv() sees EOF after the one frame.
         a_left.close()
