@@ -253,13 +253,15 @@ def test_proprio_rotation_wrap_false_routes_quat_to_nonwrapping() -> None:
     assert np.linalg.norm(out_wrap[3:6]) <= np.pi
 
 
-def test_proprio_rotation_default_is_unchanged_scipy_path() -> None:
-    # The default (wrap=True) must match the pre-existing scipy conversion exactly.
+def test_proprio_rotation_default_matches_libero_training_data() -> None:
+    # LIBERO training data stores the non-wrapping axis-angle, so the default must
+    # reproduce it. scipy's wrapped form would put w<0 poses 2*pi away.
     quat = np.array([0.6, 0.0, 0.0, -0.8], dtype=np.float32)
     pos = np.array([0.1, 0.2, 0.3], dtype=np.float32)
     source = _obs_space(RotationFormat.QUATERNION)
     observation = Observation(state={"ee_pose": np.concatenate([pos, quat])})
 
     out = ProprioRotationAdapter(target=RotationFormat.AXIS_ANGLE).adapt(observation, source=source)
-    expected = Rotation.from_quat(quat.astype(np.float64)).as_rotvec()
-    assert np.allclose(out.state["ee_pose"][3:6], expected, atol=1e-6)
+    expected = quat_to_axisangle(quat)
+    assert np.allclose(out.state["ee_pose"][3:6], expected.astype(np.float64), atol=1e-6)
+    assert np.linalg.norm(out.state["ee_pose"][3:6]) > np.pi

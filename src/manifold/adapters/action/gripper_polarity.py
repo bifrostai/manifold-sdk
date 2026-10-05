@@ -48,13 +48,18 @@ class GripperPolarityAdapter(ActionAdapter):
         return source.model_copy(update={"gripper": self.target})
 
     def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
-        """Remap the gripper element of the action to the target encoding."""
+        """Remap the gripper element of each arm to the target encoding."""
         if not isinstance(source, EEActionSpace) or source.gripper is None:
             raise TypeError("GripperPolarityAdapter needs an EEActionSpace with a gripper")
         out = [float(v) for v in values]
         source.validate_value(out)  # the remap below assumes the declared length
-        # The gripper is the last element of the action.
-        out[-1] = remap(out[-1], source.gripper, self.target)
+        # The gripper is the last element of each arm's values, and an action holds
+        # `arm_count` of those groups. If the loop stepped over the whole action at
+        # once, it would remap the last arm's gripper only, and the other arms would
+        # keep the source encoding.
+        per_arm = source.per_arm_length()
+        for gripper_index in range(per_arm - 1, len(out), per_arm):
+            out[gripper_index] = remap(out[gripper_index], source.gripper, self.target)
         return out
 
 

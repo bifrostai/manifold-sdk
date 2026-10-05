@@ -7,17 +7,16 @@ through, as do the other channels (cameras, instruction). It is lossless.
 
 Parameterized by the target format: `ProprioRotationAdapter(target=AXIS_ANGLE)`.
 
-By default it converts through scipy (`lib.rotation.convert`), which canonicalizes
-a quaternion to an axis-angle in [0, pi]. For the QUATERNION -> AXIS_ANGLE case a
-policy may have been trained on a non-wrapping convention (angle = 2*acos(w),
-keeping the sign so w < 0 gives an angle in (pi, 2*pi)); pass `wrap=False` to route
-that one case through `quat_to_axisangle_nonwrapping`. That path re-narrows the
-block to float32 before the conversion (a float32 quaternion keeps its axis at
-float32 before scaling), so a policy trained on float32 axis-angles sees values
-identical to its training data — not merely close. `wrap=True` (the default)
-preserves the original scipy behavior for every format, so existing pairings are
-unchanged. `wrap` only affects QUATERNION -> AXIS_ANGLE; every other conversion
-takes the scipy path regardless.
+By default, QUATERNION -> AXIS_ANGLE uses the non-wrapping conversion
+(`quat_to_axisangle_nonwrapping`): angle = 2*acos(w), keeping the sign, so w < 0
+gives an angle in (pi, 2*pi). LIBERO's dataset scripts and the LIBERO training sets
+on Hugging Face store axis-angle this way. That path re-narrows the block to float32
+before the conversion (a float32 quaternion keeps its axis at float32 before
+scaling), so a policy trained on float32 axis-angles sees values identical to its
+training data. Pass `wrap=True` for a policy trained on scipy's `as_rotvec`, which
+wraps the angle into [0, pi] and flips the axis when w < 0. `wrap` only affects
+QUATERNION -> AXIS_ANGLE; every other conversion goes through scipy
+(`lib.rotation.convert`).
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ class ProprioRotationAdapter(ObservationAdapter):
     to_spec: ClassVar[type[BaseModel]] = ObservationSpace
     lossless: ClassVar[bool] = True
 
-    def __init__(self, target: RotationFormat, *, wrap: bool = True) -> None:
+    def __init__(self, target: RotationFormat, *, wrap: bool = False) -> None:
         self.target = target
         self.wrap = wrap
 
@@ -93,16 +92,27 @@ class ProprioRotationAdapter(ObservationAdapter):
         ee_pose = self._spec(source).proprioception.ee_pose
         if ee_pose is None:
             raise TypeError("ProprioRotationAdapter needs a proprioception with an ee_pose")
-        block = [float(v) for v in observation.state["ee_pose"]]
+        values = [float(v) for v in observation.state["ee_pose"]]
+        # The loop below reads exactly `arm_count` arms. If the value is longer than
+        # the spec declares, the extra arms would be dropped without any error, so
+        # check the length first and raise.
+        ee_pose.validate_value(values)
         # Only the position and rotation lengths are needed to slice out the
         # rotation block; the gripper slot (the discarded third element) does not
         # affect those, so pass None rather than the GripperObservationSpec.
         pos_len, rot_len, _ = ee_step_layout(ee_pose.rotation, None)
-        reencoded = (
-            block[:pos_len]  # position
-            + self._encode_rotation(block[pos_len : pos_len + rot_len], ee_pose.rotation)
-            + block[pos_len + rot_len :]  # gripper, if any
-        )
+        # The layout repeats one arm's values. If the whole value were treated as a
+        # single arm, only arm 0 would be transformed, and the other arms would pass
+        # through untouched. The two arms of the robot would then disagree.
+        per_arm = ee_pose.per_arm_length()
+        reencoded: list[float] = []
+        for arm in range(ee_pose.arm_count):
+            arm_values = values[arm * per_arm : (arm + 1) * per_arm]
+            reencoded += (
+                arm_values[:pos_len]  # position
+                + self._encode_rotation(arm_values[pos_len : pos_len + rot_len], ee_pose.rotation)
+                + arm_values[pos_len + rot_len :]  # gripper, if any
+            )
         state = {**observation.state, "ee_pose": np.asarray(reencoded, dtype=np.float32)}
         return replace(observation, state=state)
 
