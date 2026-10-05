@@ -7,17 +7,16 @@ through, as do the other channels (cameras, instruction). It is lossless.
 
 Parameterized by the target format: `ProprioRotationAdapter(target=AXIS_ANGLE)`.
 
-By default it converts through scipy (`lib.rotation.convert`), which canonicalizes
-a quaternion to an axis-angle in [0, pi]. For the QUATERNION -> AXIS_ANGLE case a
-policy may have been trained on a non-wrapping convention (angle = 2*acos(w),
-keeping the sign so w < 0 gives an angle in (pi, 2*pi)); pass `wrap=False` to route
-that one case through `quat_to_axisangle_nonwrapping`. That path re-narrows the
-block to float32 before the conversion (a float32 quaternion keeps its axis at
-float32 before scaling), so a policy trained on float32 axis-angles sees values
-identical to its training data — not merely close. `wrap=True` (the default)
-preserves the original scipy behavior for every format, so existing pairings are
-unchanged. `wrap` only affects QUATERNION -> AXIS_ANGLE; every other conversion
-takes the scipy path regardless.
+By default, QUATERNION -> AXIS_ANGLE uses the non-wrapping conversion
+(`quat_to_axisangle_nonwrapping`): angle = 2*acos(w), keeping the sign, so w < 0
+gives an angle in (pi, 2*pi). LIBERO's dataset scripts and the LIBERO training sets
+on Hugging Face store axis-angle this way. That path re-narrows the block to float32
+before the conversion (a float32 quaternion keeps its axis at float32 before
+scaling), so a policy trained on float32 axis-angles sees values identical to its
+training data. Pass `wrap=True` for a policy trained on scipy's `as_rotvec`, which
+wraps the angle into [0, pi] and flips the axis when w < 0. `wrap` only affects
+QUATERNION -> AXIS_ANGLE; every other conversion goes through scipy
+(`lib.rotation.convert`).
 """
 
 from __future__ import annotations
@@ -42,7 +41,7 @@ class ProprioRotationAdapter(ObservationAdapter):
     to_spec: ClassVar[type[BaseModel]] = ObservationSpace
     lossless: ClassVar[bool] = True
 
-    def __init__(self, target: RotationFormat, *, wrap: bool = True) -> None:
+    def __init__(self, target: RotationFormat, *, wrap: bool = False) -> None:
         self.target = target
         self.wrap = wrap
 
