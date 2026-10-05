@@ -24,6 +24,12 @@ the arm's links and the gripper's fingers as well as the objects and fixtures,
 because nothing reading a log distinguishes them. See ADR 0004.
 _Avoid_: link, geom, entity
 
+**Manifold event** - one typed thing that happened on a replay log's step: a fact,
+such as an object being grasped, starting or stopping to hold, or an occurrence,
+such as the gripper hitting the table. A benchmark records what it observed;
+grading decides what it means. See ADR 0009.
+_Avoid_: latch, log line, tracker message
+
 **success signal** - the per-step flag saying the benchmark's task is satisfied.
 Replay data rather than a contract channel, since no policy consumes it, so a
 replay log declares it and `Benchmark` does not. Distinct from an episode's

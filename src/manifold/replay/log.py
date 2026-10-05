@@ -1,11 +1,11 @@
 """The replay log: simulator state a benchmark writes for its replay.
 
 A log is one episode's worth of what a rendered replay needs and no policy reads
-- the scene's geometry, a pose per body per step, and whatever images, scalars
-and text the benchmark chose to publish. It is written to the results directory
-the runner already mounts, never onto the bridge (ADR 0003), and the runner turns
-it into a Rerun recording. `replay_log_path` returns the path, beside the
-rollup `write_rollup` writes.
+- the scene's geometry, a pose per body per step, whatever images, scalars
+and text the benchmark chose to publish, and the Manifold events of each step. It is
+written to the results directory the runner already mounts, never onto the bridge
+(ADR 0003), and the runner turns it into a Rerun recording. `replay_log_path`
+returns the path, beside the rollup `write_rollup` writes.
 
 The framing is the wire's: `pack_stream_frame` puts a four-byte big-endian length
 in front of a msgpack body, and arrays are encoded as the codec's `__ndarray__`
@@ -48,8 +48,10 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
+from pydantic import TypeAdapter
 
 from manifold.lib.compat import StrEnum
+from manifold.replay.events import ManifoldEvent
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -66,14 +68,16 @@ if TYPE_CHECKING:
 
 # The log's own contract version, independent of the bridge protocol's. This is what
 # a writer stamps.
-REPLAY_LOG_VERSION = 4
+REPLAY_LOG_VERSION = 5
 
 # The versions a reader accepts, which is more than the one it writes.
 # Every field 4 added over 3 — the header's `cameras` and a step's `extrinsics` — is
 # absent-means-empty, so a reader treats a 3 as a log without camera calibration and
 # without camera poses, which is exactly what it is. Refusing it instead would strand every log
 # already on disk over a field they could not have carried.
-_READABLE_LOG_VERSIONS = frozenset({3, 4})
+# 5 requires a step's `events`; a 3 or a 4 reads as a log whose steps carry none.
+_READABLE_LOG_VERSIONS = frozenset({3, 4, 5})
+_FIRST_VERSION_WITH_EVENTS = 5
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -358,6 +362,8 @@ class ReplayStep:
     encoded_images: dict[str, EncodedImage] = field(default_factory=dict)
     scalars: dict[str, float] = field(default_factory=dict)
     text: dict[str, str] = field(default_factory=dict)
+    # What happened on this step, in the order the benchmark recorded it.
+    events: tuple[ManifoldEvent, ...] = ()
 
 
 @dataclass(frozen=True, eq=False)
@@ -511,8 +517,13 @@ class ReplayLogWriter:
         images: Mapping[str, np.ndarray] | None = None,
         scalars: Mapping[str, float] | None = None,
         text: Mapping[str, str] | None = None,
+        events: Sequence[ManifoldEvent] = [],
     ) -> None:
         """Write one step frame, numbering it after the steps already written.
+
+        `events` is what happened on this step, in order. The key is omitted when
+        there are none, so a log from a benchmark that records no events is
+        byte-for-byte what it was before the field existed.
 
         `extrinsics` is each camera's camera-to-world pose for this step. Pass the
         full set every step; only the cameras whose pose CHANGED are stored, and
@@ -544,6 +555,7 @@ class ReplayLogWriter:
         moved = self._moved_extrinsics(extrinsics or {})
         if moved:
             payload["extrinsics"] = {name: _pack_pose(pose) for name, pose in moved.items()}
+        payload["events"] = [event.model_dump(mode="json") for event in events]
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
 
@@ -642,7 +654,7 @@ def read_replay_log(path: Path) -> ReplayLog:
             if kind == ReplayFrameType.SCENE:
                 bodies = _read_scene(payload)
             elif kind == ReplayFrameType.STEP:
-                step = _read_step(payload)
+                step = _read_step(payload, version)
                 carried.update(step.extrinsics)
                 # A copy per step, not the shared dict: a consumer that mutates one
                 # step's extrinsics must not rewrite every later step's too.
@@ -948,7 +960,11 @@ def _compressed_image(node: Any) -> EncodedImage | None:
     return None
 
 
-def _read_step(payload: dict[str, Any]) -> ReplayStep:
+# Reads a step's stored events back into their classes, refusing a malformed one.
+_EVENTS = TypeAdapter(list[ManifoldEvent])
+
+
+def _read_step(payload: dict[str, Any], version: int) -> ReplayStep:
     index = payload.get("index")
     if not isinstance(index, int):
         raise ValueError("step 'index' must be an int")  # noqa: TRY004
@@ -959,11 +975,16 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
     # Absent on a step where no camera moved, and on every step of a log written
     # before the field existed.
     raw_extrinsics = payload.get("extrinsics", {})
+    if version >= _FIRST_VERSION_WITH_EVENTS and "events" not in payload:
+        raise ValueError("a step must carry 'events'")
+    raw_events = payload.get("events", [])
     if not all(
         isinstance(node, dict)
         for node in (raw_poses, raw_images, raw_scalars, raw_text, raw_extrinsics)
     ):
         raise ValueError("a step's poses, extrinsics, images, scalars and text must be dicts")
+    if not isinstance(raw_events, list):
+        raise ValueError("a step's events must be a list")  # noqa: TRY004
     encoded = {name: _compressed_image(node) for name, node in raw_images.items()}
     return ReplayStep(
         index=index,
@@ -973,6 +994,7 @@ def _read_step(payload: dict[str, Any]) -> ReplayStep:
         encoded_images={name: found for name, found in encoded.items() if found is not None},
         scalars={name: float(value) for name, value in raw_scalars.items()},
         text={name: str(value) for name, value in raw_text.items()},
+        events=tuple(_EVENTS.validate_python(raw_events)),
     )
 
 
