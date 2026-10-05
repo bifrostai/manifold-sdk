@@ -135,6 +135,20 @@ def serve(
     manifold.serve(Policy, signature)
     ```
 
+    `serve` calls `predict` from a separate thread for each shard, so calls
+    from different shards can run at the same time. The weights at the top of
+    the script are shared by all shards. For a model on a GPU, hold a single
+    lock around all GPU work in `predict`, including preprocessing and noise,
+    so that one call at a time uses the GPU:
+
+    ```python
+    lock = threading.Lock()
+
+    def predict(obs):
+        with lock:
+            return model(obs)
+    ```
+
     A model call returns the actions. Under the default
     `chunk_size=1`, it returns a single action as a flat vector or a single row.
     Otherwise it returns a 2-D array with `signature.chunk_size` rows, and
