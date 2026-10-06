@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import json
 import socket
+import sys
+import sysconfig
 import threading
 import time
 from collections.abc import Sequence
@@ -172,9 +174,55 @@ def _sdk_commit() -> str | None:
     return commit if isinstance(commit, str) else None
 
 
+# The longest serving script that the Manifold backend stores, in characters.
+MAX_SCRIPT_CHARS = 262_144
+
+_SDK_ROOT = Path(__file__).resolve().parents[1]
+_STDLIB_ROOT = Path(sysconfig.get_paths()["stdlib"]).resolve()
+
+
+def _serving_script() -> dict[str, str] | None:
+    """Return the path and text of the serving script.
+
+    The serving script is the Python file with the `manifold.serve(...)` call.
+    `manifold policy serve` uploads it, so the run page shows the code that
+    served the run. This function takes the first frame on the stack outside
+    the SDK and the standard library. A `manifold.serve(...)` call in
+    `serve.py` gives `serve.py` for any command: `uv run serve.py`,
+    `python -m my_policy.serve`, an entry point or a shell script.
+
+    Returns None for code outside a file, as with `python -c`. Also returns
+    None when the file is not UTF-8 text or is longer than the backend stores.
+    The path is relative to the working directory when the file is inside it.
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        path = Path(frame.f_code.co_filename)
+        if path.is_file() and not _is_inside(path.resolve(), (_SDK_ROOT, _STDLIB_ROOT)):
+            break
+        frame = frame.f_back
+    if frame is None:
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if len(text) > MAX_SCRIPT_CHARS:
+        return None
+    resolved = path.resolve()
+    cwd = Path.cwd().resolve()
+    shown = resolved.relative_to(cwd) if resolved.is_relative_to(cwd) else resolved
+    return {"path": shown.as_posix(), "text": text}
+
+
+def _is_inside(path: Path, roots: tuple[Path, ...]) -> bool:
+    return any(path.is_relative_to(root) for root in roots)
+
+
 def _serve_connection(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    script: dict[str, str] | None,
     conn: socket.socket,
     addr: Any,
     emit: Callable[[str], None],
@@ -193,7 +241,7 @@ def _serve_connection(
     """
     try:
         with conn:
-            spoke = _serve_session(endpoint, pipeline, conn, addr, emit)
+            spoke = _serve_session(endpoint, pipeline, script, conn, addr, emit)
         if spoke:
             emit(f"connection from {addr} closed")
     except Exception as exc:  # one shard's failure must not kill the server.
@@ -203,6 +251,7 @@ def _serve_connection(
 def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    script: dict[str, str] | None,
     conn: socket.socket,
     addr: Any,
     emit: Callable[[str], None],
@@ -230,6 +279,7 @@ def _serve_session(
             {
                 "signature": endpoint.signature.model_dump(mode="json"),
                 "sdk_version": _sdk_commit(),
+                "script": script,
             },
         )
         hello = channel.recv()
@@ -781,6 +831,7 @@ def serve(
     sink must be concurrency-safe.
     """
     emit = on_event
+    script = _serving_script()
     workers: list[threading.Thread] = []
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -794,7 +845,7 @@ def serve(
                 conn, addr = listener.accept()
                 worker = threading.Thread(
                     target=_serve_connection,
-                    args=(endpoint, pipeline, conn, addr, emit),
+                    args=(endpoint, pipeline, script, conn, addr, emit),
                     daemon=True,
                 )
                 workers.append(worker)

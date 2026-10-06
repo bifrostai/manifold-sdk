@@ -13,6 +13,7 @@ import socket
 import threading
 from contextlib import suppress
 from datetime import datetime, timezone
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
@@ -358,8 +359,60 @@ def test_serve_replies_to_get_signature_with_the_signature(monkeypatch):
     assert reply["payload"] == {
         "signature": signature.model_dump(mode="json"),
         "sdk_version": "3cba8f4e0c7d",
+        # The thread starts `serve` directly. The stack holds only threading
+        # code, so the script is null.
+        "script": None,
     }
     assert events == [event for event in events if event.startswith("listening on")]
+
+
+def test_serve_replies_to_get_signature_with_the_serving_script(monkeypatch):
+    """`manifold policy serve` uploads the serving script, so the run page shows
+    the code that served the run. Here the serving script is this test file."""
+    from manifold.core import EEActionSpace, PolicySignature, RotationFormat
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    monkeypatch.chdir(Path(__file__).parents[1])
+    signature = PolicySignature(action_space=EEActionSpace(rotation=RotationFormat.AXIS_ANGLE))
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    def serving_script() -> None:
+        serve(
+            cast(Any, SimpleNamespace(signature=signature)),
+            host="127.0.0.1",
+            port=port,
+            on_event=record,
+        )
+
+    threading.Thread(target=serving_script, daemon=True).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        reply = channel.recv()
+
+    assert reply is not None
+    assert reply["payload"]["script"] == {
+        "path": "tests/test_serving.py",
+        "text": Path(__file__).read_text(encoding="utf-8"),
+    }
+
+
+def test_the_serving_script_is_none_for_a_file_longer_than_the_backend_stores(
+    monkeypatch,
+):
+    from manifold.recipes import serving
+
+    monkeypatch.setattr(serving, "MAX_SCRIPT_CHARS", 10)
+
+    assert serving._serving_script() is None
 
 
 def test_serve_reads_the_next_frame_after_replying_to_get_signature():
@@ -1534,7 +1587,7 @@ def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> No
     events: list[str] = []
     # The endpoint and socket are never touched: the refusal comes before either.
     closed = serving._serve_session(
-        cast(Any, _Unreachable()), None, cast(Any, None), "peer", events.append
+        cast(Any, _Unreachable()), None, None, cast(Any, None), "peer", events.append
     )
     assert closed is True
     assert any("newer than this server" in event for event in events)
