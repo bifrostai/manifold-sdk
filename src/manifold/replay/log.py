@@ -398,7 +398,7 @@ class ReplayLogWriter:
 
         with ReplayLogWriter(path, channels=channels) as log:
             log.write_scene(bodies)
-            log.write_step(poses, images={"agentview": rgb}, scalars={"reward": r})
+            log.write_step(poses, images={CameraName.AGENTVIEW: rgb}, scalars={"reward": r})
     """
 
     def __init__(

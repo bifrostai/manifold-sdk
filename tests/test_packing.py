@@ -42,6 +42,7 @@ from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Camera
 from manifold.core.values import Action, Observation
 from manifold.core.verify import verify
+from manifold.sensors import CameraName
 
 # --- synthetic fixtures -----------------------------------------------------
 
@@ -63,7 +64,7 @@ def _proprio() -> Proprioception:
 def _observation_space() -> ObservationSpace:
     return ObservationSpace(
         proprioception=_proprio(),
-        cameras=(Camera(name="agentview", shape=(8, 8, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3)),),
         instruction=True,
     )
 
@@ -72,7 +73,7 @@ def _benchmark() -> Benchmark:
     return Benchmark(
         name="suite",
         embodiment=Embodiment(name="arm", action=_ee(), proprioception=_proprio()),
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=True,
     )
 
@@ -91,7 +92,9 @@ def _observation() -> Observation:
     # ee_pose laid out [pos3, axisangle3, gripper_qpos2]; a distinct value per slot.
     ee = np.arange(8, dtype=np.float32)
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
-    return Observation(state={"ee_pose": ee}, sensors={"agentview": frame}, instruction="pick")
+    return Observation(
+        state={"ee_pose": ee}, sensors={CameraName.AGENTVIEW: frame}, instruction="pick"
+    )
 
 
 # An input layout exercising every structural op:
@@ -106,7 +109,7 @@ def _input_layout() -> NativeLayout:
             LayoutEntry(
                 key="video.image",
                 source=SourceKind.CAMERA,
-                source_name="agentview",
+                source_name=CameraName.AGENTVIEW,
                 ops=(DtypeCast(dtype="uint8", contiguous=True), BatchAxis(batch=True)),
             ),
             LayoutEntry(
@@ -232,7 +235,7 @@ def test_pack_applies_all_ops() -> None:
 def test_pack_missing_channel_raises() -> None:
     pack = PackToNativeLayout(_input_layout())
     obs = Observation(
-        state={}, sensors={"agentview": np.zeros((8, 8, 3), np.uint8)}, instruction="x"
+        state={}, sensors={CameraName.AGENTVIEW: np.zeros((8, 8, 3), np.uint8)}, instruction="x"
     )
     try:
         pack.adapt(obs, source=_observation_space())
@@ -492,7 +495,7 @@ def test_verify_shape_dtype_mismatch_is_caught() -> None:
             LayoutEntry(
                 key="video.image",
                 source=SourceKind.CAMERA,
-                source_name="agentview",
+                source_name=CameraName.AGENTVIEW,
                 ops=(DtypeCast(dtype="uint8", contiguous=True), BatchAxis(batch=True)),
             ),
         )

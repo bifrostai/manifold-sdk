@@ -61,3 +61,17 @@ def test_every_embodiments_module_is_listed_in_the_catalog() -> None:
     # `ALL` is both what a consumer enumerates and what the per-entry checks iterate, so a
     # module missing from it is invisible to a user and to every other test in this file.
     assert sorted(embodiment.name for embodiment in EMBODIMENTS) == MODULES
+
+
+def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
+    from manifold.sensors import CameraName
+
+    assert {name.value for name in CameraName} == {
+        "agentview",
+        "agentview_depth",
+        "agentview_left",
+        "agentview_right",
+        "over_shoulder_left",
+        "wrist",
+        "wrist_depth",
+    }

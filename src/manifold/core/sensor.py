@@ -207,9 +207,10 @@ class Camera(BaseModel):
     are the small typed conventions whose mismatch is silent and plausible
     (a valid-looking but flipped or colour-swapped frame), declared so a check
     can catch them and a lossless adapter can bridge them. `name` is how a policy
-    and a benchmark refer to the same view ("agentview", "wrist") without either
-    hardcoding the other's internal naming. `mount` is provenance — a deferred
-    tag, not a bridging axis — so it is not compared when matching conventions.
+    and a benchmark refer to the same view (`CameraName.AGENTVIEW`,
+    `CameraName.WRIST`) without either hardcoding the other's internal naming.
+    `mount` is provenance — a deferred tag, not a bridging axis — so it is not
+    compared when matching conventions.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -21,6 +21,7 @@ from manifold.core import (
 )
 from manifold.core.pipeline import StatefulStateMissing
 from manifold.core.state import DEFAULT_LANE, PipelineState
+from manifold.sensors import CameraName
 
 
 def _ee_action_space(rotation: RotationFormat, gripper: GripperFormat) -> EEActionSpace:
@@ -33,7 +34,7 @@ def test_apply_observation_empty_chain_is_a_noop() -> None:
     )
     observation = Observation(
         state={"ee_pose": np.arange(6, dtype=np.float32)},
-        sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
+        sensors={CameraName.AGENTVIEW: np.zeros((4, 4, 3), dtype=np.uint8)},
         instruction="pick up the cube",
     )
 
@@ -42,7 +43,9 @@ def test_apply_observation_empty_chain_is_a_noop() -> None:
     # values, instruction, and sensors are all preserved unchanged.
     assert np.array_equal(result.state["ee_pose"], observation.state["ee_pose"])
     assert result.instruction == "pick up the cube"
-    assert np.array_equal(result.sensors["agentview"], observation.sensors["agentview"])
+    assert np.array_equal(
+        result.sensors[CameraName.AGENTVIEW], observation.sensors[CameraName.AGENTVIEW]
+    )
 
 
 def test_apply_action_single_adapter_remaps_the_gripper() -> None:
@@ -104,23 +107,23 @@ def test_rotate180_cameras_flips_named_cameras_and_passes_through_the_rest() -> 
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="agentview", shape=(2, 2, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(2, 2, 3)),),
     )
     agentview = np.array([[[1, 0, 0], [2, 0, 0]], [[3, 0, 0], [4, 0, 0]]], dtype=np.uint8)
     extra = np.array([[[9, 9, 9]]], dtype=np.uint8)
     observation = Observation(
         state={"ee_pose": np.arange(6, dtype=np.float32)},
-        sensors={"agentview": agentview, "extra": extra},
+        sensors={CameraName.AGENTVIEW: agentview, "extra": extra},
         instruction="pick up the cube",
     )
 
-    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=(CameraName.AGENTVIEW,))])
     result = pipeline.apply_observation(observation, source=source)
 
     # 180-degree rotation: [[1,2],[3,4]] -> [[4,3],[2,1]] on the channel-0 plane.
-    assert np.array_equal(result.sensors["agentview"][..., 0], [[4, 3], [2, 1]])
-    assert result.sensors["agentview"].dtype == np.uint8
-    assert result.sensors["agentview"].flags["C_CONTIGUOUS"]
+    assert np.array_equal(result.sensors[CameraName.AGENTVIEW][..., 0], [[4, 3], [2, 1]])
+    assert result.sensors[CameraName.AGENTVIEW].dtype == np.uint8
+    assert result.sensors[CameraName.AGENTVIEW].flags["C_CONTIGUOUS"]
     # The unnamed sensor, state, and instruction are untouched.
     assert np.array_equal(result.sensors["extra"], extra)
     assert np.array_equal(result.state["ee_pose"], observation.state["ee_pose"])
@@ -132,18 +135,18 @@ def test_rotate180_cameras_is_self_inverse() -> None:
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="wrist", shape=(2, 3, 3)),),
+        cameras=(Camera(name=CameraName.WRIST, shape=(2, 3, 3)),),
     )
     frame = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
-    observation = Observation(sensors={"wrist": frame})
+    observation = Observation(sensors={CameraName.WRIST: frame})
 
-    adapter = Rotate180Cameras(cameras=("wrist",))
+    adapter = Rotate180Cameras(cameras=(CameraName.WRIST,))
     once = adapter.adapt(observation, source=source)
     twice = adapter.adapt(once, source=source)
 
     # Applying the rotation twice returns the original frame.
-    assert not np.array_equal(once.sensors["wrist"], frame)
-    assert np.array_equal(twice.sensors["wrist"], frame)
+    assert not np.array_equal(once.sensors[CameraName.WRIST], frame)
+    assert np.array_equal(twice.sensors[CameraName.WRIST], frame)
 
 
 def test_rotate180_cameras_skips_an_absent_camera() -> None:
@@ -151,17 +154,17 @@ def test_rotate180_cameras_skips_an_absent_camera() -> None:
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="agentview", shape=(2, 2, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(2, 2, 3)),),
     )
     agentview = np.arange(2 * 2 * 3, dtype=np.uint8).reshape(2, 2, 3)
-    observation = Observation(sensors={"agentview": agentview})
+    observation = Observation(sensors={CameraName.AGENTVIEW: agentview})
 
-    # "wrist" is named but absent; it must be skipped rather than crash.
-    adapter = Rotate180Cameras(cameras=("agentview", "wrist"))
+    # CameraName.WRIST is named but absent; it must be skipped rather than crash.
+    adapter = Rotate180Cameras(cameras=(CameraName.AGENTVIEW, CameraName.WRIST))
     result = adapter.adapt(observation, source=source)
 
-    assert "wrist" not in result.sensors
-    assert np.array_equal(result.sensors["agentview"], agentview[::-1, ::-1])
+    assert CameraName.WRIST not in result.sensors
+    assert np.array_equal(result.sensors[CameraName.AGENTVIEW], agentview[::-1, ::-1])
 
 
 def test_apply_action_threads_produce_between_two_adapters() -> None:
@@ -187,7 +190,7 @@ def test_apply_action_threads_produce_between_two_adapters() -> None:
 
 
 def _single_frame_spec(
-    name: str = "agentview", shape: tuple[int, ...] = (1, 1, 3)
+    name: str = CameraName.AGENTVIEW, shape: tuple[int, ...] = (1, 1, 3)
 ) -> ObservationSpace:
     return ObservationSpace(cameras=(Camera(name=name, shape=shape),))
 
@@ -202,16 +205,16 @@ def test_frame_history_stacks_frames_across_steps() -> None:
     # from the newest. Feed frames 0..6 (the buffer then holds exactly 0..6), so
     # the strided sample is frames 0, 2, 4, 6 (newest last).
     source = _single_frame_spec()
-    pipeline = Pipeline(observation=[StackFrameHistory(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[StackFrameHistory(cameras=(CameraName.AGENTVIEW,))])
     state = PipelineState()
 
     last = None
     for value in range(7):
-        observation = Observation(sensors={"agentview": _frame(value)})
+        observation = Observation(sensors={CameraName.AGENTVIEW: _frame(value)})
         last = pipeline.apply_observation(observation, source=source, state=state)
 
     assert last is not None
-    clip = last.sensors["agentview"]
+    clip = last.sensors[CameraName.AGENTVIEW]
     # A new leading time axis of length n_frames; the inference batch dim stays out.
     assert clip.shape == (4, 1, 1, 3)
     sampled = [int(clip[i, 0, 0, 0]) for i in range(4)]
@@ -222,25 +225,25 @@ def test_frame_history_first_frame_repeat_pads() -> None:
     # The very first frame of an episode has no history, so the buffer is
     # repeat-padded with it: every sampled offset is that one frame.
     source = _single_frame_spec()
-    adapter = StackFrameHistory(cameras=("agentview",))
+    adapter = StackFrameHistory(cameras=(CameraName.AGENTVIEW,))
     pipeline = Pipeline(observation=[adapter])
     state = PipelineState()
 
-    observation = Observation(sensors={"agentview": _frame(5)})
+    observation = Observation(sensors={CameraName.AGENTVIEW: _frame(5)})
     result = pipeline.apply_observation(observation, source=source, state=state)
 
-    clip = result.sensors["agentview"]
+    clip = result.sensors[CameraName.AGENTVIEW]
     assert clip.shape == (4, 1, 1, 3)
     assert np.all(clip == 5)
 
 
 def test_frame_history_produce_lengthens_camera_to_a_clip() -> None:
-    adapter = StackFrameHistory(cameras=("agentview",), n_frames=4)
+    adapter = StackFrameHistory(cameras=(CameraName.AGENTVIEW,), n_frames=4)
     source = _single_frame_spec(shape=(256, 256, 3))
 
     produced = adapter.produce(source)
 
-    camera = produced.camera("agentview")
+    camera = produced.camera(CameraName.AGENTVIEW)
     assert camera is not None
     assert camera.shape == (4, 256, 256, 3)
     # The edge fires at most once per camera: once rank-4, applies is False.
@@ -250,27 +253,27 @@ def test_frame_history_produce_lengthens_camera_to_a_clip() -> None:
 
 def test_frame_history_reset_lane_clears_so_next_first_frame_repeat_pads() -> None:
     source = _single_frame_spec()
-    pipeline = Pipeline(observation=[StackFrameHistory(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[StackFrameHistory(cameras=(CameraName.AGENTVIEW,))])
     state = PipelineState()
 
     # Build up some history within episode 1.
     for value in range(4):
-        observation = Observation(sensors={"agentview": _frame(value)})
+        observation = Observation(sensors={CameraName.AGENTVIEW: _frame(value)})
         pipeline.apply_observation(observation, source=source, state=state)
 
     # Episode boundary: reset clears the buffer for this lane.
     state.reset_lane(DEFAULT_LANE)
 
     # The first frame of episode 2 must repeat-pad afresh — no tail from episode 1.
-    observation = Observation(sensors={"agentview": _frame(9)})
+    observation = Observation(sensors={CameraName.AGENTVIEW: _frame(9)})
     result = pipeline.apply_observation(observation, source=source, state=state)
-    assert np.all(result.sensors["agentview"] == 9)
+    assert np.all(result.sensors[CameraName.AGENTVIEW] == 9)
 
 
 def test_stateful_adapter_without_state_raises() -> None:
     source = _single_frame_spec()
-    pipeline = Pipeline(observation=[StackFrameHistory(cameras=("agentview",))])
-    observation = Observation(sensors={"agentview": _frame(0)})
+    pipeline = Pipeline(observation=[StackFrameHistory(cameras=(CameraName.AGENTVIEW,))])
+    observation = Observation(sensors={CameraName.AGENTVIEW: _frame(0)})
 
     with pytest.raises(StatefulStateMissing):
         pipeline.apply_observation(observation, source=source)
@@ -282,14 +285,14 @@ def test_stateless_pipeline_still_works_with_no_state_arg() -> None:
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="agentview", shape=(2, 2, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(2, 2, 3)),),
     )
     observation = Observation(
         state={"ee_pose": np.arange(6, dtype=np.float32)},
-        sensors={"agentview": np.zeros((2, 2, 3), dtype=np.uint8)},
+        sensors={CameraName.AGENTVIEW: np.zeros((2, 2, 3), dtype=np.uint8)},
     )
-    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=(CameraName.AGENTVIEW,))])
 
     result = pipeline.apply_observation(observation, source=source)
 
-    assert result.sensors["agentview"].shape == (2, 2, 3)
+    assert result.sensors[CameraName.AGENTVIEW].shape == (2, 2, 3)

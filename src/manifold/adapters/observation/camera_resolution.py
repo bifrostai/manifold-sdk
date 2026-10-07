@@ -32,8 +32,8 @@ any cameras not named — passes through.
 Parameterized either by a mapping of camera name to target shape, or by a set of
 camera names plus one shared target `(H, W)`:
 
-    ResizeCameras(targets={"agentview": (224, 224, 3)})
-    ResizeCameras(cameras=("agentview", "wrist"), shape=(224, 224))
+    ResizeCameras(targets={CameraName.AGENTVIEW: (224, 224, 3)})
+    ResizeCameras(cameras=(CameraName.AGENTVIEW, CameraName.WRIST), shape=(224, 224))
 """
 
 from __future__ import annotations

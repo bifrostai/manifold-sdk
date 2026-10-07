@@ -9,6 +9,24 @@ unlike the embodiment and benchmark catalogs, which ship instances.)
 
 from __future__ import annotations
 
-from manifold.sensors.cameras import agentview, agentview_depth, wrist, wrist_depth
+from manifold.sensors.cameras import (
+    CameraName,
+    agentview,
+    agentview_depth,
+    agentview_left,
+    agentview_right,
+    over_shoulder_left,
+    wrist,
+    wrist_depth,
+)
 
-__all__ = ["agentview", "agentview_depth", "wrist", "wrist_depth"]
+__all__ = [
+    "CameraName",
+    "agentview",
+    "agentview_depth",
+    "agentview_left",
+    "agentview_right",
+    "over_shoulder_left",
+    "wrist",
+    "wrist_depth",
+]

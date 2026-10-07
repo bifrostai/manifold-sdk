@@ -44,6 +44,7 @@ from manifold.core import (
     RotationFormat,
     check_compatibility,
 )
+from manifold.sensors import CameraName
 
 
 def _ee() -> EEActionSpace:
@@ -68,19 +69,21 @@ def _benchmark(camera: Camera) -> Benchmark:
 
 def test_swap_channel_order_adapt_reverses_the_channel_axis() -> None:
     source = ObservationSpace(
-        cameras=(Camera(name="agentview", shape=(1, 1, 3), channel_order=ChannelOrder.BGR),)
+        cameras=(
+            Camera(name=CameraName.AGENTVIEW, shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
+        )
     )
     # One pixel with distinct channel values so the reversal is observable.
     frame = np.array([[[10, 20, 30]]], dtype=np.uint8)
     extra = np.array([[[1, 2, 3]]], dtype=np.uint8)
-    observation = Observation(sensors={"agentview": frame, "extra": extra})
+    observation = Observation(sensors={CameraName.AGENTVIEW: frame, "extra": extra})
 
-    adapter = SwapChannelOrder(target=ChannelOrder.RGB, cameras=("agentview",))
+    adapter = SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW,))
     result = adapter.adapt(observation, source=source)
 
-    assert np.array_equal(result.sensors["agentview"], [[[30, 20, 10]]])
-    assert result.sensors["agentview"].dtype == np.uint8
-    assert result.sensors["agentview"].flags["C_CONTIGUOUS"]
+    assert np.array_equal(result.sensors[CameraName.AGENTVIEW], [[[30, 20, 10]]])
+    assert result.sensors[CameraName.AGENTVIEW].dtype == np.uint8
+    assert result.sensors[CameraName.AGENTVIEW].flags["C_CONTIGUOUS"]
     # The unnamed sensor passes through untouched.
     assert np.array_equal(result.sensors["extra"], extra)
 
@@ -88,17 +91,17 @@ def test_swap_channel_order_adapt_reverses_the_channel_axis() -> None:
 def test_swap_channel_order_produce_flips_the_declared_channel_order() -> None:
     source = ObservationSpace(
         cameras=(
-            Camera(name="agentview", shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
+            Camera(name=CameraName.AGENTVIEW, shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
             Camera(name="extra", shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
         )
     )
-    adapter = SwapChannelOrder(target=ChannelOrder.RGB, cameras=("agentview",))
+    adapter = SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW,))
 
     assert adapter.applies(source)
     produced = adapter.produce(source)
 
     assert type(produced) is ObservationSpace
-    agentview = produced.camera("agentview")
+    agentview = produced.camera(CameraName.AGENTVIEW)
     assert agentview is not None and agentview.channel_order is ChannelOrder.RGB
     # The unnamed camera is untouched.
     extra = produced.camera("extra")
@@ -109,14 +112,18 @@ def test_swap_channel_order_produce_flips_the_declared_channel_order() -> None:
     "adapter,source",
     [
         (
-            SwapChannelOrder(target=ChannelOrder.RGB, cameras=("agentview",)),
+            SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW,)),
             ObservationSpace(
-                cameras=(Camera(name="agentview", shape=(1, 1, 3), channel_order=ChannelOrder.BGR),)
+                cameras=(
+                    Camera(
+                        name=CameraName.AGENTVIEW, shape=(1, 1, 3), channel_order=ChannelOrder.BGR
+                    ),
+                )
             ),
         ),
         (
-            ResizeCameras(cameras=("agentview",), shape=(4, 4)),
-            ObservationSpace(cameras=(Camera(name="agentview", shape=(8, 8, 3)),)),
+            ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(4, 4)),
+            ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3)),)),
         ),
     ],
     ids=["SwapChannelOrder", "ResizeCameras"],
@@ -132,11 +139,13 @@ def test_swap_channel_order_bridges_an_rgb_vs_bgr_mismatch() -> None:
     # channel-order convention does not match (INCOMPATIBLE); with it the chain
     # type-checks and the pairing is COMPATIBLE_VIA_PIPELINE, losslessly.
     benchmark = _benchmark(
-        Camera(name="agentview", shape=(8, 8, 3), channel_order=ChannelOrder.BGR)
+        Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3), channel_order=ChannelOrder.BGR)
     )
     policy = PolicySignature(
         action_space=_ee(),
-        cameras=[Camera(name="agentview", shape=(8, 8, 3), channel_order=ChannelOrder.RGB)],
+        cameras=[
+            Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3), channel_order=ChannelOrder.RGB)
+        ],
         instruction=False,
     )
 
@@ -144,7 +153,7 @@ def test_swap_channel_order_bridges_an_rgb_vs_bgr_mismatch() -> None:
     assert without.status is Compatibility.INCOMPATIBLE
 
     pipeline = Pipeline(
-        observation=[SwapChannelOrder(target=ChannelOrder.RGB, cameras=("agentview",))]
+        observation=[SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW,))]
     )
     via = check_compatibility(policy, benchmark, pipeline)
     assert via.status is Compatibility.COMPATIBLE_VIA_PIPELINE
@@ -155,26 +164,26 @@ def test_swap_channel_order_bridges_an_rgb_vs_bgr_mismatch() -> None:
 
 
 def test_resize_cameras_adapt_produces_the_target_hw() -> None:
-    source = ObservationSpace(cameras=(Camera(name="agentview", shape=(8, 8, 3)),))
+    source = ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3)),))
     frame = np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3)
-    observation = Observation(sensors={"agentview": frame})
+    observation = Observation(sensors={CameraName.AGENTVIEW: frame})
 
-    adapter = ResizeCameras(cameras=("agentview",), shape=(4, 4))
+    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(4, 4))
     result = adapter.adapt(observation, source=source)
 
     # Right shape (H, W preserved channel count), right dtype.
-    assert result.sensors["agentview"].shape == (4, 4, 3)
-    assert result.sensors["agentview"].dtype == np.uint8
+    assert result.sensors[CameraName.AGENTVIEW].shape == (4, 4, 3)
+    assert result.sensors[CameraName.AGENTVIEW].dtype == np.uint8
 
 
 def test_resize_cameras_produce_updates_the_spec_shape() -> None:
-    source = ObservationSpace(cameras=(Camera(name="agentview", shape=(8, 8, 3)),))
-    adapter = ResizeCameras(targets={"agentview": (224, 224, 3)})
+    source = ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3)),))
+    adapter = ResizeCameras(targets={CameraName.AGENTVIEW: (224, 224, 3)})
 
     assert adapter.applies(source)
     produced = adapter.produce(source)
 
-    camera = produced.camera("agentview")
+    camera = produced.camera(CameraName.AGENTVIEW)
     assert camera is not None
     assert camera.shape == (224, 224, 3)
 
@@ -182,13 +191,13 @@ def test_resize_cameras_produce_updates_the_spec_shape() -> None:
 def test_resize_cameras_flags_lossy() -> None:
     # Resolution is the lossy axis: a resize is never a hard incompatibility but
     # flags the report as lossy (report.lossless is False).
-    benchmark = _benchmark(Camera(name="agentview", shape=(8, 8, 3)))
+    benchmark = _benchmark(Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3)))
     policy = PolicySignature(
         action_space=_ee(),
-        cameras=[Camera(name="agentview", shape=(4, 4, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(4, 4, 3))],
         instruction=False,
     )
-    pipeline = Pipeline(observation=[ResizeCameras(cameras=("agentview",), shape=(4, 4))])
+    pipeline = Pipeline(observation=[ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(4, 4))])
 
     report = check_compatibility(policy, benchmark, pipeline)
     assert report.status is Compatibility.COMPATIBLE_VIA_PIPELINE
@@ -198,27 +207,32 @@ def test_resize_cameras_flags_lossy() -> None:
 def test_resize_cameras_resizes_the_image_plane_of_a_rank4_clip() -> None:
     # A clip camera (T, H, W, C) — e.g. produced by StackFrameHistory — must resize
     # its trailing H, W and leave the leading time axis and the channel axis intact.
-    source = ObservationSpace(cameras=(Camera(name="agentview", shape=(4, 8, 8, 3)),))
+    source = ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=(4, 8, 8, 3)),))
     clip = np.arange(4 * 8 * 8 * 3, dtype=np.uint8).reshape(4, 8, 8, 3)
-    observation = Observation(sensors={"agentview": clip})
+    observation = Observation(sensors={CameraName.AGENTVIEW: clip})
 
-    adapter = ResizeCameras(cameras=("agentview",), shape=(4, 4))
+    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(4, 4))
 
     # produce rewrites only H, W: (4, 8, 8, 3) -> (4, 4, 4, 3).
     produced = adapter.produce(source)
-    camera = produced.camera("agentview")
+    camera = produced.camera(CameraName.AGENTVIEW)
     assert camera is not None and camera.shape == (4, 4, 4, 3)
 
     # adapt resizes the image plane, preserving the time and channel axes.
     result = adapter.adapt(observation, source=source)
-    assert result.sensors["agentview"].shape == (4, 4, 4, 3)
-    assert result.sensors["agentview"].dtype == np.uint8
+    assert result.sensors[CameraName.AGENTVIEW].shape == (4, 4, 4, 3)
+    assert result.sensors[CameraName.AGENTVIEW].dtype == np.uint8
 
 
 def _depth_space(shape: tuple[int, ...]) -> ObservationSpace:
     return ObservationSpace(
         cameras=(
-            Camera(name="agentview_depth", shape=shape, dtype="float32", modality=Modality.DEPTH),
+            Camera(
+                name=CameraName.AGENTVIEW_DEPTH,
+                shape=shape,
+                dtype="float32",
+                modality=Modality.DEPTH,
+            ),
         )
     )
 
@@ -237,10 +251,12 @@ def test_resize_cameras_resamples_a_depth_frame_without_interpolating() -> None:
         ],
         dtype=np.float32,
     ).reshape(4, 4, 1)
-    observation = Observation(sensors={"agentview_depth": depth})
+    observation = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
 
-    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(2, 2))
-    out = adapter.adapt(observation, source=_depth_space((4, 4, 1))).sensors["agentview_depth"]
+    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW_DEPTH,), shape=(2, 2))
+    out = adapter.adapt(observation, source=_depth_space((4, 4, 1))).sensors[
+        CameraName.AGENTVIEW_DEPTH
+    ]
 
     assert out.shape == (2, 2, 1)
     assert out.dtype == np.float32
@@ -255,10 +271,12 @@ def test_resize_cameras_pads_a_depth_frame_with_inf() -> None:
     # Aspect-preserving pad on depth fills with `inf`, not zero: a zero pad is a
     # surface at the lens, which is a distance, where `inf` says there is no reading.
     depth = np.full((4, 2, 1), 2.0, dtype=np.float32)
-    observation = Observation(sensors={"agentview_depth": depth})
+    observation = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
 
-    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(4, 4), pad=True)
-    out = adapter.adapt(observation, source=_depth_space((4, 2, 1))).sensors["agentview_depth"]
+    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW_DEPTH,), shape=(4, 4), pad=True)
+    out = adapter.adapt(observation, source=_depth_space((4, 2, 1))).sensors[
+        CameraName.AGENTVIEW_DEPTH
+    ]
 
     assert out.shape == (4, 4, 1)
     assert np.isinf(out[:, 0, 0]).all()
@@ -353,12 +371,12 @@ def test_observation_tap_returns_identical_data_and_calls_the_sink() -> None:
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="agentview", shape=(2, 2, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(2, 2, 3)),),
     )
     state = np.arange(6, dtype=np.float32)
     frame = np.arange(2 * 2 * 3, dtype=np.uint8).reshape(2, 2, 3)
     observation = Observation(
-        state={"ee_pose": state}, sensors={"agentview": frame}, instruction="pick the cube"
+        state={"ee_pose": state}, sensors={CameraName.AGENTVIEW: frame}, instruction="pick the cube"
     )
     readings = []
 
@@ -368,7 +386,7 @@ def test_observation_tap_returns_identical_data_and_calls_the_sink() -> None:
     # Byte-identical data passed through.
     assert result is observation
     assert np.array_equal(result.state["ee_pose"], state)
-    assert np.array_equal(result.sensors["agentview"], frame)
+    assert np.array_equal(result.sensors[CameraName.AGENTVIEW], frame)
     # The sink was called with a per-field summary.
     assert len(readings) == 1
     assert readings[0]["label"] == "seam"
@@ -397,11 +415,11 @@ def test_a_tap_is_transparent_in_a_pipeline() -> None:
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
         ),
-        cameras=(Camera(name="agentview", shape=(2, 2, 3)),),
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(2, 2, 3)),),
     )
     observation = Observation(
         state={"ee_pose": np.arange(6, dtype=np.float32)},
-        sensors={"agentview": np.arange(12, dtype=np.uint8).reshape(2, 2, 3)},
+        sensors={CameraName.AGENTVIEW: np.arange(12, dtype=np.uint8).reshape(2, 2, 3)},
     )
     action_source = _ee()
     action = Action.from_array([0.1, -0.2, 0.3, 0.4, -0.5, 0.6, 1.0])
@@ -412,7 +430,9 @@ def test_a_tap_is_transparent_in_a_pipeline() -> None:
     plain_obs = plain.apply_observation(observation, source=obs_source)
     tapped_obs = tapped.apply_observation(observation, source=obs_source)
     assert np.array_equal(plain_obs.state["ee_pose"], tapped_obs.state["ee_pose"])
-    assert np.array_equal(plain_obs.sensors["agentview"], tapped_obs.sensors["agentview"])
+    assert np.array_equal(
+        plain_obs.sensors[CameraName.AGENTVIEW], tapped_obs.sensors[CameraName.AGENTVIEW]
+    )
 
     plain_act = plain.apply_action(action, source=action_source)
     tapped_act = tapped.apply_action(action, source=action_source)
@@ -424,7 +444,7 @@ def test_a_tap_is_transparent_in_a_pipeline() -> None:
 
 def _calibrated(shape: tuple[int, ...], fovy: float = 45.0) -> Camera:
     return Camera(
-        name="agentview",
+        name=CameraName.AGENTVIEW,
         shape=shape,
         calibration=CameraCalibration(
             intrinsics=CameraIntrinsics.from_fov(
@@ -440,9 +460,9 @@ def test_resize_scales_the_intrinsics_with_the_image() -> None:
     # Resampling moves the pixel grid the pinhole is measured in, so all four values
     # scale. Leaving them behind would keep claiming the old field of view (ADR 0008).
     source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
-    produced = ResizeCameras(cameras=("agentview",), shape=(128, 128)).produce(source)
+    produced = ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(128, 128)).produce(source)
 
-    camera = produced.camera("agentview")
+    camera = produced.camera(CameraName.AGENTVIEW)
     assert camera is not None and camera.calibration is not None
     k = camera.calibration.intrinsics
     assert k.fx == pytest.approx(309.019336 / 2, rel=1e-6)
@@ -453,9 +473,11 @@ def test_padded_resize_shifts_the_principal_point_by_the_centring_offset() -> No
     # Aspect-preserving pad scales by one factor and then centres, so the principal
     # point moves by the pad rather than staying at the middle of the old image.
     source = ObservationSpace(cameras=(_calibrated((128, 64, 3)),))
-    produced = ResizeCameras(cameras=("agentview",), shape=(128, 128), pad=True).produce(source)
+    produced = ResizeCameras(cameras=(CameraName.AGENTVIEW,), shape=(128, 128), pad=True).produce(
+        source
+    )
 
-    camera = produced.camera("agentview")
+    camera = produced.camera(CameraName.AGENTVIEW)
     assert camera is not None and camera.calibration is not None
     # scale = min(128/128, 128/64) = 1.0; the 64-wide image is centred in 128 -> +32.
     assert camera.calibration.intrinsics.cx == pytest.approx(32.0 + 32.0)
@@ -467,9 +489,9 @@ def test_rotate180_leaves_the_calibration_alone() -> None:
     # the intrinsics and the pose pass through untouched and only `orientation` advances.
     # "Correcting" either one would put the scene underground (ADR 0008).
     source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
-    adapter = Rotate180Cameras(cameras=("agentview",))
+    adapter = Rotate180Cameras(cameras=(CameraName.AGENTVIEW,))
 
-    produced = adapter.produce(source).camera("agentview")
+    produced = adapter.produce(source).camera(CameraName.AGENTVIEW)
     assert produced is not None and produced.calibration is not None
     assert produced.orientation is CameraOrientation.ROTATED_180
     assert produced.calibration == _calibrated((256, 256, 3)).calibration
@@ -478,12 +500,12 @@ def test_rotate180_leaves_the_calibration_alone() -> None:
     pose[:3, 3] = (1.0, 2.0, 3.0)
     result = adapter.adapt(
         Observation(
-            sensors={"agentview": np.zeros((256, 256, 3), dtype=np.uint8)},
-            extrinsics={"agentview": pose},
+            sensors={CameraName.AGENTVIEW: np.zeros((256, 256, 3), dtype=np.uint8)},
+            extrinsics={CameraName.AGENTVIEW: pose},
         ),
         source=source,
     )
-    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+    np.testing.assert_array_equal(result.extrinsics[CameraName.AGENTVIEW], pose)
 
 
 def test_a_pose_passes_through_an_adapter_that_does_not_touch_geometry() -> None:
@@ -491,14 +513,14 @@ def test_a_pose_passes_through_an_adapter_that_does_not_touch_geometry() -> None
     # observation must not drop it. Channel order is not geometry, so it passes through.
     source = ObservationSpace(cameras=(_calibrated((4, 4, 3)),))
     pose = np.eye(4)
-    result = SwapChannelOrder(ChannelOrder.BGR, cameras=("agentview",)).adapt(
+    result = SwapChannelOrder(ChannelOrder.BGR, cameras=(CameraName.AGENTVIEW,)).adapt(
         Observation(
-            sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
-            extrinsics={"agentview": pose},
+            sensors={CameraName.AGENTVIEW: np.zeros((4, 4, 3), dtype=np.uint8)},
+            extrinsics={CameraName.AGENTVIEW: pose},
         ),
         source=source,
     )
-    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+    np.testing.assert_array_equal(result.extrinsics[CameraName.AGENTVIEW], pose)
 
 
 def test_a_vertical_flip_keeps_the_calibration() -> None:
@@ -506,10 +528,10 @@ def test_a_vertical_flip_keeps_the_calibration() -> None:
     # intrinsics assume row 0 is the top, and this is the adapter that makes that true.
     # So it carries the calibration rather than dropping it.
     source = ObservationSpace(cameras=(_calibrated((256, 256, 3)),))
-    adapter = FlipVerticalCameras(cameras=("agentview",))
+    adapter = FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,))
 
     assert adapter.applies(source) is True
-    produced = adapter.produce(source).camera("agentview")
+    produced = adapter.produce(source).camera(CameraName.AGENTVIEW)
     assert produced is not None
     assert produced.orientation is CameraOrientation.FLIPPED_VERTICAL
     assert produced.calibration == _calibrated((256, 256, 3)).calibration
@@ -518,14 +540,14 @@ def test_a_vertical_flip_keeps_the_calibration() -> None:
 def test_a_vertical_flip_keeps_the_pose_too() -> None:
     source = ObservationSpace(cameras=(_calibrated((4, 4, 3)),))
     pose = np.eye(4)
-    result = FlipVerticalCameras(cameras=("agentview",)).adapt(
+    result = FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)).adapt(
         Observation(
-            sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
-            extrinsics={"agentview": pose},
+            sensors={CameraName.AGENTVIEW: np.zeros((4, 4, 3), dtype=np.uint8)},
+            extrinsics={CameraName.AGENTVIEW: pose},
         ),
         source=source,
     )
-    np.testing.assert_array_equal(result.extrinsics["agentview"], pose)
+    np.testing.assert_array_equal(result.extrinsics[CameraName.AGENTVIEW], pose)
 
 
 # --- PART C: camera orientation as a closed vocabulary ------------------------
@@ -540,16 +562,16 @@ def _oriented(
     orientation: CameraOrientation, shape: tuple[int, ...] = (2, 3, 3)
 ) -> ObservationSpace:
     return ObservationSpace(
-        cameras=(Camera(name="agentview", shape=shape, orientation=orientation),)
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=shape, orientation=orientation),)
     )
 
 
 def _frame(observation: Observation) -> np.ndarray:
-    return np.asarray(observation.sensors["agentview"])
+    return np.asarray(observation.sensors[CameraName.AGENTVIEW])
 
 
 def _observation(frame: np.ndarray) -> Observation:
-    return Observation(state={}, sensors={"agentview": frame}, instruction=None)
+    return Observation(state={}, sensors={CameraName.AGENTVIEW: frame}, instruction=None)
 
 
 def test_the_orientations_are_closed_under_composition() -> None:
@@ -568,19 +590,19 @@ def test_the_orientations_are_closed_under_composition() -> None:
     "adapter,source,target",
     [
         # The two edges that existed before this vocabulary closed: unchanged.
-        (Rotate180Cameras(cameras=("agentview",)), UP, R180),
-        (FlipVerticalCameras(cameras=("agentview",)), UP, FV),
+        (Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)), UP, R180),
+        (FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)), UP, FV),
         # ... and the ones only composition can express.
-        (Rotate180Cameras(cameras=("agentview",)), FV, FH),
-        (Rotate180Cameras(cameras=("agentview",)), R180, UP),
-        (Rotate180Cameras(cameras=("agentview",)), FH, FV),
-        (FlipVerticalCameras(cameras=("agentview",)), FV, UP),
-        (FlipVerticalCameras(cameras=("agentview",)), R180, FH),
-        (FlipVerticalCameras(cameras=("agentview",)), FH, R180),
-        (FlipHorizontalCameras(cameras=("agentview",)), UP, FH),
-        (FlipHorizontalCameras(cameras=("agentview",)), FV, R180),
-        (FlipHorizontalCameras(cameras=("agentview",)), R180, FV),
-        (FlipHorizontalCameras(cameras=("agentview",)), FH, UP),
+        (Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)), FV, FH),
+        (Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)), R180, UP),
+        (Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)), FH, FV),
+        (FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)), FV, UP),
+        (FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)), R180, FH),
+        (FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)), FH, R180),
+        (FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)), UP, FH),
+        (FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)), FV, R180),
+        (FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)), R180, FV),
+        (FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)), FH, UP),
     ],
 )
 def test_an_orientation_edge_composes_onto_whatever_the_source_declares(
@@ -591,21 +613,21 @@ def test_an_orientation_edge_composes_onto_whatever_the_source_declares(
     # the regression guard that generalising did not move them.
     space = _oriented(source)
     assert adapter.applies(space)
-    assert adapter.produce(space).camera("agentview").orientation is target
+    assert adapter.produce(space).camera(CameraName.AGENTVIEW).orientation is target
 
 
 def test_a_flip_bridges_a_benchmark_that_publishes_bottom_up_frames() -> None:
     # The case the old `is UPRIGHT` precondition could not express, and the reason
     # this change exists: a benchmark that ships FLIPPED_VERTICAL frames against a
     # policy trained on upright ones. Before, no edge left FLIPPED_VERTICAL at all.
-    benchmark = _benchmark(Camera(name="agentview", shape=(2, 3, 3), orientation=FV))
+    benchmark = _benchmark(Camera(name=CameraName.AGENTVIEW, shape=(2, 3, 3), orientation=FV))
     signature = PolicySignature(
         action_space=_ee(),
         proprioception=benchmark.embodiment.proprioception,
-        cameras=[Camera(name="agentview", shape=(2, 3, 3), orientation=UP)],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(2, 3, 3), orientation=UP)],
         instruction=False,
     )
-    pipeline = Pipeline(observation=[FlipVerticalCameras(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,))])
     report = check_compatibility(signature, benchmark, pipeline)
     assert report.status is Compatibility.COMPATIBLE_VIA_PIPELINE
     assert report.lossless
@@ -617,13 +639,17 @@ def test_each_flip_reverses_only_its_own_axis() -> None:
     frame = np.arange(2 * 3 * 3, dtype=np.uint8).reshape(2, 3, 3)
     source = _oriented(UP)
     vertical = _frame(
-        FlipVerticalCameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+        FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)).adapt(
+            _observation(frame), source=source
+        )
     )
     horizontal = _frame(
-        FlipHorizontalCameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+        FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)).adapt(
+            _observation(frame), source=source
+        )
     )
     rotated = _frame(
-        Rotate180Cameras(cameras=("agentview",)).adapt(_observation(frame), source=source)
+        Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)).adapt(_observation(frame), source=source)
     )
     np.testing.assert_array_equal(vertical, frame[::-1, :, :])
     np.testing.assert_array_equal(horizontal, frame[:, ::-1, :])
@@ -635,9 +661,9 @@ def test_each_flip_reverses_only_its_own_axis() -> None:
 @pytest.mark.parametrize(
     "adapter",
     [
-        FlipVerticalCameras(cameras=("agentview",)),
-        FlipHorizontalCameras(cameras=("agentview",)),
-        Rotate180Cameras(cameras=("agentview",)),
+        FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)),
+        FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)),
+        Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)),
     ],
     ids=["FlipVertical", "FlipHorizontal", "Rotate180"],
 )
@@ -649,7 +675,7 @@ def test_a_flip_carries_through_every_field_it_does_not_touch(adapter) -> None:
     # adapter at once, and this asserts the property rather than today's field list.
     observation = Observation(
         state={"ee_pose": np.zeros(7, dtype=np.float32)},
-        sensors={"agentview": np.zeros((2, 3, 3), dtype=np.uint8)},
+        sensors={CameraName.AGENTVIEW: np.zeros((2, 3, 3), dtype=np.uint8)},
         instruction="pick up the mug",
     )
     result = adapter.adapt(observation, source=_oriented(UP))
@@ -662,9 +688,9 @@ def test_a_flip_carries_through_every_field_it_does_not_touch(adapter) -> None:
 @pytest.mark.parametrize(
     "adapter,expected",
     [
-        (FlipVerticalCameras(cameras=("agentview",)), lambda a: a[:, ::-1, :, :]),
-        (FlipHorizontalCameras(cameras=("agentview",)), lambda a: a[:, :, ::-1, :]),
-        (Rotate180Cameras(cameras=("agentview",)), lambda a: a[:, ::-1, ::-1, :]),
+        (FlipVerticalCameras(cameras=(CameraName.AGENTVIEW,)), lambda a: a[:, ::-1, :, :]),
+        (FlipHorizontalCameras(cameras=(CameraName.AGENTVIEW,)), lambda a: a[:, :, ::-1, :]),
+        (Rotate180Cameras(cameras=(CameraName.AGENTVIEW,)), lambda a: a[:, ::-1, ::-1, :]),
     ],
     ids=["FlipVertical", "FlipHorizontal", "Rotate180"],
 )

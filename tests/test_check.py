@@ -33,6 +33,7 @@ from manifold.core import (
     check_compatibility,
 )
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
+from manifold.sensors import CameraName
 
 
 def _ee(gripper: GripperFormat = GripperFormat.SIGNED) -> EEActionSpace:
@@ -50,7 +51,7 @@ def _benchmark(*, instruction: bool = True) -> Benchmark:
     return Benchmark(
         name="suite",
         embodiment=embodiment,
-        sensors=[Camera(name="agentview", shape=(224, 224, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(224, 224, 3))],
         instruction=instruction,
     )
 
@@ -61,7 +62,9 @@ def _agentview(
     mount: Mount = Mount.SCENE,
 ) -> Camera:
     """The benchmark's agentview camera, optionally with overridden conventions."""
-    return Camera(name="agentview", shape=(224, 224, 3), orientation=orientation, mount=mount)
+    return Camera(
+        name=CameraName.AGENTVIEW, shape=(224, 224, 3), orientation=orientation, mount=mount
+    )
 
 
 def test_native_pairing_is_compatible() -> None:
@@ -100,12 +103,14 @@ def test_action_bridged_by_a_pipeline_is_compatible_via_pipeline() -> None:
 def test_a_required_camera_the_benchmark_lacks_is_incompatible() -> None:
     policy = PolicySignature(
         action_space=_ee(),
-        cameras=[Camera(name="wrist", shape=(224, 224, 3))],
+        cameras=[Camera(name=CameraName.WRIST, shape=(224, 224, 3))],
         instruction=False,
     )
     report = check_compatibility(policy, _benchmark())
     assert not report.ok
-    assert any("wrist" in reason and "not published" in reason for reason in report.reasons)
+    assert any(
+        CameraName.WRIST in reason and "not published" in reason for reason in report.reasons
+    )
 
 
 def test_wanting_an_absent_instruction_is_incompatible() -> None:
@@ -154,7 +159,9 @@ def test_camera_orientation_mismatch_without_a_flip_is_incompatible() -> None:
     )
     report = check_compatibility(policy, _benchmark())
     assert report.status is Compatibility.INCOMPATIBLE
-    assert any("agentview" in reason and "conventions" in reason for reason in report.reasons)
+    assert any(
+        CameraName.AGENTVIEW in reason and "conventions" in reason for reason in report.reasons
+    )
 
 
 def test_camera_orientation_bridged_by_rotate180_is_compatible_via_pipeline() -> None:
@@ -166,7 +173,7 @@ def test_camera_orientation_bridged_by_rotate180_is_compatible_via_pipeline() ->
         cameras=[_agentview(orientation=CameraOrientation.ROTATED_180)],
         instruction=False,
     )
-    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[Rotate180Cameras(cameras=(CameraName.AGENTVIEW,))])
     report = check_compatibility(policy, _benchmark(), pipeline)
     assert report.status is Compatibility.COMPATIBLE_VIA_PIPELINE
     assert report.lossless is True
@@ -177,12 +184,14 @@ def test_camera_shape_mismatch_surfaces_via_first_unmet() -> None:
     # with a clear, camera-named reason.
     policy = PolicySignature(
         action_space=_ee(),
-        cameras=[Camera(name="agentview", shape=(256, 256, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
         instruction=False,
     )
     report = check_compatibility(policy, _benchmark())
     assert report.status is Compatibility.INCOMPATIBLE
-    assert any("agentview" in reason and "conventions" in reason for reason in report.reasons)
+    assert any(
+        CameraName.AGENTVIEW in reason and "conventions" in reason for reason in report.reasons
+    )
 
 
 def test_first_unmet_ignores_mount_provenance() -> None:
@@ -237,20 +246,20 @@ def test_frame_history_is_the_spec_edge_for_a_clip_consuming_policy() -> None:
                 ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
             ),
         ),
-        sensors=[Camera(name="agentview", shape=(256, 256, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
         instruction=True,
     )
     policy = PolicySignature(
         action_space=_ee(),
         proprioception=benchmark.embodiment.proprioception,
-        cameras=[Camera(name="agentview", shape=(4, 256, 256, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(4, 256, 256, 3))],
         instruction=True,
     )
 
     without = check_compatibility(policy, benchmark)
     assert without.status is Compatibility.INCOMPATIBLE
 
-    pipeline = Pipeline(observation=[StackFrameHistory(cameras=("agentview",))])
+    pipeline = Pipeline(observation=[StackFrameHistory(cameras=(CameraName.AGENTVIEW,))])
     via = check_compatibility(policy, benchmark, pipeline)
     assert via.status is Compatibility.COMPATIBLE_VIA_PIPELINE
 
@@ -270,7 +279,7 @@ def _robocasa_benchmark() -> Benchmark:
     return Benchmark(
         name="robocasa",
         embodiment=PANDA_OMRON_WHOLE_BODY,
-        sensors=[Camera(name="agentview_left", shape=(224, 224, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW_LEFT, shape=(224, 224, 3))],
         instruction=True,
     )
 
@@ -282,7 +291,7 @@ def test_base_pin_widen_bridges_a_7d_arm_action_to_the_12d_whole_body_space() ->
     policy = PolicySignature(
         action_space=_panda_omron_arm(),
         proprioception=PANDA_OMRON_WHOLE_BODY.proprioception,
-        cameras=[Camera(name="agentview_left", shape=(224, 224, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW_LEFT, shape=(224, 224, 3))],
         instruction=True,
     )
     pipeline = Pipeline(action=[BasePinWiden(width=12)])
@@ -364,7 +373,11 @@ def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
     # which is what makes publishing depth additive rather than a new benchmark
     # identity (ADR 0007).
     policy = _libero_policy(
-        cameras=[Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)]
+        cameras=[
+            Camera(
+                name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
+            )
+        ]
     )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
@@ -372,9 +385,11 @@ def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
 def test_an_rgbd_policy_pairs_with_libero() -> None:
     policy = _libero_policy(
         cameras=[
-            Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION),
             Camera(
-                name="agentview_depth",
+                name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
+            ),
+            Camera(
+                name=CameraName.AGENTVIEW_DEPTH,
                 shape=(256, 256, 1),
                 dtype="float32",
                 modality=Modality.DEPTH,
@@ -392,12 +407,19 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
     # array a name check cannot reject.
     policy = _libero_policy(
         cameras=[
-            Camera(name="agentview_depth", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)
+            Camera(
+                name=CameraName.AGENTVIEW_DEPTH,
+                shape=(256, 256, 3),
+                orientation=_ROBOSUITE_ORIENTATION,
+            )
         ]
     )
     report = check_compatibility(policy, LIBERO)
     assert report.status is Compatibility.INCOMPATIBLE
-    assert any("agentview_depth" in reason and "conventions" in reason for reason in report.reasons)
+    assert any(
+        CameraName.AGENTVIEW_DEPTH in reason and "conventions" in reason
+        for reason in report.reasons
+    )
 
 
 def _calibration(
@@ -414,7 +436,11 @@ def test_a_policy_wanting_no_calibration_pairs_with_a_benchmark_publishing_it() 
     # Asymmetric, like every other channel comparison: LIBERO declares calibration on
     # all four cameras and a policy that declares none is unaffected (ADR 0008).
     policy = _libero_policy(
-        cameras=[Camera(name="agentview", shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION)]
+        cameras=[
+            Camera(
+                name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
+            )
+        ]
     )
     assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
 
@@ -423,7 +449,7 @@ def test_a_policy_consuming_libero_calibration_pairs() -> None:
     policy = _libero_policy(
         cameras=[
             Camera(
-                name="agentview",
+                name=CameraName.AGENTVIEW,
                 shape=(256, 256, 3),
                 calibration=_calibration(),
                 orientation=_ROBOSUITE_ORIENTATION,
@@ -437,17 +463,23 @@ def test_a_field_of_view_mismatch_is_incompatible() -> None:
     # The gap a resize cannot close: same pixels, different projection. Without this
     # comparison the policy is fed a differently-projected world with nothing to say so.
     policy = _libero_policy(
-        cameras=[Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration(fovy=60.0))]
+        cameras=[
+            Camera(
+                name=CameraName.AGENTVIEW, shape=(256, 256, 3), calibration=_calibration(fovy=60.0)
+            )
+        ]
     )
     report = check_compatibility(policy, LIBERO)
     assert report.status is Compatibility.INCOMPATIBLE
-    assert any("agentview" in reason and "conventions" in reason for reason in report.reasons)
+    assert any(
+        CameraName.AGENTVIEW in reason and "conventions" in reason for reason in report.reasons
+    )
 
 
 def _camera_space(calibration: CameraCalibration) -> ObservationSpace:
     """One calibrated agentview, for comparing two descriptions of the same camera."""
     return ObservationSpace(
-        cameras=(Camera(name="agentview", shape=(256, 256, 3), calibration=calibration),)
+        cameras=(Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3), calibration=calibration),)
     )
 
 
@@ -484,9 +516,11 @@ def test_a_policy_wanting_calibration_is_unmet_by_a_benchmark_without_it() -> No
     # The other direction of the asymmetry: a policy requiring the camera's pose and
     # projection is not served by a benchmark that declares neither.
     wanted = ObservationSpace(
-        cameras=(Camera(name="agentview", shape=(256, 256, 3), calibration=_calibration()),)
+        cameras=(
+            Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3), calibration=_calibration()),
+        )
     )
-    offered = ObservationSpace(cameras=(Camera(name="agentview", shape=(256, 256, 3)),))
+    offered = ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3)),))
     assert wanted.first_unmet(offered) == "camera 'agentview': conventions differ"
 
 
@@ -496,7 +530,7 @@ def test_an_axis_convention_mismatch_is_incompatible() -> None:
     policy = _libero_policy(
         cameras=[
             Camera(
-                name="agentview",
+                name=CameraName.AGENTVIEW,
                 shape=(256, 256, 3),
                 calibration=_calibration(axes=CameraAxes.OPENGL),
             )
@@ -511,7 +545,9 @@ def test_an_extrinsic_frame_mismatch_is_incompatible() -> None:
     policy = _libero_policy(
         cameras=[
             Camera(
-                name="agentview", shape=(256, 256, 3), calibration=_calibration(frame=Frame.BASE)
+                name=CameraName.AGENTVIEW,
+                shape=(256, 256, 3),
+                calibration=_calibration(frame=Frame.BASE),
             )
         ]
     )

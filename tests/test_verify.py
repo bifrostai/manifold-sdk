@@ -34,6 +34,7 @@ from manifold.core import (
 )
 from manifold.lib.gripper import from_openness, openness
 from manifold.lib.rotation import convert
+from manifold.sensors import CameraName
 
 
 def _ee(
@@ -61,7 +62,7 @@ def _benchmark(
     return Benchmark(
         name="suite",
         embodiment=embodiment,
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
 
@@ -72,7 +73,7 @@ def _policy(
     return PolicySignature(
         action_space=action_space,
         proprioception=proprio,
-        cameras=[Camera(name="agentview", shape=(8, 8, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
 
@@ -194,7 +195,7 @@ def test_manifest_lists_camera_normalization_and_env_under_not_checked() -> None
     report = verify(policy, bench, Pipeline())
 
     joined = " | ".join(report.not_checked)
-    assert "agentview" in joined  # camera orientation/channel content
+    assert CameraName.AGENTVIEW in joined  # camera orientation/channel content
     assert "normalization" in joined
     assert "env/policy behaviour" in joined
     # Shape is checked, not in not_checked.
@@ -311,7 +312,7 @@ def test_frame_rebase_routes_ee_rotation_to_not_checked_but_keeps_position() -> 
     bench = Benchmark(
         name="suite",
         embodiment=Embodiment(name="arm", action=_ee(), proprioception=base_proprio),
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
     policy = _policy(_ee(), proprio=rebased_proprio, rotation=RotationFormat.QUATERNION)
@@ -411,7 +412,7 @@ class RequiresCameraPoseAdapter(ObservationAdapter):
         return source
 
     def adapt(self, observation: Any, /, *, source: Any) -> Any:
-        pose = observation.extrinsics.get("agentview")
+        pose = observation.extrinsics.get(CameraName.AGENTVIEW)
         if pose is None:
             raise RuntimeError("no pose published for 'agentview'")
         assert np.asarray(pose).shape == (4, 4)
@@ -422,7 +423,7 @@ def test_probe_publishes_a_pose_for_each_calibrated_camera() -> None:
     # A calibrated camera means a pose in every observation, so an adapter reading
     # one must not fail on the probe alone.
     calibrated = Camera(
-        name="agentview",
+        name=CameraName.AGENTVIEW,
         shape=(8, 8, 3),
         calibration=CameraCalibration(intrinsics=CameraIntrinsics(fx=4.0, fy=4.0, cx=4.0, cy=4.0)),
     )
@@ -447,12 +448,12 @@ def test_probe_poses_are_distinct_and_only_for_calibrated_cameras() -> None:
         cameras=(
             Camera(name="plain", shape=(8, 8, 3)),
             Camera(
-                name="agentview",
+                name=CameraName.AGENTVIEW,
                 shape=(8, 8, 3),
                 calibration=CameraCalibration(intrinsics=intrinsics),
             ),
             Camera(
-                name="wrist",
+                name=CameraName.WRIST,
                 shape=(8, 8, 3),
                 calibration=CameraCalibration(intrinsics=intrinsics),
             ),
@@ -462,9 +463,9 @@ def test_probe_poses_are_distinct_and_only_for_calibrated_cameras() -> None:
 
     poses = _probe_extrinsics(space)
 
-    assert set(poses) == {"agentview", "wrist"}
+    assert set(poses) == {CameraName.AGENTVIEW, CameraName.WRIST}
     assert all(pose.shape == (4, 4) and pose.dtype == np.float64 for pose in poses.values())
-    assert not np.array_equal(poses["agentview"], poses["wrist"])
+    assert not np.array_equal(poses[CameraName.AGENTVIEW], poses[CameraName.WRIST])
 
 
 def _bimanual_benchmark(
@@ -483,7 +484,7 @@ def _bimanual_benchmark(
     return Benchmark(
         name="two_arm_suite",
         embodiment=embodiment,
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
 
@@ -551,7 +552,7 @@ def _joint_bimanual_benchmark() -> Benchmark:
     return Benchmark(
         name="two_arm_joint_suite",
         embodiment=embodiment,
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
 

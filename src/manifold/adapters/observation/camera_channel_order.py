@@ -15,7 +15,7 @@ Everything else about the observation — the proprioception, the instruction, a
 any cameras not named — passes through.
 
 Parameterized by the target `ChannelOrder` and the camera names to swap:
-`SwapChannelOrder(target=ChannelOrder.RGB, cameras=("agentview", "wrist"))`.
+`SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW, CameraName.WRIST))`.
 """
 
 from __future__ import annotations

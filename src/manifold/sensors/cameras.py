@@ -29,6 +29,19 @@ free parameter, are module constants.) The benchmark passes the shape.
 from __future__ import annotations
 
 from manifold.core.sensor import Camera, CameraCalibration, CameraOrientation, Modality, Mount
+from manifold.lib.compat import StrEnum
+
+
+class CameraName(StrEnum):
+    """The name of each camera in the catalogue, one per viewpoint."""
+
+    AGENTVIEW = "agentview"
+    AGENTVIEW_DEPTH = "agentview_depth"
+    AGENTVIEW_LEFT = "agentview_left"
+    AGENTVIEW_RIGHT = "agentview_right"
+    OVER_SHOULDER_LEFT = "over_shoulder_left"
+    WRIST = "wrist"
+    WRIST_DEPTH = "wrist_depth"
 
 
 def agentview(
@@ -38,7 +51,7 @@ def agentview(
 ) -> Camera:
     """The third-person scene camera, at the given shape."""
     return Camera(
-        name="agentview",
+        name=CameraName.AGENTVIEW,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -53,7 +66,7 @@ def agentview_depth(
 ) -> Camera:
     """The third-person scene camera's metric depth, at the given shape."""
     return Camera(
-        name="agentview_depth",
+        name=CameraName.AGENTVIEW_DEPTH,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -74,7 +87,7 @@ def agentview_left(
     the wrist camera, rather than the single `agentview` LIBERO uses.
     """
     return Camera(
-        name="agentview_left",
+        name=CameraName.AGENTVIEW_LEFT,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -89,7 +102,7 @@ def agentview_right(
 ) -> Camera:
     """The right third-person workspace camera, at the given shape."""
     return Camera(
-        name="agentview_right",
+        name=CameraName.AGENTVIEW_RIGHT,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -112,7 +125,7 @@ def over_shoulder_left(
     let a LIBERO-trained policy pair against a viewpoint it never saw.
     """
     return Camera(
-        name="over_shoulder_left",
+        name=CameraName.OVER_SHOULDER_LEFT,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -127,7 +140,7 @@ def wrist(
 ) -> Camera:
     """The wrist-mounted camera, at the given shape."""
     return Camera(
-        name="wrist",
+        name=CameraName.WRIST,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -142,7 +155,7 @@ def wrist_depth(
 ) -> Camera:
     """The wrist-mounted camera's metric depth, at the given shape."""
     return Camera(
-        name="wrist_depth",
+        name=CameraName.WRIST_DEPTH,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -153,6 +166,7 @@ def wrist_depth(
 
 
 __all__ = [
+    "CameraName",
     "agentview",
     "agentview_depth",
     "agentview_left",

@@ -8,8 +8,8 @@ check reads those.
 
 The observation is decomposed, not a single flat bag: proprioception under
 `state` keyed by role ("ee_pose", "joint_pos"), exteroception under `sensors`
-keyed by sensor name ("agentview", "wrist"), camera poses under `extrinsics` keyed
-by that same sensor name, and the instruction on its own. This mirrors the
+keyed by sensor name (`CameraName.AGENTVIEW`, `CameraName.WRIST`), camera poses
+under `extrinsics` keyed by that same sensor name, and the instruction on its own. This mirrors the
 primitives: the embodiment owns the state, the benchmark owns the sensors.
 """
 
