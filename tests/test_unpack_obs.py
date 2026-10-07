@@ -29,6 +29,7 @@ from manifold.core.native_layout import (
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.sensor import Camera
 from manifold.core.values import Observation
+from manifold.sensors import CameraName
 
 # --- synthetic fixtures -----------------------------------------------------
 
@@ -45,17 +46,17 @@ def _env_layout() -> NativeLayout:
     return NativeLayout(
         entries=(
             LayoutEntry(
-                key="agentview",
+                key=CameraName.AGENTVIEW,
                 source=SourceKind.CAMERA,
                 source_name="pixels_image",
                 ops=(DtypeCast(dtype="uint8", contiguous=True),),
-                target=TargetChannel(kind=ChannelKind.CAMERA, name="agentview"),
+                target=TargetChannel(kind=ChannelKind.CAMERA, name=CameraName.AGENTVIEW),
             ),
             LayoutEntry(
-                key="wrist",
+                key=CameraName.WRIST,
                 source=SourceKind.CAMERA,
                 source_name="pixels_image2",
-                target=TargetChannel(kind=ChannelKind.CAMERA, name="wrist"),
+                target=TargetChannel(kind=ChannelKind.CAMERA, name=CameraName.WRIST),
             ),
             LayoutEntry(
                 key="ee_pos",
@@ -89,8 +90,8 @@ def _observation_space() -> ObservationSpace:
     return ObservationSpace(
         proprioception=Proprioception(),
         cameras=(
-            Camera(name="agentview", shape=(4, 4, 3)),
-            Camera(name="wrist", shape=(4, 4, 3)),
+            Camera(name=CameraName.AGENTVIEW, shape=(4, 4, 3)),
+            Camera(name=CameraName.WRIST, shape=(4, 4, 3)),
         ),
         instruction=True,
     )
@@ -131,12 +132,12 @@ def test_unpack_gathers_state_renames_cameras_sets_instruction() -> None:
     assert set(obs.state) == {"ee_pose"}
 
     # Cameras renamed/placed under their sensor names, the cast honoured.
-    assert set(obs.sensors) == {"agentview", "wrist"}
-    assert obs.sensors["agentview"].shape == (4, 4, 3)
-    assert obs.sensors["agentview"].dtype == np.uint8
-    assert obs.sensors["agentview"].flags["C_CONTIGUOUS"]
-    assert int(obs.sensors["agentview"].reshape(-1)[0]) == 1
-    assert int(obs.sensors["wrist"].reshape(-1)[0]) == 2
+    assert set(obs.sensors) == {CameraName.AGENTVIEW, CameraName.WRIST}
+    assert obs.sensors[CameraName.AGENTVIEW].shape == (4, 4, 3)
+    assert obs.sensors[CameraName.AGENTVIEW].dtype == np.uint8
+    assert obs.sensors[CameraName.AGENTVIEW].flags["C_CONTIGUOUS"]
+    assert int(obs.sensors[CameraName.AGENTVIEW].reshape(-1)[0]) == 1
+    assert int(obs.sensors[CameraName.WRIST].reshape(-1)[0]) == 2
 
     # Instruction set from the env's task_description key.
     assert obs.instruction == "pick up the bowl"
@@ -225,7 +226,7 @@ def test_builders_are_byte_equivalent_to_the_long_hand_form() -> None:
     # legibly (their `key` differs, but `key` never reaches the env->obs Observation).
     sugared = NativeLayout(
         entries=(
-            LayoutEntry.from_camera("pixels_image", channel="agentview"),
+            LayoutEntry.from_camera("pixels_image", channel=CameraName.AGENTVIEW),
             LayoutEntry.from_state("ee_pose", "eef_pos", dim=3, order=0),
             LayoutEntry.from_state("ee_pose", "eef_quat", dim=3, order=1),
             LayoutEntry.from_state("ee_pose", "gripper_qpos", dim=2, order=2),
@@ -239,7 +240,7 @@ def test_builders_are_byte_equivalent_to_the_long_hand_form() -> None:
                 source=SourceKind.CAMERA,
                 source_name="pixels_image",
                 ops=(DtypeCast(dtype="uint8", contiguous=True),),
-                target=TargetChannel(kind=ChannelKind.CAMERA, name="agentview"),
+                target=TargetChannel(kind=ChannelKind.CAMERA, name=CameraName.AGENTVIEW),
             ),
             LayoutEntry(
                 key="p",
@@ -276,8 +277,8 @@ def test_builders_are_byte_equivalent_to_the_long_hand_form() -> None:
     assert list(a.state["ee_pose"]) == list(b.state["ee_pose"])
     assert a.instruction == b.instruction
     assert set(a.sensors) == set(b.sensors)
-    assert a.sensors["agentview"].dtype == b.sensors["agentview"].dtype
-    np.testing.assert_array_equal(a.sensors["agentview"], b.sensors["agentview"])
+    assert a.sensors[CameraName.AGENTVIEW].dtype == b.sensors[CameraName.AGENTVIEW].dtype
+    np.testing.assert_array_equal(a.sensors[CameraName.AGENTVIEW], b.sensors[CameraName.AGENTVIEW])
 
 
 def test_from_state_builds_cast_then_slice_targeting_the_role() -> None:

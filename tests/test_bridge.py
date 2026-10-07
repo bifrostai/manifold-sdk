@@ -7,6 +7,7 @@ import numpy as np
 import pytest
 
 from manifold.core.values import Action, Observation
+from manifold.sensors import CameraName
 from manifold.wire import (
     DEFAULT_FRAME_LANE,
     MAX_FRAME_BYTES,
@@ -38,8 +39,10 @@ def _sample_observation() -> Observation:
     return Observation(
         state={"ee_pose": np.arange(6, dtype=np.float32)},
         sensors={
-            "agentview": np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3),
-            "wrist": (np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3) % 7).astype(np.uint8),
+            CameraName.AGENTVIEW: np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3),
+            CameraName.WRIST: (np.arange(8 * 8 * 3, dtype=np.uint8).reshape(8, 8, 3) % 7).astype(
+                np.uint8
+            ),
         },
         instruction="pick up the cube",
     )
@@ -70,7 +73,7 @@ def test_decoded_arrays_are_writable_and_native_byte_order() -> None:
     assert state.dtype.byteorder in ("=", "|")  # native (or not-applicable)
     state[0] = 99.0  # a read-only view would raise here
 
-    sensor_raw = decoded_raw.sensors["agentview"]
+    sensor_raw = decoded_raw.sensors[CameraName.AGENTVIEW]
     assert sensor_raw.flags.writeable is True
     assert sensor_raw.dtype == np.uint8
     assert sensor_raw.dtype.byteorder in ("=", "|")
@@ -78,7 +81,7 @@ def test_decoded_arrays_are_writable_and_native_byte_order() -> None:
 
     # Compressed path: png-decoded sensor must also be writable.
     decoded_png = decode_observation(encode_observation(obs, image_format="png"))
-    sensor_png = decoded_png.sensors["agentview"]
+    sensor_png = decoded_png.sensors[CameraName.AGENTVIEW]
     assert sensor_png.flags.writeable is True
     assert sensor_png.dtype == np.uint8
     sensor_png[0, 0, 0] = 7
@@ -306,12 +309,12 @@ def test_depth_sensor_round_trips_losslessly_whatever_the_image_format(image_for
     # survives even under a lossy format (ADR 0007).
     depth = (np.arange(16, dtype=np.float32) / 8.0).reshape(4, 4, 1)
     depth[0, 0, 0] = np.inf
-    obs = Observation(sensors={"agentview_depth": depth})
+    obs = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
 
     decoded = decode_observation(encode_observation(obs, image_format=image_format))
 
-    assert decoded.sensors["agentview_depth"].dtype == np.float32
-    assert np.array_equal(decoded.sensors["agentview_depth"], depth)
+    assert decoded.sensors[CameraName.AGENTVIEW_DEPTH].dtype == np.float32
+    assert np.array_equal(decoded.sensors[CameraName.AGENTVIEW_DEPTH], depth)
 
 
 def test_colour_and_depth_sensors_travel_in_one_observation() -> None:
@@ -320,28 +323,28 @@ def test_colour_and_depth_sensors_travel_in_one_observation() -> None:
     depth = np.full((4, 4, 1), 1.25, dtype=np.float32)
     obs = Observation(
         sensors={
-            "agentview": np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
-            "agentview_depth": depth,
+            CameraName.AGENTVIEW: np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
+            CameraName.AGENTVIEW_DEPTH: depth,
         }
     )
 
     decoded = decode_observation(encode_observation(obs, image_format="jpeg"))
 
-    assert decoded.sensors["agentview"].dtype == np.uint8
-    assert decoded.sensors["agentview"].shape == (4, 4, 3)
-    assert np.array_equal(decoded.sensors["agentview_depth"], depth)
+    assert decoded.sensors[CameraName.AGENTVIEW].dtype == np.uint8
+    assert decoded.sensors[CameraName.AGENTVIEW].shape == (4, 4, 3)
+    assert np.array_equal(decoded.sensors[CameraName.AGENTVIEW_DEPTH], depth)
 
 
 def test_depth_sensor_keeps_a_narrower_float_dtype() -> None:
     # The wire dtype follows the array's own, so a benchmark declaring float16 depth
     # halves its payload with no second option to select.
     depth = np.array([[1.5, np.inf], [2.25, 3.0]], dtype=np.float16).reshape(2, 2, 1)
-    obs = Observation(sensors={"wrist_depth": depth})
+    obs = Observation(sensors={CameraName.WRIST_DEPTH: depth})
 
     decoded = decode_observation(encode_observation(obs))
 
-    assert decoded.sensors["wrist_depth"].dtype == np.float16
-    assert np.array_equal(decoded.sensors["wrist_depth"], depth)
+    assert decoded.sensors[CameraName.WRIST_DEPTH].dtype == np.float16
+    assert np.array_equal(decoded.sensors[CameraName.WRIST_DEPTH], depth)
 
 
 def _decode_as_a_pre_depth_peer(payload) -> dict:
@@ -368,15 +371,15 @@ def test_a_pre_depth_peer_decodes_a_depth_carrying_observation() -> None:
     # colour frames alone and the pairing runs.
     obs = Observation(
         sensors={
-            "agentview": np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
-            "agentview_depth": np.full((4, 4, 1), 1.25, dtype=np.float32),
+            CameraName.AGENTVIEW: np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
+            CameraName.AGENTVIEW_DEPTH: np.full((4, 4, 1), 1.25, dtype=np.float32),
         }
     )
 
     payload = encode_observation(obs, image_format="jpeg")
     colour_only = _decode_as_a_pre_depth_peer(payload)
 
-    assert set(colour_only) == {"agentview"}
+    assert set(colour_only) == {CameraName.AGENTVIEW}
 
 
 def test_depth_travels_under_its_own_payload_key() -> None:
@@ -384,22 +387,22 @@ def test_depth_travels_under_its_own_payload_key() -> None:
     # only the payload keeps the two apart, and that is what makes it additive.
     obs = Observation(
         sensors={
-            "agentview": np.zeros((2, 2, 3), dtype=np.uint8),
-            "agentview_depth": np.full((2, 2, 1), 0.5, dtype=np.float32),
+            CameraName.AGENTVIEW: np.zeros((2, 2, 3), dtype=np.uint8),
+            CameraName.AGENTVIEW_DEPTH: np.full((2, 2, 1), 0.5, dtype=np.float32),
         }
     )
 
     payload = encode_observation(obs)
 
-    assert set(payload["sensors"]) == {"agentview"}
-    assert set(payload["depth"]) == {"agentview_depth"}
-    assert payload["depth"]["agentview_depth"]["__ndarray__"] is True
+    assert set(payload["sensors"]) == {CameraName.AGENTVIEW}
+    assert set(payload["depth"]) == {CameraName.AGENTVIEW_DEPTH}
+    assert payload["depth"][CameraName.AGENTVIEW_DEPTH]["__ndarray__"] is True
 
 
 def test_the_depth_key_is_absent_from_a_colour_only_observation() -> None:
     # Omitted rather than present-and-empty, so a colour-only benchmark's payload is
     # byte-identical to the one it sent before version 4 (the `extrinsics` pattern).
-    obs = Observation(sensors={"agentview": np.zeros((2, 2, 3), dtype=np.uint8)})
+    obs = Observation(sensors={CameraName.AGENTVIEW: np.zeros((2, 2, 3), dtype=np.uint8)})
 
     assert "depth" not in encode_observation(obs)
 
@@ -409,12 +412,12 @@ def test_depth_under_sensors_still_decodes() -> None:
     # still reads an ndarray wrapper there, so this decoder reads those payloads
     # unchanged rather than only the layout it now writes.
     depth = np.full((2, 2, 1), 2.5, dtype=np.float32)
-    payload = encode_observation(Observation(sensors={"wrist_depth": depth}))
+    payload = encode_observation(Observation(sensors={CameraName.WRIST_DEPTH: depth}))
     legacy = {**payload, "sensors": payload.pop("depth"), "depth": {}}
 
     decoded = decode_observation(legacy)
 
-    assert np.array_equal(decoded.sensors["wrist_depth"], depth)
+    assert np.array_equal(decoded.sensors[CameraName.WRIST_DEPTH], depth)
 
 
 def test_a_depth_key_that_is_not_a_dict_is_refused() -> None:
@@ -427,8 +430,10 @@ def test_a_depth_key_that_is_not_a_dict_is_refused() -> None:
 def test_a_depth_node_that_is_not_an_ndarray_is_refused() -> None:
     # Under `depth` a node is depth by position, so a colour wrapper there is a
     # malformed frame rather than something to fall back on.
-    payload = encode_observation(Observation(sensors={"agentview": np.zeros((2, 2, 3), np.uint8)}))
-    payload["depth"] = {"agentview_depth": payload["sensors"]["agentview"]}
+    payload = encode_observation(
+        Observation(sensors={CameraName.AGENTVIEW: np.zeros((2, 2, 3), np.uint8)})
+    )
+    payload["depth"] = {CameraName.AGENTVIEW_DEPTH: payload["sensors"][CameraName.AGENTVIEW]}
     with pytest.raises(ValueError, match="not a decodable ndarray wrapper"):
         decode_observation(payload)
 
@@ -654,12 +659,12 @@ def test_extrinsics_round_trip_at_full_precision() -> None:
             [0.0, 0.0, 0.0, 1.0],
         ]
     )
-    obs = Observation(extrinsics={"agentview": pose})
+    obs = Observation(extrinsics={CameraName.AGENTVIEW: pose})
 
     decoded = decode_observation(encode_observation(obs))
 
-    assert decoded.extrinsics["agentview"].dtype == np.float64
-    assert np.array_equal(decoded.extrinsics["agentview"], pose)
+    assert decoded.extrinsics[CameraName.AGENTVIEW].dtype == np.float64
+    assert np.array_equal(decoded.extrinsics[CameraName.AGENTVIEW], pose)
 
 
 def test_an_observation_without_extrinsics_omits_the_key() -> None:
@@ -671,13 +676,13 @@ def test_an_observation_without_extrinsics_omits_the_key() -> None:
 
 
 def test_a_pose_that_is_not_four_by_four_is_rejected() -> None:
-    obs = Observation(extrinsics={"agentview": np.eye(3)})
+    obs = Observation(extrinsics={CameraName.AGENTVIEW: np.eye(3)})
     with pytest.raises(ValueError, match="must be 4x4"):
         encode_observation(obs)
 
 
 def test_decode_rejects_a_pose_that_is_not_four_by_four() -> None:
-    payload = encode_observation(Observation(extrinsics={"agentview": np.eye(4)}))
-    payload["extrinsics"]["agentview"]["shape"] = [2, 8]
+    payload = encode_observation(Observation(extrinsics={CameraName.AGENTVIEW: np.eye(4)}))
+    payload["extrinsics"][CameraName.AGENTVIEW]["shape"] = [2, 8]
     with pytest.raises(ValueError, match="expected 4x4"):
         decode_observation(payload)

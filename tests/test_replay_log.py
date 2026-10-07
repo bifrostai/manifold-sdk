@@ -22,11 +22,12 @@ from manifold.replay import (
     read_replay_log,
     replay_log_path,
 )
+from manifold.sensors import CameraName
 from manifold.wire.bridge import pack_stream_frame
 
 CHANNELS = (
-    Channel(name="agentview", kind=ChannelKind.IMAGE),
-    Channel(name="agentview_depth", kind=ChannelKind.IMAGE),
+    Channel(name=CameraName.AGENTVIEW, kind=ChannelKind.IMAGE),
+    Channel(name=CameraName.AGENTVIEW_DEPTH, kind=ChannelKind.IMAGE),
     Channel(name="reward", kind=ChannelKind.SCALAR, group="Task"),
     Channel(name="instruction", kind=ChannelKind.TEXT),
 )
@@ -65,8 +66,8 @@ def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
             log.write_step(
                 {"table": _pose(0.0), "robot0_link0": _pose(step * 0.01)},
                 images={
-                    "agentview": np.full((4, 4, 3), step, dtype=np.uint8),
-                    "agentview_depth": np.full((4, 4), 1.5, dtype=np.float32),
+                    CameraName.AGENTVIEW: np.full((4, 4, 3), step, dtype=np.uint8),
+                    CameraName.AGENTVIEW_DEPTH: np.full((4, 4), 1.5, dtype=np.float32),
                 },
                 scalars={"reward": float(step)},
                 text={"instruction": "pick up the mug"},
@@ -82,8 +83,8 @@ def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
     last = read.steps[-1]
     assert last.scalars == {"reward": 2.0}
     assert last.text == {"instruction": "pick up the mug"}
-    assert np.array_equal(last.images["agentview"], np.full((4, 4, 3), 2, dtype=np.uint8))
-    np.testing.assert_allclose(last.images["agentview_depth"], np.full((4, 4), 1.5))
+    assert np.array_equal(last.images[CameraName.AGENTVIEW], np.full((4, 4, 3), 2, dtype=np.uint8))
+    np.testing.assert_allclose(last.images[CameraName.AGENTVIEW_DEPTH], np.full((4, 4), 1.5))
     np.testing.assert_allclose(last.poses["robot0_link0"].position, [0.02, 0.0, 0.1], atol=1e-6)
 
 
@@ -275,9 +276,9 @@ def test_a_jpeg_channel_image_round_trips(tmp_path):
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     frame[:, :, 0] = 255
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="jpeg") as log:
-        log.write_step({}, images={"agentview": frame})
+        log.write_step({}, images={CameraName.AGENTVIEW: frame})
 
-    decoded = read_replay_log(path).steps[0].images["agentview"]
+    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW]
     assert decoded.shape == (8, 8, 3)
     assert decoded[0, 0, 0] > 200
 
@@ -305,7 +306,7 @@ def test_an_image_that_is_neither_colour_nor_depth_is_refused(tmp_path):
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log,
         pytest.raises(ValueError, match="a colour frame is uint8"),
     ):
-        log.write_step({}, images={"agentview": np.zeros((4, 4), dtype=np.uint16)})
+        log.write_step({}, images={CameraName.AGENTVIEW: np.zeros((4, 4), dtype=np.uint16)})
 
 
 def test_a_floating_point_colour_frame_is_refused(tmp_path):
@@ -314,7 +315,7 @@ def test_a_floating_point_colour_frame_is_refused(tmp_path):
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log,
         pytest.raises(ValueError, match="convert a colour frame to uint8"),
     ):
-        log.write_step({}, images={"agentview": np.zeros((4, 4, 3), dtype=np.float32)})
+        log.write_step({}, images={CameraName.AGENTVIEW: np.zeros((4, 4, 3), dtype=np.float32)})
 
 
 def test_a_depth_value_float16_cannot_hold_is_refused(tmp_path):
@@ -323,16 +324,18 @@ def test_a_depth_value_float16_cannot_hold_is_refused(tmp_path):
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log,
         pytest.raises(ValueError, match="float16"),
     ):
-        log.write_step({}, images={"agentview_depth": np.full((2, 2), 1e5, dtype=np.float32)})
+        log.write_step(
+            {}, images={CameraName.AGENTVIEW_DEPTH: np.full((2, 2), 1e5, dtype=np.float32)}
+        )
 
 
 def test_an_infinite_depth_is_the_sentinel_that_survives(tmp_path):
     path = tmp_path / "episode.replay"
     frame = np.array([[1.5, np.inf], [0.25, np.inf]], dtype=np.float32)
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
-        log.write_step({}, images={"agentview_depth": frame})
+        log.write_step({}, images={CameraName.AGENTVIEW_DEPTH: frame})
 
-    decoded = read_replay_log(path).steps[0].images["agentview_depth"]
+    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW_DEPTH]
     assert np.isinf(decoded[0, 1])
     np.testing.assert_allclose(decoded[0, 0], 1.5)
 
@@ -340,9 +343,9 @@ def test_an_infinite_depth_is_the_sentinel_that_survives(tmp_path):
 def test_a_greyscale_colour_frame_drops_its_trailing_axis(tmp_path):
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
-        log.write_step({}, images={"agentview": np.full((4, 5, 1), 200, dtype=np.uint8)})
+        log.write_step({}, images={CameraName.AGENTVIEW: np.full((4, 5, 1), 200, dtype=np.uint8)})
 
-    decoded = read_replay_log(path).steps[0].images["agentview"]
+    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW]
     assert decoded.shape == (4, 5)
     assert decoded[0, 0] == 200
 
@@ -353,7 +356,7 @@ def test_an_alpha_channel_is_refused_for_jpeg(tmp_path):
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="jpeg") as log,
         pytest.raises(ValueError, match="alpha channel"),
     ):
-        log.write_step({}, images={"agentview": np.zeros((4, 4, 4), dtype=np.uint8)})
+        log.write_step({}, images={CameraName.AGENTVIEW: np.zeros((4, 4, 4), dtype=np.uint8)})
 
 
 def test_a_png_channel_image_round_trips(tmp_path):
@@ -362,9 +365,9 @@ def test_a_png_channel_image_round_trips(tmp_path):
     frame[:, :, 1] = 128
     frame[:, :, 3] = 255
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="png") as log:
-        log.write_step({}, images={"agentview": frame})
+        log.write_step({}, images={CameraName.AGENTVIEW: frame})
 
-    decoded = read_replay_log(path).steps[0].images["agentview"]
+    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW]
     assert decoded.shape == (8, 8, 4)
     assert decoded[0, 0, 1] == 128
 
@@ -376,9 +379,9 @@ def test_a_compressed_frame_reads_back_as_the_bytes_that_were_stored(tmp_path, i
     frame[:, :, 1] = 128
     frame[:, :, -1] = 255
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format=image_format) as log:
-        log.write_step({}, images={"agentview": frame})
+        log.write_step({}, images={CameraName.AGENTVIEW: frame})
 
-    stored = read_replay_log(path).steps[0].encoded_images["agentview"]
+    stored = read_replay_log(path).steps[0].encoded_images[CameraName.AGENTVIEW]
     buffer = io.BytesIO()
     Image.fromarray(frame).save(buffer, format=image_format.upper())
     # The writer's own encode, handed back byte for byte: whatever stores the
@@ -393,8 +396,8 @@ def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
         log.write_step(
             {},
             images={
-                "agentview": np.full((4, 4, 3), 200, dtype=np.uint8),
-                "agentview_depth": np.full((4, 4), 1.5, dtype=np.float32),
+                CameraName.AGENTVIEW: np.full((4, 4, 3), 200, dtype=np.uint8),
+                CameraName.AGENTVIEW_DEPTH: np.full((4, 4), 1.5, dtype=np.float32),
             },
         )
 
@@ -402,8 +405,8 @@ def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
     # A raw frame stored its pixels and a depth frame its float16 array, so
     # neither offers bytes in place of what `images` decoded.
     assert step.encoded_images == {}
-    assert step.images["agentview"].shape == (4, 4, 3)
-    np.testing.assert_allclose(step.images["agentview_depth"], 1.5)
+    assert step.images[CameraName.AGENTVIEW].shape == (4, 4, 3)
+    np.testing.assert_allclose(step.images[CameraName.AGENTVIEW_DEPTH], 1.5)
 
 
 def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
@@ -412,24 +415,24 @@ def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
         log.write_step(
             {},
             images={
-                "agentview": np.full((8, 8, 3), 120, dtype=np.uint8),
-                "agentview_depth": np.full((8, 8), 2.0, dtype=np.float32),
+                CameraName.AGENTVIEW: np.full((8, 8, 3), 120, dtype=np.uint8),
+                CameraName.AGENTVIEW_DEPTH: np.full((8, 8), 2.0, dtype=np.float32),
             },
         )
 
     step = read_replay_log(path).steps[0]
-    assert step.images["agentview"].shape == (8, 8, 3)
-    np.testing.assert_allclose(step.images["agentview_depth"], 2.0)
-    assert set(step.encoded_images) == {"agentview"}
+    assert step.images[CameraName.AGENTVIEW].shape == (8, 8, 3)
+    np.testing.assert_allclose(step.images[CameraName.AGENTVIEW_DEPTH], 2.0)
+    assert set(step.encoded_images) == {CameraName.AGENTVIEW}
 
 
 @pytest.mark.parametrize("image_format", ["raw", "jpeg"])
 def test_a_decoded_colour_frame_is_the_callers_to_mutate(tmp_path, image_format):
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format=image_format) as log:
-        log.write_step({}, images={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)})
+        log.write_step({}, images={CameraName.AGENTVIEW: np.zeros((4, 4, 3), dtype=np.uint8)})
 
-    decoded = read_replay_log(path).steps[0].images["agentview"]
+    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW]
     decoded[0, 0, 0] = 7
     assert decoded[0, 0, 0] == 7
 
@@ -478,8 +481,12 @@ def test_a_log_goes_beside_the_rollup(tmp_path):
 # --- camera calibration and extrinsics (ADR 0008) -----------------------------
 
 _CAMERAS = (
-    CameraPinhole(name="agentview", fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256),
-    CameraPinhole(name="wrist", fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256),
+    CameraPinhole(
+        name=CameraName.AGENTVIEW, fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256
+    ),
+    CameraPinhole(
+        name=CameraName.WRIST, fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256
+    ),
 )
 
 
@@ -494,7 +501,7 @@ def test_header_camera_intrinsics_round_trip(tmp_path):
     ) as log:
         log.write_step({"robot0_link0": _pose(0.0)})
     log = read_replay_log(path)
-    assert [c.name for c in log.cameras] == ["agentview", "wrist"]
+    assert [c.name for c in log.cameras] == [CameraName.AGENTVIEW, CameraName.WRIST]
     assert log.cameras[0].fx == pytest.approx(101.4)
     assert (log.cameras[0].width, log.cameras[0].height) == (256, 256)
 
@@ -514,14 +521,19 @@ def test_every_step_carries_every_cameras_extrinsic(tmp_path):
             log.write_step(
                 {"robot0_link0": _pose(0.0)},
                 # The scene camera never moves; the wrist camera moves every step.
-                extrinsics={"agentview": _extrinsic(1.6), "wrist": _extrinsic(1.0 + 0.1 * i)},
+                extrinsics={
+                    CameraName.AGENTVIEW: _extrinsic(1.6),
+                    CameraName.WRIST: _extrinsic(1.0 + 0.1 * i),
+                },
             )
     steps = read_replay_log(path).steps
     assert len(steps) == 4
     for i, step in enumerate(steps):
-        assert sorted(step.extrinsics) == ["agentview", "wrist"]
-        assert step.extrinsics["agentview"].position[2] == pytest.approx(1.6)
-        assert step.extrinsics["wrist"].position[2] == pytest.approx(1.0 + 0.1 * i, abs=1e-6)
+        assert sorted(step.extrinsics) == [CameraName.AGENTVIEW, CameraName.WRIST]
+        assert step.extrinsics[CameraName.AGENTVIEW].position[2] == pytest.approx(1.6)
+        assert step.extrinsics[CameraName.WRIST].position[2] == pytest.approx(
+            1.0 + 0.1 * i, abs=1e-6
+        )
 
 
 def test_an_unmoved_camera_is_stored_once(tmp_path):
@@ -529,15 +541,18 @@ def test_an_unmoved_camera_is_stored_once(tmp_path):
     still = tmp_path / "still.replay"
     with ReplayLogWriter(still, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
         for _ in range(50):
-            log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+            log.write_step(
+                {"robot0_link0": _pose(0.0)}, extrinsics={CameraName.AGENTVIEW: _extrinsic(1.6)}
+            )
     moving = tmp_path / "moving.replay"
     with ReplayLogWriter(moving, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
         for i in range(50):
             log.write_step(
-                {"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6 + 0.01 * i)}
+                {"robot0_link0": _pose(0.0)},
+                extrinsics={CameraName.AGENTVIEW: _extrinsic(1.6 + 0.01 * i)},
             )
     # Both read back with a pose on all 50 steps, but only one stored all 50.
-    assert all(s.extrinsics["agentview"] is not None for s in read_replay_log(still).steps)
+    assert all(s.extrinsics[CameraName.AGENTVIEW] is not None for s in read_replay_log(still).steps)
     assert still.stat().st_size < moving.stat().st_size
 
 
@@ -553,18 +568,24 @@ def test_a_change_float32_cannot_hold_is_not_written(tmp_path):
     """Quantised before comparison: a difference the log cannot store is not a change."""
     path = tmp_path / "episode.replay"
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
-        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+        log.write_step(
+            {"robot0_link0": _pose(0.0)}, extrinsics={CameraName.AGENTVIEW: _extrinsic(1.6)}
+        )
         first = path.stat().st_size
         # Far below float32's resolution at 1.6, so it rounds to the stored value.
         log.write_step(
-            {"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6 + 1e-12)}
+            {"robot0_link0": _pose(0.0)}, extrinsics={CameraName.AGENTVIEW: _extrinsic(1.6 + 1e-12)}
         )
         second = path.stat().st_size
     grew = second - first
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
-        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.6)})
+        log.write_step(
+            {"robot0_link0": _pose(0.0)}, extrinsics={CameraName.AGENTVIEW: _extrinsic(1.6)}
+        )
         base = path.stat().st_size
-        log.write_step({"robot0_link0": _pose(0.0)}, extrinsics={"agentview": _extrinsic(1.7)})
+        log.write_step(
+            {"robot0_link0": _pose(0.0)}, extrinsics={CameraName.AGENTVIEW: _extrinsic(1.7)}
+        )
         real = path.stat().st_size - base
     assert grew < real
 
@@ -580,7 +601,7 @@ def test_a_malformed_header_camera_is_refused(tmp_path):
                 "episode_idx": 0,
                 "overview_group": None,
                 "channels": [],
-                "cameras": [{"name": "agentview"}],
+                "cameras": [{"name": CameraName.AGENTVIEW}],
             },
             seq=0,
         )
@@ -599,7 +620,7 @@ def test_a_header_camera_list_that_is_not_a_list_is_refused(tmp_path):
                 "episode_idx": 0,
                 "overview_group": None,
                 "channels": [],
-                "cameras": {"agentview": {}},
+                "cameras": {CameraName.AGENTVIEW: {}},
             },
             seq=0,
         )

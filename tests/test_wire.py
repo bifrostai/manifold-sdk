@@ -1,5 +1,6 @@
 import numpy as np
 
+from manifold.sensors import CameraName
 from manifold.wire import codec as wire
 
 
@@ -62,7 +63,10 @@ def test_frame_from_an_older_peer_decodes_with_default_lane() -> None:
 
 def test_find_encoded_image_descends_into_nested_payloads() -> None:
     image = wire.pack_encoded_image(b"JPEGDATA", format_="jpeg")
-    assert wire.find_encoded_image({"images": {"agentview": image}}) == (b"JPEGDATA", "jpeg")
+    assert wire.find_encoded_image({"images": {CameraName.AGENTVIEW: image}}) == (
+        b"JPEGDATA",
+        "jpeg",
+    )
 
 
 def test_unpack_ndarray_full_preserves_shape_and_all_values() -> None:

@@ -37,6 +37,7 @@ from manifold.core.embodiment import (
 from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Camera
+from manifold.sensors import CameraName
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -335,13 +336,13 @@ def _unified_through_check_pipeline() -> tuple[PolicySignature, Benchmark, Pipel
     benchmark = Benchmark(
         name="suite",
         embodiment=Embodiment(name="arm", action=_signed_ee(), proprioception=proprio),
-        sensors=[Camera(name="agentview", shape=(8, 8, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
     policy = PolicySignature(
         action_space=UnifiedActionSpace(width=12, payload=_ee_unsigned()),
         proprioception=proprio,
-        cameras=[Camera(name="agentview", shape=(8, 8, 3))],
+        cameras=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
     pipeline = Pipeline(

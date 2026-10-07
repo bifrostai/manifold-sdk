@@ -23,6 +23,7 @@ from manifold.core.values import Action, Observation
 from manifold.recipes.function import StatefulEndpoint
 from manifold.recipes.local import _default_pool
 from manifold.recipes.resolve import resolve
+from manifold.sensors import CameraName
 from manifold.sensors.cameras import agentview, wrist
 
 
@@ -69,23 +70,23 @@ def test_a_camera_that_already_matches_gets_no_orientation_adapter() -> None:
         for adapter in pool
         if isinstance(adapter, FlipVerticalCameras | Rotate180Cameras)
     ]
-    assert flipped == [("wrist",), ("wrist",)]
+    assert flipped == [(CameraName.WRIST,), (CameraName.WRIST,)]
     assert not any(isinstance(adapter, ResizeCameras) for adapter in pool)
 
 
 def test_a_camera_the_benchmark_does_not_publish_gets_no_adapter() -> None:
     signature = _signature(agentview((224, 224, 3)), wrist((224, 224, 3)))
     no_wrist = LIBERO.model_copy(
-        update={"sensors": [c for c in LIBERO.sensors if c.name != "wrist"]}
+        update={"sensors": [c for c in LIBERO.sensors if c.name != CameraName.WRIST]}
     )
 
     pool = _default_pool(signature, no_wrist)
 
     for adapter in pool:
         if isinstance(adapter, FlipVerticalCameras | Rotate180Cameras):
-            assert adapter.cameras == ("agentview",)
+            assert adapter.cameras == (CameraName.AGENTVIEW,)
         if isinstance(adapter, ResizeCameras):
-            assert set(adapter.targets) == {"agentview"}
+            assert set(adapter.targets) == {CameraName.AGENTVIEW}
 
 
 def test_matching_ee_pose_formats_get_no_proprioception_rotation() -> None:
@@ -176,7 +177,7 @@ def test_serve_probes_predict_once_with_a_placeholder_instruction(
 
     assert len(seen) == 1
     assert seen[0].instruction == "probe"
-    assert seen[0].sensors["agentview"].shape == (224, 224, 3)
+    assert seen[0].sensors[CameraName.AGENTVIEW].shape == (224, 224, 3)
     assert len(served) == 1
 
 
