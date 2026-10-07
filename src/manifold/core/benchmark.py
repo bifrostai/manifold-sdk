@@ -90,5 +90,18 @@ class Benchmark(BaseModel):
             raise TypeError(f"{self!r} has no gripper action to target")
         return gripper
 
+    def with_sensors(self, names: set[str]) -> Benchmark:
+        """The same benchmark publishing only the sensors in `names`, in its own order.
+
+        A benchmark calls this with the cameras a policy reads and the ones it renders
+        for itself, such as its live view, before it builds its scene. A name the
+        benchmark does not publish raises `ValueError`.
+        """
+        unknown = names - {sensor.name for sensor in self.sensors}
+        if unknown:
+            raise ValueError(f"{self.name} does not publish the sensors {sorted(unknown)}")
+        sensors = [sensor for sensor in self.sensors if sensor.name in names]
+        return self.model_copy(update={"sensors": sensors})
+
 
 __all__ = ["Benchmark"]
