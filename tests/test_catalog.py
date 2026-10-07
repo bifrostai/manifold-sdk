@@ -72,6 +72,8 @@ def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
         "agentview_left",
         "agentview_right",
         "over_shoulder_left",
+        "over_shoulder_right",
+        "head",
         "wrist",
         "wrist_depth",
     }
