@@ -101,6 +101,7 @@ def _records(episodes: int, *, successes: int):
             started_at=moment,
             ended_at=moment,
             task_id="task",
+            timings=None,
         )
         for idx in range(episodes)
     )
@@ -1189,7 +1190,10 @@ class _ScriptedTransport:
             return {"type": FrameType.READY, "payload": {}}
         return {
             "type": FrameType.ACTION,
-            "payload": bridge.encode_action(Action.from_array([0.0] * self.width)),
+            "payload": bridge.encode_action(
+                Action.from_array([0.0] * self.width),
+                bridge.PolicyStepTiming(handling_sec=0.0, forward_pass=True),
+            ),
         }
 
 
@@ -1477,7 +1481,7 @@ def test_a_recorder_is_ended_when_its_own_begin_raises(monkeypatch):
 def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
     import json
 
-    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
+    from manifold.recipes import BenchmarkResult, EpisodeRecord, EpisodeTimings, write_rollup
 
     record = EpisodeRecord(
         episode_idx=3,
@@ -1488,6 +1492,15 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
         started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
         ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
         task_id="PickUpTheMugTask",
+        timings=EpisodeTimings(
+            forward_passes=2,
+            inference_p50_sec=0.04,
+            inference_p95_sec=0.05,
+            inference_max_sec=0.05,
+            network_p50_sec=0.01,
+            network_p95_sec=0.02,
+            network_max_sec=0.03,
+        ),
     )
 
     path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="libero")
@@ -1504,6 +1517,15 @@ def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
                 "started_at": "2026-01-01T12:00:00+00:00",
                 "ended_at": "2026-01-01T12:00:30+00:00",
                 "task_id": "PickUpTheMugTask",
+                "timings": {
+                    "forward_passes": 2,
+                    "inference_p50_sec": 0.04,
+                    "inference_p95_sec": 0.05,
+                    "inference_max_sec": 0.05,
+                    "network_p50_sec": 0.01,
+                    "network_p95_sec": 0.02,
+                    "network_max_sec": 0.03,
+                },
             }
         ]
     }
@@ -1538,7 +1560,8 @@ def test_run_benchmark_refuses_an_action_the_benchmark_cannot_take(monkeypatch) 
             if reply["type"] != FrameType.ACTION:
                 return reply
             short = Action.from_array([0.0] * (self.width - 1))
-            return {**reply, "payload": bridge.encode_action(short)}
+            timing = bridge.PolicyStepTiming(handling_sec=0.0, forward_pass=True)
+            return {**reply, "payload": bridge.encode_action(short, timing)}
 
     monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
     monkeypatch.setattr(
@@ -1591,3 +1614,209 @@ def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> No
     )
     assert closed is True
     assert any("newer than this server" in event for event in events)
+
+
+# --- step timings ------------------------------------------------------------------
+
+
+class _TimedTransport(_ScriptedTransport):
+    """Answers each observation with the next of `timings` as the policy's timing."""
+
+    def __init__(self, timings) -> None:
+        super().__init__()
+        self.timings = iter(timings)
+
+    def recv(self):
+        from manifold.wire import FrameType, bridge
+
+        reply = super().recv()
+        if reply["type"] != FrameType.ACTION:
+            return reply
+        action = bridge.decode_action(reply["payload"])
+        timing = next(self.timings)
+        if timing is None:
+            payload = bridge.encode_action(action, bridge.PolicyStepTiming(0.0, True))
+            del payload["handling_sec"], payload["forward_pass"]
+            return {**reply, "payload": payload}
+        return {**reply, "payload": bridge.encode_action(action, timing)}
+
+
+def _run_one_timed_episode(monkeypatch, timings, *, clock):
+    """Drive one episode of `len(timings)` steps, reading `clock` as the benchmark's clock."""
+    from manifold.core.values import Observation
+    from manifold.recipes import run_benchmark, serving
+
+    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
+    monkeypatch.setattr(
+        serving.FrameChannel,
+        "from_socket",
+        staticmethod(lambda _sock: _TimedTransport(timings)),
+    )
+    ticks = iter(clock)
+    monkeypatch.setattr(serving, "time", SimpleNamespace(perf_counter=lambda: next(ticks)))
+
+    def step(_action) -> StepResult:
+        return StepResult(observation=Observation(), success=False, done=False)
+
+    result = run_benchmark(
+        _fake_benchmark(),
+        lambda: ResetResult(Observation(), task_id="task"),
+        step,
+        episodes=1,
+        max_steps=len(timings),
+        port=9000,
+        on_event=lambda _m: None,
+    )
+    return result.records[0]
+
+
+def test_an_episode_splits_each_round_trip_into_inference_and_network(monkeypatch):
+    from dataclasses import asdict
+
+    from manifold.wire import bridge
+
+    # Round trips of 0.1 s, 0.05 s and 0.2 s on the benchmark's clock. The second
+    # step served a buffered chunk, so inference covers the first and third only.
+    record = _run_one_timed_episode(
+        monkeypatch,
+        [
+            bridge.PolicyStepTiming(handling_sec=0.03, forward_pass=True),
+            bridge.PolicyStepTiming(handling_sec=0.01, forward_pass=False),
+            bridge.PolicyStepTiming(handling_sec=0.05, forward_pass=True),
+        ],
+        clock=[0.0, 0.1, 1.0, 1.05, 2.0, 2.2],
+    )
+
+    assert record.timings is not None
+    assert asdict(record.timings) == pytest.approx(
+        {
+            "forward_passes": 2,
+            "inference_p50_sec": 0.04,
+            "inference_p95_sec": 0.049,
+            "inference_max_sec": 0.05,
+            "network_p50_sec": 0.07,
+            "network_p95_sec": 0.142,
+            "network_max_sec": 0.15,
+        }
+    )
+
+
+def test_an_episode_against_an_older_policy_records_no_timings(monkeypatch):
+    record = _run_one_timed_episode(monkeypatch, [None, None], clock=[0.0, 0.1, 1.0, 1.1])
+
+    assert record.timings is None
+
+
+class _InferringQueue(_CountingQueue):
+    """A queue that answers through `infer`, as `FunctionSession` does."""
+
+    def infer(self, observation, /):
+        from manifold.core.values import Action
+
+        self.advance(observation)
+        return Action.from_array([0.0])
+
+
+class _UnflaggedSession:
+    """A session that is not an `ActionQueue`, so it does not report forward passes."""
+
+    def advance(self, _native, /):
+        return None, 0
+
+    def reset(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+def _serve_three_observations(monkeypatch, session, *, packing: bool) -> list:
+    """Serve three observations to `session`, and return the timing sent with each action."""
+    from manifold.core.values import Action, Observation
+    from manifold.recipes import serving
+    from manifold.wire import FrameType, bridge
+
+    frames = iter(
+        [
+            {
+                "type": FrameType.HELLO,
+                "payload": {"benchmark": _fake_benchmark().model_dump(mode="json")},
+            },
+            *[
+                {"type": FrameType.OBSERVATION, "payload": bridge.encode_observation(Observation())}
+                for _ in range(3)
+            ],
+            {"type": FrameType.BYE, "payload": {}},
+        ]
+    )
+    actions: list[dict] = []
+
+    class _Channel:
+        def recv(self):
+            return next(frames)
+
+        def send(self, frame_type, payload) -> None:
+            if frame_type == FrameType.ACTION:
+                actions.append(payload)
+
+    pipeline = SimpleNamespace(
+        pack=object() if packing else None,
+        unpack=object() if packing else None,
+        apply_observation=lambda observation, **_kw: observation,
+        apply_pack=lambda observation, **_kw: {},
+        apply_unpack=lambda _chunk, **_kw: Action.from_array([0.0]),
+        apply_action=lambda action, **_kw: action,
+    )
+    endpoint = SimpleNamespace(
+        signature=SimpleNamespace(observation_space=None, action_space=None),
+        session=lambda: session,
+    )
+    monkeypatch.setattr(serving.FrameChannel, "from_socket", staticmethod(lambda _conn: _Channel()))
+    monkeypatch.setattr(serving, "_gate", lambda *_args: True)
+
+    serving._serve_session(
+        cast(Any, endpoint),
+        cast(Any, lambda _benchmark: pipeline),
+        cast(Any, None),
+        "peer",
+        print,
+    )
+    return [bridge.decode_policy_step_timing(payload) for payload in actions]
+
+
+@pytest.mark.parametrize(
+    ("session", "packing"),
+    [
+        pytest.param(_CountingQueue(execution_steps=2), True, id="advance"),
+        pytest.param(_InferringQueue(execution_steps=2), False, id="infer"),
+    ],
+)
+def test_serve_flags_the_steps_that_ran_a_forward_pass(monkeypatch, session, packing):
+    # The queue serves each chunk for two steps, so steps one and three run the model.
+    timings = _serve_three_observations(monkeypatch, session, packing=packing)
+
+    assert [timing.forward_pass for timing in timings if timing is not None] == [True, False, True]
+    assert all(timing is not None and timing.handling_sec >= 0.0 for timing in timings)
+
+
+def test_serve_leaves_the_forward_pass_unknown_for_a_session_that_is_not_a_queue(monkeypatch):
+    timings = _serve_three_observations(monkeypatch, _UnflaggedSession(), packing=True)
+
+    assert [timing.forward_pass for timing in timings if timing is not None] == [None] * 3
+
+
+def test_inference_covers_every_step_when_the_policy_does_not_flag_forward_passes(monkeypatch):
+    from manifold.wire import bridge
+
+    record = _run_one_timed_episode(
+        monkeypatch,
+        [
+            bridge.PolicyStepTiming(handling_sec=0.03, forward_pass=None),
+            bridge.PolicyStepTiming(handling_sec=0.01, forward_pass=None),
+        ],
+        clock=[0.0, 0.1, 1.0, 1.05],
+    )
+
+    assert record.timings is not None
+    assert record.timings.forward_passes == 2
+    assert record.timings.inference_max_sec == pytest.approx(0.03)
