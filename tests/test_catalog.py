@@ -4,8 +4,6 @@ import pkgutil
 import pytest
 
 import manifold.embodiments
-from manifold.benchmarks import ALL
-from manifold.core import Benchmark, Compatibility, PolicySignature, check_compatibility
 from manifold.core.embodiment import Embodiment
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
@@ -13,19 +11,6 @@ from manifold.embodiments import ALL as EMBODIMENTS
 # Read off the package directory, not off `ALL`, so a newly added file is checked
 # whether or not the catalog has been told about it.
 MODULES = sorted(module.name for module in pkgutil.iter_modules(manifold.embodiments.__path__))
-
-
-@pytest.mark.parametrize("benchmark", ALL, ids=lambda benchmark: benchmark.name)
-def test_a_native_policy_is_compatible_with_each_shipped_benchmark(benchmark: Benchmark) -> None:
-    # A policy that declares exactly what the benchmark publishes must pair,
-    # with no adapter — this is the coherence check on the catalog as it grows.
-    native = PolicySignature(
-        action_space=benchmark.embodiment.action,
-        proprioception=benchmark.observation_space.proprioception,
-        cameras=list(benchmark.observation_space.cameras),
-        instruction=benchmark.observation_space.instruction,
-    )
-    assert check_compatibility(native, benchmark).status is Compatibility.COMPATIBLE
 
 
 @pytest.mark.parametrize("embodiment", EMBODIMENTS, ids=lambda embodiment: embodiment.name)

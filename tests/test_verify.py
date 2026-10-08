@@ -239,16 +239,16 @@ def test_quaternion_double_cover_still_passes() -> None:
 
 
 def test_clean_catalog_match_verifies_ok() -> None:
-    from manifold.benchmarks.libero import LIBERO
+    from tests._benchmarks import TABLETOP
 
-    obs = LIBERO.observation_space
+    obs = TABLETOP.observation_space
     policy = PolicySignature(
-        action_space=LIBERO.embodiment.action,
+        action_space=TABLETOP.embodiment.action,
         proprioception=obs.proprioception,
         cameras=list(obs.cameras),
         instruction=obs.instruction,
     )
-    report = verify(policy, LIBERO, Pipeline())
+    report = verify(policy, TABLETOP, Pipeline())
     assert report.ok, report.reasons
 
 

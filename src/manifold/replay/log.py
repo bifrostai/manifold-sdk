@@ -274,7 +274,7 @@ class CameraPinhole:
     convention rather than declared per camera, exactly as this log fixes `xyzw`
     orientation and metric position: fixing it by convention removes a field every
     writer would have to set correctly. A publisher whose simulator uses other
-    axes converts before logging, as `benchmarks.libero` does via robosuite's
+    axes converts before logging, as a robosuite publisher does with
     `get_camera_extrinsic_matrix`.
 
     A record of its own rather than `core.sensor.CameraIntrinsics`:
