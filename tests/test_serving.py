@@ -453,6 +453,102 @@ def test_serve_reads_the_next_frame_after_replying_to_get_signature():
     assert any(event.startswith("benchmark connected from") for event in events)
 
 
+def test_serve_creates_an_endpoint_for_each_benchmark_it_is_paired_with():
+    """A callable endpoint receives the benchmark from HELLO, and the signature of the
+    endpoint it returns gates that pairing, so one server pairs with two embodiments."""
+    from manifold.core import PolicySignature
+    from manifold.core.benchmark import Benchmark
+    from manifold.core.values import Action, Observation
+    from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_EE_DELTA
+    from manifold.recipes import run_benchmark, serve
+    from manifold.recipes.function import FunctionEndpoint
+
+    paired: list[str] = []
+
+    def create_endpoint(benchmark: Benchmark) -> FunctionEndpoint:
+        paired.append(benchmark.name)
+        width = benchmark.action_space.expected_length()
+        signature = PolicySignature(
+            action_space=benchmark.action_space,
+            proprioception=benchmark.embodiment.proprioception,
+            instruction=False,
+        )
+        return FunctionEndpoint(lambda _obs: Action.from_array([0.5] * width), signature)
+
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(create_endpoint,),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    widths: dict[str, int] = {}
+    for embodiment in (FRANKA_EE_DELTA, DROID_JOINT_ABSOLUTE):
+        benchmark = Benchmark(name=embodiment.name, embodiment=embodiment, instruction=False)
+
+        def step(action, name=embodiment.name) -> StepResult:
+            widths[name] = len(action.values)
+            return StepResult(observation=Observation(), success=True, done=True)
+
+        result = run_benchmark(
+            benchmark,
+            lambda: ResetResult(Observation(), task_id="task"),
+            step,
+            episodes=1,
+            max_steps=1,
+            port=port,
+            on_event=lambda _m: None,
+        )
+        assert result.successes == 1
+
+    assert paired == [FRANKA_EE_DELTA.name, DROID_JOINT_ABSOLUTE.name]
+    assert widths == {
+        FRANKA_EE_DELTA.name: FRANKA_EE_DELTA.action.expected_length(),
+        DROID_JOINT_ABSOLUTE.name: DROID_JOINT_ABSOLUTE.action.expected_length(),
+    }
+
+
+def test_serve_replies_to_get_signature_without_a_signature_for_a_callable_endpoint():
+    """A callable endpoint declares its signature only once a benchmark is paired."""
+    from manifold.recipes import serve
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    def create_endpoint(_benchmark):
+        raise AssertionError("GET_SIGNATURE does not pair a benchmark")
+
+    threading.Thread(
+        target=serve,
+        args=(create_endpoint,),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        reply = channel.recv()
+
+    assert reply is not None
+    assert reply["type"] == FrameType.SIGNATURE
+    assert reply["payload"]["signature"] is None
+
+
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
 # The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so

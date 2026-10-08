@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from importlib.metadata import distribution
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, cast, runtime_checkable
 
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
@@ -220,7 +220,7 @@ def _is_inside(path: Path, roots: tuple[Path, ...]) -> bool:
 
 
 def _serve_connection(
-    endpoint: PolicyEndpoint,
+    endpoint: PolicyEndpoint | Callable[[Benchmark], PolicyEndpoint],
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
@@ -249,7 +249,7 @@ def _serve_connection(
 
 
 def _serve_session(
-    endpoint: PolicyEndpoint,
+    endpoint: PolicyEndpoint | Callable[[Benchmark], PolicyEndpoint],
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
@@ -277,7 +277,9 @@ def _serve_session(
         channel.send(
             FrameType.SIGNATURE,
             {
-                "signature": endpoint.signature.model_dump(mode="json"),
+                "signature": None
+                if callable(endpoint)
+                else endpoint.signature.model_dump(mode="json"),
                 "sdk_version": _sdk_commit(),
                 "script": script,
             },
@@ -303,6 +305,7 @@ def _serve_session(
         return True
     benchmark = Benchmark.model_validate(hello["payload"]["benchmark"])
 
+    endpoint = _resolve_endpoint(endpoint, benchmark)
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
     if not _gate(signature, benchmark, resolved, emit):
@@ -394,6 +397,17 @@ def _gate(
     reasons = report.reasons + list(verified.reasons)
     emit(f"incompatible — rejecting the pairing. reasons: {reasons}")
     return False
+
+
+def _resolve_endpoint(
+    endpoint: PolicyEndpoint | Callable[[Benchmark], PolicyEndpoint],
+    benchmark: Benchmark,
+) -> PolicyEndpoint:
+    """Turn the `endpoint` argument into a concrete PolicyEndpoint for this benchmark."""
+    if callable(endpoint):
+        # A `PolicyEndpoint` is not callable, so a callable is the endpoint factory.
+        return cast("Callable[[Benchmark], PolicyEndpoint]", endpoint)(benchmark)
+    return endpoint
 
 
 def _resolve_pipeline(
@@ -802,7 +816,7 @@ def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: s
 
 
 def serve(
-    endpoint: PolicyEndpoint,
+    endpoint: PolicyEndpoint | Callable[[Benchmark], PolicyEndpoint],
     *,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
     host: str = "127.0.0.1",
@@ -824,6 +838,11 @@ def serve(
     runs one forward at a time across connections; `serve` does not add another lock.
     One connection's failure is confined to its worker thread. A KeyboardInterrupt
     stops accepting and gives all in-flight workers one second in total to finish.
+
+    `endpoint` may be a loaded `PolicyEndpoint`, or a callable that is invoked per
+    connection with the benchmark and returns the endpoint for that pairing. Use a
+    callable for a policy that derives its signature from the benchmark. With a
+    callable, the server replies to GET_SIGNATURE without a signature.
 
     `pipeline` may be None (empty pipeline), a callable invoked per connection with
     the benchmark (the dynamic-injection hook — the pipeline arrives with the job),
