@@ -44,6 +44,7 @@ from manifold.core import (
     RotationFormat,
     check_compatibility,
 )
+from manifold.core.names import EmbodimentName
 from manifold.sensors import CameraName
 
 
@@ -55,7 +56,7 @@ def _ee() -> EEActionSpace:
 
 def _benchmark(camera: Camera) -> Benchmark:
     embodiment = Embodiment(
-        name="arm",
+        name=EmbodimentName.FRANKA_EE_DELTA,
         action=_ee(),
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
@@ -92,7 +93,7 @@ def test_swap_channel_order_produce_flips_the_declared_channel_order() -> None:
     source = ObservationSpace(
         cameras=(
             Camera(name=CameraName.AGENTVIEW, shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
-            Camera(name="extra", shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
+            Camera(name=CameraName.WRIST, shape=(1, 1, 3), channel_order=ChannelOrder.BGR),
         )
     )
     adapter = SwapChannelOrder(target=ChannelOrder.RGB, cameras=(CameraName.AGENTVIEW,))
@@ -104,7 +105,7 @@ def test_swap_channel_order_produce_flips_the_declared_channel_order() -> None:
     agentview = produced.camera(CameraName.AGENTVIEW)
     assert agentview is not None and agentview.channel_order is ChannelOrder.RGB
     # The unnamed camera is untouched.
-    extra = produced.camera("extra")
+    extra = produced.camera(CameraName.WRIST)
     assert extra is not None and extra.channel_order is ChannelOrder.BGR
 
 

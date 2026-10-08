@@ -988,7 +988,7 @@ def _probe_observation(contract: ObservationSpace) -> Observation:
             state[name] = np.asarray(_probe_joint_step(spec), dtype=np.float32)
         else:
             state[name] = np.asarray(spec.example(), dtype=np.float32)
-    sensors = {
+    sensors: dict[str, np.ndarray] = {
         camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
     }
     instruction = "" if contract.instruction else None
@@ -1143,7 +1143,7 @@ def probe_observation(contract: ObservationSpace, *, instruction: str = "") -> O
             state[name] = _probe_ee_pose(spec)
         else:
             state[name] = np.asarray(spec.example(), dtype=np.float32)
-    sensors = {
+    sensors: dict[str, np.ndarray] = {
         camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
     }
     return Observation(

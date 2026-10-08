@@ -29,6 +29,7 @@ from manifold.core.embodiment.proprioception import (
     GripperObservationSpec,
     JointObservationSpec,
 )
+from manifold.core.names import EmbodimentName
 
 _Q = RotationFormat.QUATERNION
 
@@ -188,11 +189,11 @@ def test_no_pre_existing_embodiment_changes_width() -> None:
 
     widths = {embodiment.name: embodiment.action.expected_length() for embodiment in ALL}
     for name, expected in {
-        "droid_joint_absolute": 8,
-        "franka_ee_delta": 7,
-        "franka_joint_absolute": 8,
-        "panda_omron_whole_body": 12,
-        "widowx_ee_delta": 7,
+        EmbodimentName.DROID_JOINT_ABSOLUTE: 8,
+        EmbodimentName.FRANKA_EE_DELTA: 7,
+        EmbodimentName.FRANKA_JOINT_ABSOLUTE: 8,
+        EmbodimentName.PANDA_OMRON_WHOLE_BODY: 12,
+        EmbodimentName.WIDOWX_EE_DELTA: 7,
     }.items():
         assert widths[name] == expected, name
 

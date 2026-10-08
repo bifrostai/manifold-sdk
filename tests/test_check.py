@@ -32,6 +32,7 @@ from manifold.core import (
     UnifiedActionSpace,
     check_compatibility,
 )
+from manifold.core.names import EmbodimentName
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 from manifold.sensors import CameraName
 
@@ -42,7 +43,7 @@ def _ee(gripper: GripperFormat = GripperFormat.SIGNED) -> EEActionSpace:
 
 def _benchmark(*, instruction: bool = True) -> Benchmark:
     embodiment = Embodiment(
-        name="arm",
+        name=EmbodimentName.FRANKA_EE_DELTA,
         action=_ee(),
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)
@@ -240,7 +241,7 @@ def test_frame_history_is_the_spec_edge_for_a_clip_consuming_policy() -> None:
     benchmark = Benchmark(
         name="suite",
         embodiment=Embodiment(
-            name="arm",
+            name=EmbodimentName.FRANKA_EE_DELTA,
             action=_ee(),
             proprioception=Proprioception(
                 ee_pose=EEObservationSpec(rotation=RotationFormat.AXIS_ANGLE)

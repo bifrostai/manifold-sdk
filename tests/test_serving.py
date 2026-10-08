@@ -23,6 +23,7 @@ from PIL import Image
 
 from manifold.recipes import ActionQueue, ResetResult, StepResult
 from manifold.recipes.serving import PolicyEndpoint
+from manifold.sensors import CameraName
 
 
 def _endpoint(execution_steps: int) -> PolicyEndpoint:
@@ -453,6 +454,56 @@ def test_serve_reads_the_next_frame_after_replying_to_get_signature():
     assert any(event.startswith("benchmark connected from") for event in events)
 
 
+def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
+    """A benchmark on a newer SDK may publish a camera this one does not list; a
+    policy that does not read it still gets READY."""
+    from manifold.core import Benchmark, Camera, PolicySignature
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import serve
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    signature = PolicySignature(action_space=FRANKA_EE_DELTA.action, instruction=False)
+    advertised = Benchmark(
+        name="suite",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
+        instruction=False,
+    ).model_dump(mode="json")
+    advertised["sensors"].append({**advertised["sensors"][0], "name": "head"})
+    endpoint = SimpleNamespace(
+        signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
+    )
+    port = _free_port()
+    listening = threading.Event()
+    events: list[str] = []
+
+    def record(event: str) -> None:
+        events.append(event)
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, endpoint),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(
+            FrameType.HELLO,
+            {"protocol_version": BRIDGE_PROTOCOL_VERSION, "benchmark": advertised},
+        )
+        reply = channel.recv()
+        channel.send(FrameType.BYE, {})
+
+    assert reply is not None and reply.get("type") == FrameType.READY, events
+    assert "ignoring cameras this SDK does not list: head" in events
+
+
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
 # The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so
@@ -558,7 +609,7 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
         embodiment=FRANKA_EE_DELTA,
         sensors=[
             Camera(
-                name="scene",
+                name=CameraName.AGENTVIEW,
                 shape=source.shape,
                 orientation=orientation,
                 channel_order=channel_order,
@@ -570,21 +621,22 @@ def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
     def step(_action) -> StepResult:
         assert received_frame.wait(timeout=2.0)
         return StepResult(
-            observation=Observation(sensors={"scene": source}), success=True, done=True
+            observation=Observation(sensors={CameraName.AGENTVIEW: source}), success=True, done=True
         )
 
     # act
     result = run_episodes(
         benchmark,
         lambda _episode: ResetResult(
-            Observation(sensors={"scene": source}, instruction="pick"), task_id="PickTask"
+            Observation(sensors={CameraName.AGENTVIEW: source}, instruction="pick"),
+            task_id="PickTask",
         ),
         step,
         server="policy:9000",
         episode_ids=[7],
         max_steps=1,
         live_view_server="127.0.0.1:9001",
-        live_view_camera="scene",
+        live_view_camera=CameraName.AGENTVIEW,
     )
     receiver.join(timeout=2.0)
 
@@ -665,7 +717,7 @@ def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatc
     benchmark = Benchmark(
         name="bench-1",
         embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name="scene", shape=image.shape)],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
     )
 
     steps = 0
@@ -676,13 +728,13 @@ def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatc
         if steps == 1:
             assert publish_next.wait(timeout=2.0)
             return StepResult(
-                observation=Observation(sensors={"scene": image}),
+                observation=Observation(sensors={CameraName.AGENTVIEW: image}),
                 success=False,
                 done=False,
             )
         assert received_second.wait(timeout=2.0)
         return StepResult(
-            observation=Observation(sensors={"scene": image}),
+            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
             success=True,
             done=True,
         )
@@ -690,13 +742,15 @@ def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatc
     # act
     result = run_episodes(
         benchmark,
-        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
+        lambda _episode: ResetResult(
+            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
+        ),
         step,
         server="policy:9000",
         episode_ids=[0],
         max_steps=2,
         live_view_server="127.0.0.1:9001",
-        live_view_camera="scene",
+        live_view_camera=CameraName.AGENTVIEW,
     )
     receiver.join(timeout=2.0)
 
@@ -772,26 +826,28 @@ def test_run_episodes_retries_a_live_frame_when_sending_fails(monkeypatch):
     benchmark = Benchmark(
         name="bench-1",
         embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name="scene", shape=image.shape)],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
     )
 
     def step(_action) -> StepResult:
         assert received_frame.wait(timeout=2.0)
         return StepResult(
-            observation=Observation(sensors={"scene": image}),
+            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
             success=True,
             done=True,
         )
 
     run_episodes(
         benchmark,
-        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
+        lambda _episode: ResetResult(
+            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
+        ),
         step,
         server="policy:9000",
         episode_ids=[0],
         max_steps=1,
         live_view_server="127.0.0.1:9001",
-        live_view_camera="scene",
+        live_view_camera=CameraName.AGENTVIEW,
     )
     receiver.join(timeout=2.0)
 
@@ -834,26 +890,28 @@ def test_run_episodes_rejects_a_boolean_live_view_acknowledgement(monkeypatch):
     benchmark = Benchmark(
         name="bench-1",
         embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name="scene", shape=image.shape)],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
     )
 
     def step(_action) -> StepResult:
         assert acknowledgement_rejected.wait(timeout=2.0)
         return StepResult(
-            observation=Observation(sensors={"scene": image}),
+            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
             success=True,
             done=True,
         )
 
     run_episodes(
         benchmark,
-        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
+        lambda _episode: ResetResult(
+            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
+        ),
         step,
         server="policy:9000",
         episode_ids=[0],
         max_steps=1,
         live_view_server="127.0.0.1:9001",
-        live_view_camera="scene",
+        live_view_camera=CameraName.AGENTVIEW,
     )
     receiver.join(timeout=2.0)
 
@@ -889,7 +947,7 @@ def test_run_episodes_rejects_a_depth_live_view_camera():
         embodiment=FRANKA_EE_DELTA,
         sensors=[
             Camera(
-                name="depth",
+                name=CameraName.AGENTVIEW_DEPTH,
                 shape=(256, 256, 1),
                 dtype="float32",
                 modality=Modality.DEPTH,
@@ -906,7 +964,7 @@ def test_run_episodes_rejects_a_depth_live_view_camera():
             episode_ids=[],
             max_steps=1,
             live_view_server="127.0.0.1:9001",
-            live_view_camera="depth",
+            live_view_camera=CameraName.AGENTVIEW_DEPTH,
         )
 
 
@@ -928,14 +986,16 @@ def test_run_episodes_validates_a_live_view_before_copying(monkeypatch):
     benchmark = Benchmark(
         name="bench-1",
         embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name="scene", shape=(256, 256, 3))],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
     )
 
     with live_server, pytest.raises(ValueError, match="shape mismatch"):
         run_episodes(
             benchmark,
             lambda _episode: ResetResult(
-                Observation(sensors={"scene": np.zeros((1000, 1000, 3), dtype=np.uint8)}),
+                Observation(
+                    sensors={CameraName.AGENTVIEW: np.zeros((1000, 1000, 3), dtype=np.uint8)}
+                ),
                 task_id="task",
             ),
             _step,
@@ -943,7 +1003,7 @@ def test_run_episodes_validates_a_live_view_before_copying(monkeypatch):
             episode_ids=[0],
             max_steps=1,
             live_view_server="127.0.0.1:9001",
-            live_view_camera="scene",
+            live_view_camera=CameraName.AGENTVIEW,
         )
 
 
@@ -979,26 +1039,28 @@ def test_run_episodes_closes_a_live_view_socket_during_a_partial_control_frame(
     benchmark = Benchmark(
         name="bench-1",
         embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name="scene", shape=image.shape)],
+        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
     )
 
     def step(_action) -> StepResult:
         assert partial_sent.wait(timeout=2.0)
         return StepResult(
-            observation=Observation(sensors={"scene": image}),
+            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
             success=True,
             done=True,
         )
 
     run_episodes(
         benchmark,
-        lambda _episode: ResetResult(Observation(sensors={"scene": image}), task_id="task"),
+        lambda _episode: ResetResult(
+            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
+        ),
         step,
         server="policy:9000",
         episode_ids=[0],
         max_steps=1,
         live_view_server="127.0.0.1:9001",
-        live_view_camera="scene",
+        live_view_camera=CameraName.AGENTVIEW,
     )
     receiver.join(timeout=1.0)
 

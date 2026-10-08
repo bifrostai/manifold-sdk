@@ -20,11 +20,14 @@ from manifold.core import (
     RotationFormat,
     UnifiedActionSpace,
 )
+from manifold.core.names import EmbodimentName
 
 
 def _benchmark(action: ActionSpace) -> Benchmark:
     """A minimal benchmark wrapping the given action space."""
-    embodiment = Embodiment(name="arm", action=action, proprioception=Proprioception())
+    embodiment = Embodiment(
+        name=EmbodimentName.FRANKA_EE_DELTA, action=action, proprioception=Proprioception()
+    )
     return Benchmark(name="suite", embodiment=embodiment, instruction=False)
 
 

@@ -37,11 +37,12 @@ from manifold.core.embodiment import (
     Proprioception,
     UnifiedActionSpace,
 )
+from manifold.core.names import EmbodimentName
 
 # The gripper is SIGNED ([-1, 1], +1 = closed for the PandaOmron), the polarity
 # the env applies — note this differs from FRANKA_EE_DELTA's open-low convention.
 PANDA_OMRON_WHOLE_BODY = Embodiment(
-    name="panda_omron_whole_body",
+    name=EmbodimentName.PANDA_OMRON_WHOLE_BODY,
     action=UnifiedActionSpace(
         width=12,
         payload=EEActionSpace(

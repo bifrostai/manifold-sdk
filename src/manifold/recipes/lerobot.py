@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import cast
 
 from manifold.core.embodiment.action_space import JointActionSpace
+from manifold.core.names import CameraName
 from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Camera
 
@@ -233,7 +234,9 @@ class SignatureSuggestion:
         Returns a ``PolicySignature`` whose ``action_space`` is a ``JointActionSpace``
         with ``dof=action_dim``. Cameras are stubbed with ``UPRIGHT`` orientation and
         ``RGB`` channel order (the same assumptions recorded in each
-        ``CameraSuggestion``). Proprioception is left empty — the author must wire the
+        ``CameraSuggestion``). A camera whose checkpoint name is not a ``CameraName`` is
+        left out, for the author to add under the name of its viewpoint. Proprioception
+        is left empty — the author must wire the
         correct ``EEObservationSpec`` or ``JointObservationSpec``. Raises
         ``ValueError`` if ``action_dim`` is ``None`` (the output feature was missing
         or malformed), because a ``PolicySignature`` requires an action space.
@@ -245,12 +248,11 @@ class SignatureSuggestion:
                 "Inspect the config.json and set the action space manually."
             )
 
+        listed = {name.value for name in CameraName}
         cameras = [
-            Camera(
-                name=cam.name,
-                shape=cam.shape,
-            )
+            Camera(name=CameraName(cam.name), shape=cam.shape)
             for cam in self.suggested.cameras
+            if cam.name in listed
         ]
 
         action_space = JointActionSpace(

@@ -25,6 +25,7 @@ from manifold.core.embodiment import (
     GripperObservationSpec,
     Proprioception,
 )
+from manifold.core.names import EmbodimentName
 from manifold.core.native_layout import (
     Assemble,
     BatchAxis,
@@ -72,7 +73,9 @@ def _observation_space() -> ObservationSpace:
 def _benchmark() -> Benchmark:
     return Benchmark(
         name="suite",
-        embodiment=Embodiment(name="arm", action=_ee(), proprioception=_proprio()),
+        embodiment=Embodiment(
+            name=EmbodimentName.FRANKA_EE_DELTA, action=_ee(), proprioception=_proprio()
+        ),
         sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=True,
     )

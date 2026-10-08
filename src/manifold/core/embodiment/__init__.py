@@ -30,6 +30,7 @@ from manifold.core.embodiment.proprioception import (
     Proprioception,
 )
 from manifold.core.embodiment.spec import ValueSpec
+from manifold.core.names import EmbodimentName
 
 
 class Embodiment(BaseModel):
@@ -42,7 +43,7 @@ class Embodiment(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    name: str
+    name: EmbodimentName
     action: ActionSpace
     proprioception: Proprioception
 

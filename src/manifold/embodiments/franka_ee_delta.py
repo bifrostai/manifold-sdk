@@ -16,9 +16,10 @@ from manifold.core.embodiment import (
     GripperObservationSpec,
     Proprioception,
 )
+from manifold.core.names import EmbodimentName
 
 FRANKA_EE_DELTA = Embodiment(
-    name="franka_ee_delta",
+    name=EmbodimentName.FRANKA_EE_DELTA,
     action=EEActionSpace(
         rotation=RotationFormat.AXIS_ANGLE,
         gripper=GripperFormat.SIGNED_OPEN_LOW,

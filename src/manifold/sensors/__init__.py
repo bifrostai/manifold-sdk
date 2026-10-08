@@ -9,8 +9,8 @@ unlike the embodiment and benchmark catalogs, which ship instances.)
 
 from __future__ import annotations
 
+from manifold.core.names import CameraName
 from manifold.sensors.cameras import (
-    CameraName,
     agentview,
     agentview_depth,
     agentview_left,

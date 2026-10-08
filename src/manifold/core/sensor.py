@@ -20,6 +20,7 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.core.conventions import CameraAxes, Frame
+from manifold.core.names import CameraName
 from manifold.lib.compat import StrEnum
 
 
@@ -215,7 +216,7 @@ class Camera(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    name: str
+    name: CameraName
     shape: tuple[int, ...] = Field(description="Tensor shape, typically (H, W, 3) for RGB.")
     dtype: str = "uint8"
     mount: Mount = Mount.SCENE

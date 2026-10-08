@@ -16,9 +16,10 @@ from manifold.core.embodiment import (
     GripperObservationSpec,
     Proprioception,
 )
+from manifold.core.names import EmbodimentName
 
 WIDOWX_EE_DELTA = Embodiment(
-    name="widowx_ee_delta",
+    name=EmbodimentName.WIDOWX_EE_DELTA,
     action=EEActionSpace(
         rotation=RotationFormat.EULER_XYZ,
         gripper=GripperFormat.SIGNED,

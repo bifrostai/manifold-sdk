@@ -8,6 +8,8 @@ must drive (the embodiment's `action`).
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.core.conventions import GripperFormat
@@ -18,9 +20,13 @@ from manifold.core.embodiment import (
     JointActionSpace,
     UnifiedActionSpace,
 )
+from manifold.core.names import CameraName
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.sensor import Camera
 from manifold.lib.compat import assert_never
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class Benchmark(BaseModel):
@@ -36,6 +42,19 @@ class Benchmark(BaseModel):
     embodiment: Embodiment
     sensors: list[Camera] = Field(default_factory=list)
     instruction: bool = True
+
+    @classmethod
+    def from_received(cls, payload: Mapping[str, Any]) -> Benchmark:
+        """The benchmark a peer sent, without the cameras this SDK does not list.
+
+        A peer built against a newer SDK may publish a camera named after a viewpoint
+        this one does not list. No policy on this SDK can read that camera, so it is
+        dropped rather than failing the parse. An unlisted embodiment still fails: a
+        robot this SDK does not know cannot be one its policy was built for.
+        """
+        listed = {name.value for name in CameraName}
+        sensors = [sensor for sensor in payload.get("sensors", []) if sensor.get("name") in listed]
+        return cls.model_validate({**payload, "sensors": sensors})
 
     @property
     def observation_space(self) -> ObservationSpace:

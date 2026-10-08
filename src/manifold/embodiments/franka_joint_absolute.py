@@ -25,9 +25,10 @@ from manifold.core.embodiment import (
     JointObservationSpec,
     Proprioception,
 )
+from manifold.core.names import EmbodimentName
 
 FRANKA_JOINT_ABSOLUTE = Embodiment(
-    name="franka_joint_absolute",
+    name=EmbodimentName.FRANKA_JOINT_ABSOLUTE,
     action=JointActionSpace(
         dof=7,
         gripper=GripperFormat.BINARY,
