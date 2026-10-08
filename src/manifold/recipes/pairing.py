@@ -45,7 +45,7 @@ def read_pairing(module: ModuleType) -> Pairing:
     """Read a `Pairing` off a module exporting PROFILE / BENCHMARK / PIPELINE.
 
     The authoring convention for a "pairing module": three module-level names —
-    `PROFILE` (the `PolicyProfile`), `BENCHMARK` (the catalog `Benchmark`), and
+    `PROFILE` (the `PolicyProfile`), `BENCHMARK` (the `Benchmark` it pairs with), and
     `PIPELINE` (the adapter `Pipeline`). Namespace-agnostic — the caller imports the
     module however it likes — so the SDK fixes the contract without owning anyone's
     module layout.
