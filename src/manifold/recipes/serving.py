@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
 from manifold.core.pipeline import Pipeline
+from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Modality
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
@@ -57,7 +58,6 @@ if TYPE_CHECKING:
     from manifold.core.embodiment.spec import ValueSpec
     from manifold.core.native_layout import NativeLayout
     from manifold.core.observation_space import ObservationSpace
-    from manifold.core.policy import PolicySignature
     from manifold.core.values import Action, Observation
     from manifold.recipes.pairing import Pairing
     from manifold.recipes.recording import EpisodeRecorder
@@ -274,6 +274,7 @@ def _serve_session(
     # A peer may send GET_SIGNATURE before HELLO. The CLI closes the connection
     # after the reply, and a benchmark sends HELLO next.
     while hello is not None and hello.get("type") == FrameType.GET_SIGNATURE:
+        emit(f"sent the signature to {addr}")
         channel.send(
             FrameType.SIGNATURE,
             {
@@ -865,6 +866,29 @@ def serve(
         worker.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
 
 
+def request_signature(server: str, *, on_event: Callable[[str], None] = _emit) -> PolicySignature:
+    """Ask the policy at ``host:port`` for its signature, then close the connection.
+
+    A benchmark calls this before it builds its environments, so that it renders the
+    cameras the policy reads. The run opens its own connection afterwards. `on_event`
+    receives the names of the cameras the policy reads.
+
+    Raises:
+        PairingRejected: If the policy closes without replying with its signature.
+    """
+    host, port = _parse_server(server)
+    with socket.create_connection((host, port)) as sock:
+        channel = FrameChannel.from_socket(sock)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        reply = channel.recv()
+    if reply is None or reply.get("type") != FrameType.SIGNATURE:
+        raise PairingRejected("the policy closed the connection without sending its signature")
+    signature = PolicySignature.model_validate(reply["payload"]["signature"])
+    names = ", ".join(camera.name for camera in signature.cameras) or "none"
+    on_event(f"the policy reads cameras: {names}")
+    return signature
+
+
 def run_benchmark(
     benchmark: Benchmark,
     reset: Callable[[], ResetResult],
@@ -1270,6 +1294,7 @@ __all__ = [
     "Transport",
     "evaluate",
     "launch_server",
+    "request_signature",
     "run_benchmark",
     "run_episodes",
     "run_sharded_benchmark",

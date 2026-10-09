@@ -350,6 +350,7 @@ def test_serve_replies_to_get_signature_with_the_signature(monkeypatch):
     assert listening.wait(timeout=5), "the server never bound its port"
 
     with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        sent_from = client.getsockname()
         channel = FrameChannel.from_socket(client)
         channel.send(FrameType.GET_SIGNATURE, {})
         reply = channel.recv()
@@ -363,7 +364,9 @@ def test_serve_replies_to_get_signature_with_the_signature(monkeypatch):
         # code, so the script is null.
         "script": None,
     }
-    assert events == [event for event in events if event.startswith("listening on")]
+    assert [event for event in events if not event.startswith("listening on")] == [
+        f"sent the signature to {sent_from}"
+    ]
 
 
 def test_serve_replies_to_get_signature_with_the_serving_script(monkeypatch):
@@ -451,6 +454,56 @@ def test_serve_reads_the_next_frame_after_replying_to_get_signature():
         assert spoke_closed.wait(timeout=5), "the server never read the second frame"
 
     assert any(event.startswith("benchmark connected from") for event in events)
+
+
+def test_request_signature_returns_the_signature_the_policy_serves():
+    from manifold.core import EEActionSpace, PolicySignature, RotationFormat
+    from manifold.recipes import request_signature, serve
+    from manifold.sensors.cameras import over_shoulder_right, wrist
+
+    signature = PolicySignature(
+        action_space=EEActionSpace(rotation=RotationFormat.AXIS_ANGLE),
+        cameras=[over_shoulder_right((224, 224, 3)), wrist((224, 224, 3))],
+    )
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, SimpleNamespace(signature=signature)),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    events: list[str] = []
+
+    assert request_signature(f"127.0.0.1:{port}", on_event=events.append) == signature
+    assert events == ["the policy reads cameras: over_shoulder_right, wrist"]
+
+
+def test_request_signature_refuses_a_policy_that_closes_without_replying():
+    """A policy served by an SDK without get_signature closes on the unexpected frame."""
+    from manifold.recipes import PairingRejected, request_signature
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        def close_on_first_frame() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                conn.recv(1024)
+
+        threading.Thread(target=close_on_first_frame, daemon=True).start()
+
+        with pytest.raises(PairingRejected, match="without sending its signature"):
+            request_signature(f"127.0.0.1:{port}")
 
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------

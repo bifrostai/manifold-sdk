@@ -1,4 +1,4 @@
-"""Tests for `Benchmark.gripper_format`.
+"""Tests for `Benchmark.gripper_format` and `Benchmark.with_sensors`.
 
 The action space is a union (EE / joint / unified); `gripper_format` must read
 the gripper convention out of whichever variant is in play, and raise when the
@@ -20,6 +20,7 @@ from manifold.core import (
     RotationFormat,
     UnifiedActionSpace,
 )
+from manifold.sensors import CameraName
 
 
 def _benchmark(action: ActionSpace) -> Benchmark:
@@ -54,3 +55,26 @@ def test_unified_action_with_no_payload_raises():
     action = UnifiedActionSpace(width=12)
     with pytest.raises(TypeError):
         _ = _benchmark(action).gripper_format
+
+
+def test_with_sensors_keeps_the_named_sensors_in_the_benchmark_order():
+    from manifold.sensors.cameras import agentview, agentview_depth, wrist
+
+    benchmark = _benchmark(EEActionSpace(rotation=RotationFormat.AXIS_ANGLE)).model_copy(
+        update={"sensors": [agentview((8, 8, 3)), agentview_depth((8, 8, 1)), wrist((8, 8, 3))]}
+    )
+
+    selected = benchmark.with_sensors({CameraName.WRIST, CameraName.AGENTVIEW})
+
+    assert [sensor.name for sensor in selected.sensors] == [CameraName.AGENTVIEW, CameraName.WRIST]
+
+
+def test_with_sensors_refuses_a_sensor_the_benchmark_does_not_publish():
+    from manifold.sensors.cameras import wrist
+
+    benchmark = _benchmark(EEActionSpace(rotation=RotationFormat.AXIS_ANGLE)).model_copy(
+        update={"sensors": [wrist((8, 8, 3))]}
+    )
+
+    with pytest.raises(ValueError, match=CameraName.HEAD):
+        benchmark.with_sensors({CameraName.WRIST, CameraName.HEAD})

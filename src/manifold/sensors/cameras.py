@@ -40,6 +40,8 @@ class CameraName(StrEnum):
     AGENTVIEW_LEFT = "agentview_left"
     AGENTVIEW_RIGHT = "agentview_right"
     OVER_SHOULDER_LEFT = "over_shoulder_left"
+    OVER_SHOULDER_RIGHT = "over_shoulder_right"
+    HEAD = "head"
     WRIST = "wrist"
     WRIST_DEPTH = "wrist_depth"
 
@@ -81,11 +83,7 @@ def agentview_left(
     calibration: CameraCalibration | None = None,
     orientation: CameraOrientation = CameraOrientation.UPRIGHT,
 ) -> Camera:
-    """The left third-person workspace camera, at the given shape.
-
-    RoboCasa publishes a stereo pair of workspace views (left + right) alongside
-    the wrist camera, rather than the single `agentview` LIBERO uses.
-    """
+    """The left of a pair of third-person workspace cameras, at the given shape."""
     return Camera(
         name=CameraName.AGENTVIEW_LEFT,
         shape=shape,
@@ -115,17 +113,44 @@ def over_shoulder_left(
     calibration: CameraCalibration | None = None,
     orientation: CameraOrientation = CameraOrientation.UPRIGHT,
 ) -> Camera:
-    """The over-the-shoulder scene camera on the left, at the given shape.
+    """The scene camera behind and to the left of the arm, at the given shape.
 
-    RoboLab's `OverShoulderLeftCameraCfg` — a fixed third-person view set behind
-    and to the left of the arm. It gets its own name rather than reusing
-    `agentview` because the name is the only viewpoint semantics the contract
-    carries (a camera declares name, mount, and shape — never extrinsics), so
-    folding a behind-the-shoulder view into the front-facing `agentview` would
-    let a LIBERO-trained policy pair against a viewpoint it never saw.
+    It is not `agentview`, because a camera's name is the only viewpoint the
+    contract carries, so a policy trained on a front-facing view must not pair
+    against this one.
     """
     return Camera(
         name=CameraName.OVER_SHOULDER_LEFT,
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
+def over_shoulder_right(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The scene camera behind and to the right of the arm, at the given shape."""
+    return Camera(
+        name=CameraName.OVER_SHOULDER_RIGHT,
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
+def head(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The scene camera in front of and above the arm, facing it, at the given shape."""
+    return Camera(
+        name=CameraName.HEAD,
         shape=shape,
         calibration=calibration,
         orientation=orientation,
@@ -171,7 +196,9 @@ __all__ = [
     "agentview_depth",
     "agentview_left",
     "agentview_right",
+    "head",
     "over_shoulder_left",
+    "over_shoulder_right",
     "wrist",
     "wrist_depth",
 ]
