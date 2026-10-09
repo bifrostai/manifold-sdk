@@ -110,6 +110,36 @@ def agentview_right(
     )
 
 
+def front(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The low scene camera looking across the work surface, at the given shape."""
+    return Camera(
+        name="front",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
+def head(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The close third-person view over the workspace, at the given shape."""
+    return Camera(
+        name="head",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
 def over_shoulder_left(
     shape: tuple[int, ...],
     calibration: CameraCalibration | None = None,
@@ -130,6 +160,36 @@ def over_shoulder_left(
         calibration=calibration,
         orientation=orientation,
         mount=Mount.SCENE,
+    )
+
+
+def wrist_left(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The left arm's wrist-mounted camera, at the given shape."""
+    return Camera(
+        name="wrist_left",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
+    )
+
+
+def wrist_right(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The right arm's wrist-mounted camera, at the given shape."""
+    return Camera(
+        name="wrist_right",
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.WRIST,
     )
 
 
@@ -171,7 +231,11 @@ __all__ = [
     "agentview_depth",
     "agentview_left",
     "agentview_right",
+    "front",
+    "head",
     "over_shoulder_left",
     "wrist",
     "wrist_depth",
+    "wrist_left",
+    "wrist_right",
 ]
