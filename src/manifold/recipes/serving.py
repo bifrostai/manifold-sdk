@@ -467,7 +467,10 @@ def _run_episode(
             )
             reply = channel.recv()
             if reply is None or reply.get("type") != FrameType.ACTION:
-                raise PairingRejected("expected an action frame from the policy")
+                raise PairingRejected(
+                    "policy closed the connection or sent a reply other than an action; "
+                    "check the policy logs for the error"
+                )
             action = bridge.decode_action(reply["payload"])
             # The policy checked this pairing against the benchmark as the policy
             # parsed it. A policy on an older SDK may have dropped a field, misread the
