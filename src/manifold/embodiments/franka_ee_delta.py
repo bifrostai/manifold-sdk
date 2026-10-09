@@ -1,4 +1,4 @@
-"""Franka Panda driven in end-effector deltas (the LIBERO control mode).
+"""Franka Panda driven in end-effector deltas.
 
 A 7-D action: a 3-D position delta, a 3-D axis-angle rotation delta, and a signed
 gripper that opens on the LOW value. This is the robosuite operational-space

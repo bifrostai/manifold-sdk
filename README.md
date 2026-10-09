@@ -39,10 +39,17 @@ Errors are also caught early by:
 
 ```python
 from manifold.core import (
-    Camera, CameraName, EEActionSpace, GripperFormat, PolicySignature, RotationFormat,
-    check_compatibility,
+    Benchmark, Camera, CameraName, EEActionSpace, GripperFormat, PolicySignature,
+    RotationFormat, check_compatibility,
 )
-from manifold.benchmarks.libero import LIBERO
+from manifold.embodiments import FRANKA_EE_DELTA
+from manifold.sensors import agentview
+
+benchmark = Benchmark(
+    name="my-benchmark",
+    embodiment=FRANKA_EE_DELTA,
+    sensors=[agentview((256, 256, 3))],
+)
 
 policy = PolicySignature(
     action_space=EEActionSpace(
@@ -53,7 +60,7 @@ policy = PolicySignature(
     cameras=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
 )
 
-report = check_compatibility(policy, LIBERO)
+report = check_compatibility(policy, benchmark)
 ```
 
 ## Mismatches
@@ -81,14 +88,17 @@ low_gripper = PolicySignature(
 )
 pipeline = Pipeline(action=[GripperPolarityAdapter(target=GripperFormat.SIGNED)])
 
-report = check_compatibility(low_gripper, LIBERO, pipeline=pipeline)
-report = verify(low_gripper, LIBERO, pipeline)
+report = check_compatibility(low_gripper, benchmark, pipeline=pipeline)
+report = verify(low_gripper, benchmark, pipeline)
 ```
 
 ## Extensibility
 
 To add a new robot or control mode, create a file in `embodiments/` that
 defines an `Embodiment` with its action space and proprioception.
+
+The SDK ships no benchmarks. A benchmark declares its own `Benchmark` in its own
+code, from the embodiments, cameras and conventions defined here.
 
 To support a new action-space conversion (e.g. a rotation format your policy
 uses), write an `ActionAdapter` in `adapters/action/`. For observation-side

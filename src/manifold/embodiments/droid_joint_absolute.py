@@ -1,6 +1,6 @@
-"""DROID (Franka Panda + Robotiq 2F-85) in absolute joint targets (RoboLab jointpos).
+"""DROID (Franka Panda + Robotiq 2F-85) in absolute joint targets.
 
-RoboLab's default benchmark embodiment, per `robolab/robots/README.md`: a Franka
+The DROID assembly as RoboLab's `robolab/robots/README.md` describes it: a Franka
 Panda arm with a Robotiq 2F-85 gripper, tagged `benchmark-default`, with high PD
 gains and gravity disabled on the arm. That README lists DROID and a stock Franka
 Panda as *separate* robots — the stock entry keeps the factory finger gripper and
@@ -48,8 +48,8 @@ converted at the edge.
 `Frame.WORLD` because that is what the pinned commit reports: `eef_pos` subtracts
 `env_origins` from a world position and `eef_quat` is `target_quat_w` outright, so
 the pose is the environment's own world frame, not the robot root. Upstream has
-since moved `ee_pos`/`ee_quat` to the robot-root frame, which would be `Frame.BASE`
-— re-probe when `ROBOLAB_REF` moves. A policy requiring base-frame values pairs
+since moved `ee_pos`/`ee_quat` to the robot-root frame, which would be `Frame.BASE`.
+A policy requiring base-frame values pairs
 through `FrameRebaseAdapter`; one fed base-frame values under a WORLD label would
 fail silently, which is why the frame is named from the code rather than assumed.
 """

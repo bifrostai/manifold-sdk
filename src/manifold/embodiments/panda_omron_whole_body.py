@@ -1,4 +1,4 @@
-"""Mobile Franka (PandaOmron) driven for RoboCasa kitchen tasks.
+"""Mobile Franka (PandaOmron) driven as a whole body: arm, gripper and base.
 
 A Franka Panda arm on an Omron holonomic base under robosuite/MuJoCo. The 12-D
 action drives the whole body:
@@ -8,7 +8,7 @@ action drives the whole body:
 
 The leading 7 floats are exactly the FRANKA_EE_DELTA end-effector-delta action; the
 trailing 5 are 4 mobile-base DOFs plus a control-mode selector, all driven (the
-base is not pinned) since the kitchen tasks involve whole-body motion.
+base is not pinned).
 
 Modeled as a `UnifiedActionSpace(width=12)` with the FRANKA_EE_DELTA arm action as its
 payload rather than an extended `EEActionSpace`: the EE layout fixes the gripper as

@@ -8,7 +8,6 @@ from manifold.adapters.observation.camera_resolution import ResizeCameras
 from manifold.adapters.observation.camera_rotate_180 import Rotate180Cameras
 from manifold.adapters.observation.camera_vertical_flip import FlipVerticalCameras
 from manifold.adapters.observation.proprio_rotation import ProprioRotationAdapter
-from manifold.benchmarks.libero import CAMERA_RES, LIBERO
 from manifold.core.conventions import GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     EEActionSpace,
@@ -25,6 +24,7 @@ from manifold.recipes.local import _default_pool
 from manifold.recipes.resolve import resolve
 from manifold.sensors import CameraName
 from manifold.sensors.cameras import agentview, wrist
+from tests._benchmarks import CAMERA_RES, TABLETOP
 
 
 def _signature(*cameras: Camera) -> PolicySignature:
@@ -45,13 +45,13 @@ def _signature(*cameras: Camera) -> PolicySignature:
     )
 
 
-def test_the_default_pool_bridges_openpi_to_libero() -> None:
+def test_the_default_pool_bridges_openpi_to_the_tabletop() -> None:
     signature = _signature(
         agentview((224, 224, 3), orientation=CameraOrientation.FLIPPED_HORIZONTAL),
         wrist((224, 224, 3), orientation=CameraOrientation.FLIPPED_HORIZONTAL),
     )
 
-    assert resolve(signature, LIBERO, _default_pool(signature, LIBERO)) is not None
+    assert resolve(signature, TABLETOP, _default_pool(signature, TABLETOP)) is not None
 
 
 def test_a_camera_that_already_matches_gets_no_orientation_adapter() -> None:
@@ -63,7 +63,7 @@ def test_a_camera_that_already_matches_gets_no_orientation_adapter() -> None:
         wrist((CAMERA_RES, CAMERA_RES, 3), orientation=CameraOrientation.UPRIGHT),
     )
 
-    pool = _default_pool(signature, LIBERO)
+    pool = _default_pool(signature, TABLETOP)
 
     flipped = [
         adapter.cameras
@@ -76,8 +76,8 @@ def test_a_camera_that_already_matches_gets_no_orientation_adapter() -> None:
 
 def test_a_camera_the_benchmark_does_not_publish_gets_no_adapter() -> None:
     signature = _signature(agentview((224, 224, 3)), wrist((224, 224, 3)))
-    no_wrist = LIBERO.model_copy(
-        update={"sensors": [c for c in LIBERO.sensors if c.name != CameraName.WRIST]}
+    no_wrist = TABLETOP.model_copy(
+        update={"sensors": [c for c in TABLETOP.sensors if c.name != CameraName.WRIST]}
     )
 
     pool = _default_pool(signature, no_wrist)
@@ -92,10 +92,10 @@ def test_a_camera_the_benchmark_does_not_publish_gets_no_adapter() -> None:
 def test_matching_ee_pose_formats_get_no_proprioception_rotation() -> None:
     signature = _signature(agentview((224, 224, 3)))
     same_rotation = signature.model_copy(
-        update={"proprioception": LIBERO.embodiment.proprioception}
+        update={"proprioception": TABLETOP.embodiment.proprioception}
     )
 
-    pool = _default_pool(same_rotation, LIBERO)
+    pool = _default_pool(same_rotation, TABLETOP)
 
     assert not any(isinstance(adapter, ProprioRotationAdapter) for adapter in pool)
 
@@ -129,7 +129,7 @@ def test_without_a_pipeline_the_server_resolves_one_per_benchmark(
 
     local.serve(_predict, signature, server="tcp:127.0.0.1:9")
 
-    assert isinstance(served["pipeline"](LIBERO), Pipeline)
+    assert isinstance(served["pipeline"](TABLETOP), Pipeline)
 
 
 def _chunk_predict(shape: tuple[int, ...]) -> Any:

@@ -22,8 +22,8 @@ baked into a constructor.
 
 These are constructors, not constants, because a camera is not a complete value
 until a benchmark sets its resolution: the name and mount are fixed and shared,
-the shape is benchmark-specific. (Embodiments and benchmarks, which have no such
-free parameter, are module constants.) The benchmark passes the shape.
+the shape is benchmark-specific. (Embodiments, which have no such free parameter,
+are module constants.) The benchmark passes the shape.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ def agentview_left(
 ) -> Camera:
     """The left third-person workspace camera, at the given shape.
 
-    RoboCasa publishes a stereo pair of workspace views (left + right) alongside
-    the wrist camera, rather than the single `agentview` LIBERO uses.
+    One of a stereo pair of workspace views, published in place of a single
+    `agentview`.
     """
     return Camera(
         name=CameraName.AGENTVIEW_LEFT,
@@ -105,12 +105,12 @@ def over_shoulder_left(
 ) -> Camera:
     """The over-the-shoulder scene camera on the left, at the given shape.
 
-    RoboLab's `OverShoulderLeftCameraCfg` — a fixed third-person view set behind
-    and to the left of the arm. It gets its own name rather than reusing
-    `agentview` because the name is the only viewpoint semantics the contract
-    carries (a camera declares name, mount, and shape — never extrinsics), so
-    folding a behind-the-shoulder view into the front-facing `agentview` would
-    let a LIBERO-trained policy pair against a viewpoint it never saw.
+    A fixed third-person view set behind and to the left of the arm. It gets its
+    own name rather than reusing `agentview` because the name is the only viewpoint
+    semantics the contract carries (a camera declares name, mount, and shape —
+    never extrinsics), so folding a behind-the-shoulder view into the front-facing
+    `agentview` would let a policy trained on a front view pair against a viewpoint
+    it never saw.
     """
     return Camera(
         name=CameraName.OVER_SHOULDER_LEFT,

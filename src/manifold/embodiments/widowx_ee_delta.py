@@ -1,4 +1,4 @@
-"""WidowX arm driven in end-effector deltas (the SIMPLER / Bridge control mode).
+"""WidowX arm driven in end-effector deltas.
 
 A 7-D action: a 3-D position delta, a 3-D euler-XYZ rotation delta, and a signed
 gripper. The arm reports its end-effector pose in the robot base frame, with
