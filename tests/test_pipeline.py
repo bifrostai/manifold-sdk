@@ -189,10 +189,8 @@ def test_apply_action_threads_produce_between_two_adapters() -> None:
     assert result.values[7] == -1.0
 
 
-def _single_frame_spec(
-    name: str = CameraName.AGENTVIEW, shape: tuple[int, ...] = (1, 1, 3)
-) -> ObservationSpace:
-    return ObservationSpace(cameras=(Camera(name=name, shape=shape),))
+def _single_frame_spec(shape: tuple[int, ...] = (1, 1, 3)) -> ObservationSpace:
+    return ObservationSpace(cameras=(Camera(name=CameraName.AGENTVIEW, shape=shape),))
 
 
 def _frame(value: int, shape: tuple[int, ...] = (1, 1, 3)) -> np.ndarray:

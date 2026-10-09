@@ -64,9 +64,10 @@ from manifold.core.embodiment import (
     JointObservationSpec,
     Proprioception,
 )
+from manifold.core.names import EmbodimentName
 
 DROID_JOINT_ABSOLUTE = Embodiment(
-    name="droid_joint_absolute",
+    name=EmbodimentName.DROID_JOINT_ABSOLUTE,
     action=JointActionSpace(
         dof=7,
         gripper=GripperFormat.BINARY_OPEN_LOW,

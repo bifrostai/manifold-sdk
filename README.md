@@ -39,7 +39,8 @@ Errors are also caught early by:
 
 ```python
 from manifold.core import (
-    Camera, EEActionSpace, GripperFormat, PolicySignature, RotationFormat, check_compatibility,
+    Camera, CameraName, EEActionSpace, GripperFormat, PolicySignature, RotationFormat,
+    check_compatibility,
 )
 from manifold.benchmarks.libero import LIBERO
 
@@ -49,7 +50,7 @@ policy = PolicySignature(
         gripper=GripperFormat.SIGNED,
         delta=True,
     ),
-    cameras=[Camera(name="agentview", shape=(256, 256, 3))],
+    cameras=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
 )
 
 report = check_compatibility(policy, LIBERO)
@@ -76,7 +77,7 @@ low_gripper = PolicySignature(
         gripper=GripperFormat.SIGNED_OPEN_LOW,
         delta=True,
     ),
-    cameras=[Camera(name="agentview", shape=(256, 256, 3))],
+    cameras=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
 )
 pipeline = Pipeline(action=[GripperPolarityAdapter(target=GripperFormat.SIGNED)])
 

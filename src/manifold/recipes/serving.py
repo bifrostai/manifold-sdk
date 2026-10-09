@@ -248,6 +248,18 @@ def _serve_connection(
         emit(f"connection from {addr} errored, dropping it: {exc!r}")
 
 
+def _received_benchmark(payload: dict[str, Any], emit: Callable[[str], None]) -> Benchmark:
+    """Parse the advertised benchmark, logging any camera this SDK does not list."""
+    benchmark = Benchmark.from_received(payload)
+    unlisted = sorted(
+        {str(sensor.get("name")) for sensor in payload.get("sensors", [])}
+        - {camera.name for camera in benchmark.sensors}
+    )
+    if unlisted:
+        emit(f"ignoring cameras this SDK does not list: {', '.join(unlisted)}")
+    return benchmark
+
+
 def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
@@ -301,7 +313,7 @@ def _serve_session(
             "fields that this server cannot read"
         )
         return True
-    benchmark = Benchmark.model_validate(hello["payload"]["benchmark"])
+    benchmark = _received_benchmark(hello["payload"]["benchmark"], emit)
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)

@@ -27,6 +27,11 @@ from manifold.core.embodiment import (
     Proprioception,
     UnifiedActionSpace,
 )
+from manifold.core.names import (
+    CameraName,
+    ControlMode,
+    EmbodimentName,
+)
 from manifold.core.native_layout import (
     Assemble,
     BatchAxis,
@@ -69,15 +74,18 @@ __all__ = [
     "CameraAxes",
     "CameraCalibration",
     "CameraIntrinsics",
+    "CameraName",
     "CameraOrientation",
     "ChannelKind",
     "ChannelOrder",
     "Compatibility",
     "Component",
+    "ControlMode",
     "DtypeCast",
     "EEActionSpace",
     "EEObservationSpec",
     "Embodiment",
+    "EmbodimentName",
     "Frame",
     "GripperFormat",
     "GripperObservationSpec",

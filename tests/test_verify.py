@@ -32,6 +32,7 @@ from manifold.core import (
     UnifiedActionSpace,
     verify,
 )
+from manifold.core.names import EmbodimentName
 from manifold.lib.gripper import from_openness, openness
 from manifold.lib.rotation import convert
 from manifold.sensors import CameraName
@@ -55,7 +56,7 @@ def _benchmark(
     gripper: GripperFormat = GripperFormat.SIGNED,
 ) -> Benchmark:
     embodiment = Embodiment(
-        name="arm",
+        name=EmbodimentName.FRANKA_EE_DELTA,
         action=_ee(rotation, gripper),
         proprioception=_franka_proprio(rotation),
     )
@@ -259,7 +260,7 @@ def test_static_failure_short_circuits_with_static_reasons() -> None:
     policy = PolicySignature(
         action_space=_ee(),
         proprioception=_franka_proprio(),
-        cameras=[Camera(name="nonexistent", shape=(8, 8, 3))],
+        cameras=[Camera(name=CameraName.WRIST_DEPTH, shape=(8, 8, 3))],
         instruction=False,
     )
 
@@ -311,7 +312,9 @@ def test_frame_rebase_routes_ee_rotation_to_not_checked_but_keeps_position() -> 
     )
     bench = Benchmark(
         name="suite",
-        embodiment=Embodiment(name="arm", action=_ee(), proprioception=base_proprio),
+        embodiment=Embodiment(
+            name=EmbodimentName.FRANKA_EE_DELTA, action=_ee(), proprioception=base_proprio
+        ),
         sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     )
@@ -427,7 +430,9 @@ def test_probe_publishes_a_pose_for_each_calibrated_camera() -> None:
         shape=(8, 8, 3),
         calibration=CameraCalibration(intrinsics=CameraIntrinsics(fx=4.0, fy=4.0, cx=4.0, cy=4.0)),
     )
-    embodiment = Embodiment(name="arm", action=_ee(), proprioception=_franka_proprio())
+    embodiment = Embodiment(
+        name=EmbodimentName.FRANKA_EE_DELTA, action=_ee(), proprioception=_franka_proprio()
+    )
     bench = Benchmark(name="suite", embodiment=embodiment, sensors=[calibrated], instruction=False)
     policy = _policy(_ee(), proprio=_franka_proprio(), rotation=RotationFormat.AXIS_ANGLE)
     pipeline = Pipeline(observation=[RequiresCameraPoseAdapter()])
@@ -446,7 +451,7 @@ def test_probe_poses_are_distinct_and_only_for_calibrated_cameras() -> None:
     space = ObservationSpace(
         proprioception=_franka_proprio(),
         cameras=(
-            Camera(name="plain", shape=(8, 8, 3)),
+            Camera(name=CameraName.AGENTVIEW_LEFT, shape=(8, 8, 3)),
             Camera(
                 name=CameraName.AGENTVIEW,
                 shape=(8, 8, 3),
@@ -473,7 +478,7 @@ def _bimanual_benchmark(
     gripper: GripperFormat = GripperFormat.SIGNED,
 ) -> Benchmark:
     embodiment = Embodiment(
-        name="two_arm",
+        name=EmbodimentName.FRANKA_EE_DELTA,
         action=EEActionSpace(rotation=rotation, gripper=gripper, arm_count=2, delta=True),
         proprioception=Proprioception(
             ee_pose=EEObservationSpec(
@@ -543,7 +548,7 @@ def _joint_bimanual_benchmark() -> Benchmark:
     # ALOHA's layout, as ROBOTWIN declares it: two arms, each with six joints and a
     # gripper.
     embodiment = Embodiment(
-        name="two_arm_joint",
+        name=EmbodimentName.FRANKA_JOINT_ABSOLUTE,
         action=JointActionSpace(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2),
         proprioception=Proprioception(
             joint_pos=JointObservationSpec(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2)

@@ -28,20 +28,8 @@ free parameter, are module constants.) The benchmark passes the shape.
 
 from __future__ import annotations
 
+from manifold.core.names import CameraName
 from manifold.core.sensor import Camera, CameraCalibration, CameraOrientation, Modality, Mount
-from manifold.lib.compat import StrEnum
-
-
-class CameraName(StrEnum):
-    """The name of each camera in the catalogue, one per viewpoint."""
-
-    AGENTVIEW = "agentview"
-    AGENTVIEW_DEPTH = "agentview_depth"
-    AGENTVIEW_LEFT = "agentview_left"
-    AGENTVIEW_RIGHT = "agentview_right"
-    OVER_SHOULDER_LEFT = "over_shoulder_left"
-    WRIST = "wrist"
-    WRIST_DEPTH = "wrist_depth"
 
 
 def agentview(
@@ -166,7 +154,6 @@ def wrist_depth(
 
 
 __all__ = [
-    "CameraName",
     "agentview",
     "agentview_depth",
     "agentview_left",
