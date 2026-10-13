@@ -83,6 +83,23 @@ def agentview_left(
     )
 
 
+def agentview_left_depth(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The left third-person workspace camera's metric depth, at the given shape."""
+    return Camera(
+        name=CameraName.AGENTVIEW_LEFT_DEPTH,
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        dtype="float32",
+        mount=Mount.SCENE,
+        modality=Modality.DEPTH,
+    )
+
+
 def agentview_right(
     shape: tuple[int, ...],
     calibration: CameraCalibration | None = None,
@@ -95,6 +112,23 @@ def agentview_right(
         calibration=calibration,
         orientation=orientation,
         mount=Mount.SCENE,
+    )
+
+
+def agentview_right_depth(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The right third-person workspace camera's metric depth, at the given shape."""
+    return Camera(
+        name=CameraName.AGENTVIEW_RIGHT_DEPTH,
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        dtype="float32",
+        mount=Mount.SCENE,
+        modality=Modality.DEPTH,
     )
 
 
@@ -157,7 +191,9 @@ __all__ = [
     "agentview",
     "agentview_depth",
     "agentview_left",
+    "agentview_left_depth",
     "agentview_right",
+    "agentview_right_depth",
     "over_shoulder_left",
     "wrist",
     "wrist_depth",
