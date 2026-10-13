@@ -17,6 +17,7 @@ from manifold.replay import (
     Closed,
     EpisodeEnded,
     EpisodeStarted,
+    Facing,
     Grasped,
     GripperAction,
     GripperCommanded,
@@ -27,6 +28,7 @@ from manifold.replay import (
     Inside,
     LeftOf,
     ManifoldEventType,
+    Near,
     Note,
     ObjectDisplaced,
     ObjectLeftScene,
@@ -41,9 +43,14 @@ from manifold.replay import (
     Severity,
     Stacked,
     StackOrder,
+    Stirred,
+    Swept,
     Touching,
     TurnedOn,
+    UnderWater,
+    Untouched,
     Upright,
+    Washed,
     read_replay_log,
 )
 from manifold.wire.bridge import pack_stream_frame, read_stream_frame
@@ -60,7 +67,7 @@ EVERY_TYPE = (
     ),
     *(
         cls(object="bowl", is_active=True)
-        for cls in (Grasped, GripperTouching, Upright, Open, Closed, TurnedOn)
+        for cls in (Grasped, GripperTouching, Upright, Untouched, Open, Closed, TurnedOn)
     ),
     *(
         cls(object="bowl", reference="plate", is_active=False)
@@ -75,6 +82,12 @@ EVERY_TYPE = (
             InFrontOf,
             Behind,
             Touching,
+            Facing,
+            UnderWater,
+            Washed,
+            Stirred,
+            Near,
+            Swept,
         )
     ),
     Stacked(objects=("red_block", "blue_block"), is_active=True, order=StackOrder.BOTTOM_TO_TOP),
