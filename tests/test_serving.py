@@ -503,22 +503,51 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_that_the_sdk_does_not_
     assert reply is not None and reply.get("type") == FrameType.READY, events
 
 
-def test_serve_sends_its_protocol_version_in_ready():
-    from manifold.core import Benchmark, PolicySignature
+def _suite():
+    """A suite that publishes a scene camera, and a wrist camera with its depth."""
+    from manifold.core import Benchmark
+    from manifold.core.sensor import Modality
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.sensors import agentview, wrist
+
+    return Benchmark(
+        name="suite",
+        embodiment=FRANKA_EE_DELTA,
+        sensors=[
+            agentview((8, 8, 3)),
+            wrist((8, 8, 3)),
+            wrist((8, 8, 1), modality=Modality.DEPTH),
+        ],
+        instruction=False,
+    )
+
+
+def _serve_a_wrist_policy(*, depth: bool = False) -> tuple[int, list[str]]:
+    """Serve a policy that reads the wrist camera, and its depth if `depth` is set.
+
+    Returns the policy's port, and the list that its events are appended to.
+    """
+    from manifold.core import PolicySignature
+    from manifold.core.sensor import Modality
     from manifold.embodiments import FRANKA_EE_DELTA
     from manifold.recipes import serve
-    from manifold.wire import BRIDGE_PROTOCOL_VERSION
-    from manifold.wire.bridge import FrameChannel, FrameType
+    from manifold.sensors import wrist
 
-    signature = PolicySignature(action_space=FRANKA_EE_DELTA.action, instruction=False)
-    benchmark = Benchmark(name="suite", embodiment=FRANKA_EE_DELTA, instruction=False)
+    cameras = [wrist((8, 8, 3))]
+    if depth:
+        cameras.append(wrist((8, 8, 1), modality=Modality.DEPTH))
+    signature = PolicySignature(
+        action_space=FRANKA_EE_DELTA.action, cameras=cameras, instruction=False
+    )
     endpoint = SimpleNamespace(
         signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
     )
     port = _free_port()
     listening = threading.Event()
+    events: list[str] = []
 
     def record(event: str) -> None:
+        events.append(event)
         if event.startswith("listening on"):
             listening.set()
 
@@ -529,21 +558,150 @@ def test_serve_sends_its_protocol_version_in_ready():
         daemon=True,
     ).start()
     assert listening.wait(timeout=5), "the server never bound its port"
+    return port, events
 
+
+def _hello(benchmark, version: int, supported: int | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "protocol_version": version,
+        "benchmark": benchmark.model_dump(mode="json"),
+    }
+    if supported is not None:
+        payload["supported_protocol_version"] = supported
+    return payload
+
+
+def test_serve_sends_its_protocol_version_and_cameras_in_ready():
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION, MIN_BRIDGE_PROTOCOL_VERSION
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    port, events = _serve_a_wrist_policy()
     with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
         channel = FrameChannel.from_socket(client)
-        channel.send(
-            FrameType.HELLO,
-            {
-                "protocol_version": BRIDGE_PROTOCOL_VERSION,
-                "benchmark": benchmark.model_dump(mode="json"),
-            },
-        )
+        channel.send(FrameType.HELLO, _hello(_suite(), MIN_BRIDGE_PROTOCOL_VERSION))
         reply = channel.recv()
         channel.send(FrameType.BYE, {})
 
     assert reply is not None and reply.get("type") == FrameType.READY
-    assert reply["payload"] == {"protocol_version": BRIDGE_PROTOCOL_VERSION}
+    assert reply["payload"] == {
+        "protocol_version": BRIDGE_PROTOCOL_VERSION,
+        "cameras": [CameraName.WRIST],
+    }
+    # A HELLO without `supported_protocol_version` comes from a version 5 benchmark.
+    assert f"benchmark supports bridge protocol {MIN_BRIDGE_PROTOCOL_VERSION}" in events
+
+
+def test_serve_checks_the_second_hello_from_a_benchmark_that_supports_a_newer_version():
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION, MIN_BRIDGE_PROTOCOL_VERSION
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    # The first HELLO leaves out the depth camera that the policy reads. A
+    # policy that checked this HELLO would refuse it.
+    colour = _suite().with_sensors({CameraName.AGENTVIEW, CameraName.WRIST})
+    port, _ = _serve_a_wrist_policy(depth=True)
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(
+            FrameType.HELLO,
+            _hello(colour, MIN_BRIDGE_PROTOCOL_VERSION, BRIDGE_PROTOCOL_VERSION),
+        )
+        first = channel.recv()
+        channel.send(
+            FrameType.HELLO, _hello(_suite(), BRIDGE_PROTOCOL_VERSION, BRIDGE_PROTOCOL_VERSION)
+        )
+        second = channel.recv()
+        channel.send(FrameType.BYE, {})
+
+    assert first is not None and first["payload"] == {
+        "protocol_version": BRIDGE_PROTOCOL_VERSION,
+        "cameras": None,
+    }
+    assert second is not None and second["payload"] == {
+        "protocol_version": BRIDGE_PROTOCOL_VERSION,
+        "cameras": [CameraName.WRIST, "wrist_depth"],
+    }
+
+
+def test_pair_returns_the_cameras_that_the_policy_reads():
+    from manifold.recipes import pair
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION
+
+    port, policy_events = _serve_a_wrist_policy(depth=True)
+    events: list[str] = []
+
+    cameras = pair(f"127.0.0.1:{port}", _suite(), on_event=events.append)
+
+    assert cameras == {CameraName.WRIST, "wrist_depth"}
+    assert events == ["the policy reads cameras: wrist, wrist_depth"]
+    assert f"benchmark supports bridge protocol {BRIDGE_PROTOCOL_VERSION}" in policy_events
+
+
+def _pair_with_a_policy_that_replies(*readies: dict[str, Any]):
+    """Pair `_suite()` with a policy that answers each HELLO with the next of `readies`.
+
+    Returns the cameras from the pairing, and the HELLOs that the policy received.
+    """
+    from manifold.recipes import pair
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        port = listener.getsockname()[1]
+
+        hellos: list[dict[str, Any]] = []
+
+        def answer() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                channel = FrameChannel.from_socket(conn)
+                for ready in readies:
+                    hello = channel.recv()
+                    assert hello is not None
+                    hellos.append(hello["payload"])
+                    channel.send(FrameType.READY, ready)
+                channel.recv()
+
+        threading.Thread(target=answer, daemon=True).start()
+        cameras = pair(f"127.0.0.1:{port}", _suite(), on_event=lambda _event: None)
+    return cameras, hellos
+
+
+@pytest.mark.parametrize(
+    "ready", [{}, {"protocol_version": 5}], ids=["without a version", "at version 5"]
+)
+def test_pair_returns_every_colour_camera_from_a_policy_older_than_version_6(ready):
+    cameras, hellos = _pair_with_a_policy_that_replies(ready)
+
+    assert cameras == {CameraName.AGENTVIEW, CameraName.WRIST}
+    assert len(hellos) == 1
+
+
+def test_pair_leaves_every_camera_but_colour_out_of_its_first_hello():
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION, MIN_BRIDGE_PROTOCOL_VERSION
+
+    _, hellos = _pair_with_a_policy_that_replies({})
+
+    assert hellos[0]["protocol_version"] == MIN_BRIDGE_PROTOCOL_VERSION
+    assert hellos[0]["supported_protocol_version"] == BRIDGE_PROTOCOL_VERSION
+    names = [(sensor["name"], sensor["modality"]) for sensor in hellos[0]["benchmark"]["sensors"]]
+    assert names == [("agentview", "rgb"), ("wrist", "rgb")]
+
+
+@pytest.mark.parametrize("policy_version", [6, 9], ids=["at version 6", "at a newer version"])
+def test_pair_sends_the_whole_benchmark_to_a_newer_policy_at_their_shared_version(
+    policy_version,
+):
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION
+
+    cameras, hellos = _pair_with_a_policy_that_replies(
+        {"protocol_version": policy_version},
+        {"protocol_version": policy_version, "cameras": ["wrist_depth"]},
+    )
+
+    assert cameras == {"wrist_depth"}
+    assert hellos[1]["protocol_version"] == min(policy_version, BRIDGE_PROTOCOL_VERSION)
+    assert len(hellos[1]["benchmark"]["sensors"]) == 3
 
 
 # --- run_episodes and run_sharded_benchmark ---------------------------------------

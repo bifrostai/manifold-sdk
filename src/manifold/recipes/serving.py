@@ -51,6 +51,7 @@ from manifold.recipes.recording import NO_RECORDER
 from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import (
     BRIDGE_PROTOCOL_VERSION,
+    MIN_BRIDGE_PROTOCOL_VERSION,
     FrameChannel,
     FrameType,
     HelloPayload,
@@ -255,6 +256,45 @@ def _serve_connection(
         emit(f"connection from {addr} errored, dropping it: {exc!r}")
 
 
+def _read_hello(hello: dict[str, Any] | None, emit: Callable[[str], None]) -> HelloPayload | None:
+    """Parse a HELLO, or log why not and return None."""
+    if hello is None or hello.get("type") != FrameType.HELLO:
+        emit("expected a hello frame advertising the benchmark; closing")
+        return None
+    # A newer sender may carry fields that this server would drop without any error.
+    # Refuse such a sender before parsing, rather than pair against a benchmark that
+    # was misread. An older sender is safe, because a field that it omits takes its
+    # default value here.
+    version = hello["payload"].get("protocol_version", 0)
+    if version > BRIDGE_PROTOCOL_VERSION:
+        emit(
+            f"benchmark uses bridge protocol {version}, newer than this server's "
+            f"{BRIDGE_PROTOCOL_VERSION}; closing the connection rather than dropping "
+            "fields that this server cannot read"
+        )
+        return None
+    return HelloPayload.model_validate(hello["payload"])
+
+
+def _receive_benchmark(
+    channel: FrameChannel, hello: dict[str, Any], emit: Callable[[str], None]
+) -> Benchmark | None:
+    """The benchmark that the peer advertises, or None if it advertises none."""
+    payload = _read_hello(hello, emit)
+    if payload is None:
+        return None
+    supported = payload.supported_protocol_version or payload.protocol_version
+    emit(f"benchmark supports bridge protocol {supported}")
+    # A benchmark newer than version 5 reads this server's version from the first
+    # READY, then sends the whole benchmark in a second HELLO at that version. The
+    # first HELLO is not checked.
+    if payload.protocol_version < min(supported, BRIDGE_PROTOCOL_VERSION):
+        ready = ReadyPayload(protocol_version=BRIDGE_PROTOCOL_VERSION)
+        channel.send(FrameType.READY, ready.model_dump(mode="json"))
+        payload = _read_hello(channel.recv(), emit)
+    return None if payload is None else payload.benchmark
+
+
 def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
@@ -293,22 +333,9 @@ def _serve_session(
     if hello is None:
         return False
     emit(f"benchmark connected from {addr}")
-    if hello.get("type") != FrameType.HELLO:
-        emit("expected a hello frame advertising the benchmark; closing")
+    benchmark = _receive_benchmark(channel, hello, emit)
+    if benchmark is None:
         return True
-    # A newer sender may carry fields that this server would drop without any error.
-    # Refuse such a sender before parsing, rather than pair against a benchmark that
-    # was misread. An older sender is safe, because a field that it omits takes its
-    # default value here.
-    version = hello["payload"].get("protocol_version", 0)
-    if version > BRIDGE_PROTOCOL_VERSION:
-        emit(
-            f"benchmark uses bridge protocol {version}, newer than this server's "
-            f"{BRIDGE_PROTOCOL_VERSION}; closing the connection rather than dropping "
-            "fields that this server cannot read"
-        )
-        return True
-    benchmark = HelloPayload.model_validate(hello["payload"]).benchmark
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
@@ -325,7 +352,11 @@ def _serve_session(
     session = endpoint.session()
     try:
         channel.send(
-            FrameType.READY, ReadyPayload(protocol_version=BRIDGE_PROTOCOL_VERSION).model_dump()
+            FrameType.READY,
+            ReadyPayload(
+                protocol_version=BRIDGE_PROTOCOL_VERSION,
+                cameras=[camera.key for camera in signature.cameras],
+            ).model_dump(mode="json"),
         )
         while True:
             frame = channel.recv()
@@ -874,6 +905,77 @@ def serve(
         worker.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
 
 
+def _send_hello(channel: FrameChannel, hello: HelloPayload) -> ReadyPayload:
+    """Send `hello`, and return the policy's READY.
+
+    Raises:
+        PairingRejected: If the policy closes without READY.
+    """
+    channel.send(FrameType.HELLO, hello.model_dump(mode="json"))
+    reply = channel.recv()
+    if reply is None or reply.get("type") != FrameType.READY:
+        raise PairingRejected("policy rejected the pairing (no READY)")
+    return ReadyPayload.model_validate(reply["payload"])
+
+
+def _open(channel: FrameChannel, benchmark: Benchmark) -> frozenset[str]:
+    """Pair with the policy over `channel`, and return the keys of the cameras it reads.
+
+    The first HELLO lists only the colour cameras, because a policy older than
+    version 6 finds a camera by its name alone, and a depth camera has the same name
+    as the colour camera at its viewpoint. A newer policy replies without checking
+    that HELLO, and `_open` then sends the whole benchmark at the policy's version.
+    An older policy names no cameras, so `_open` returns every colour camera.
+
+    Raises:
+        PairingRejected: If the policy closes without READY.
+    """
+    colour = [camera for camera in benchmark.sensors if camera.modality is Modality.RGB]
+    ready = _send_hello(
+        channel,
+        HelloPayload(
+            protocol_version=MIN_BRIDGE_PROTOCOL_VERSION,
+            supported_protocol_version=BRIDGE_PROTOCOL_VERSION,
+            benchmark=benchmark.model_copy(update={"sensors": colour}),
+        ),
+    )
+    if ready.protocol_version > MIN_BRIDGE_PROTOCOL_VERSION:
+        ready = _send_hello(
+            channel,
+            HelloPayload(
+                protocol_version=min(ready.protocol_version, BRIDGE_PROTOCOL_VERSION),
+                supported_protocol_version=BRIDGE_PROTOCOL_VERSION,
+                benchmark=benchmark,
+            ),
+        )
+    if ready.cameras is None:
+        return frozenset(camera.key for camera in colour)
+    return frozenset(ready.cameras)
+
+
+def pair(
+    server: str, benchmark: Benchmark, *, on_event: Callable[[str], None] = _emit
+) -> frozenset[str]:
+    """Pair with the policy at ``host:port`` and return its cameras.
+
+    `pair` closes the connection before returning. A benchmark calls this
+    before building its scene, then renders only the returned cameras, plus
+    any that the benchmark needs for itself. A policy older than bridge
+    protocol 6 names no cameras, so `pair` returns every colour camera that
+    the benchmark publishes. The run opens its own connection afterwards.
+
+    Raises:
+        PairingRejected: If the policy rejects the pairing.
+    """
+    host, port = _parse_server(server)
+    with socket.create_connection((host, port)) as sock:
+        channel = FrameChannel.from_socket(sock)
+        cameras = _open(channel, benchmark)
+        channel.send(FrameType.BYE, {})
+    on_event(f"the policy reads cameras: {', '.join(sorted(cameras)) or 'none'}")
+    return cameras
+
+
 def run_benchmark(
     benchmark: Benchmark,
     reset: Callable[[], ResetResult],
@@ -961,15 +1063,7 @@ def _run_connected(
     ):
         sock.connect((host, port))
         channel = FrameChannel.from_socket(sock)
-        channel.send(
-            FrameType.HELLO,
-            HelloPayload(protocol_version=BRIDGE_PROTOCOL_VERSION, benchmark=benchmark).model_dump(
-                mode="json"
-            ),
-        )
-        reply = channel.recv()
-        if reply is None or reply.get("type") != FrameType.READY:
-            raise PairingRejected("policy rejected the pairing (no READY)")
+        _open(channel, benchmark)
         emit("policy confirmed the pairing (ready)")
 
         records: list[EpisodeRecord] = []
@@ -1278,6 +1372,7 @@ __all__ = [
     "Transport",
     "evaluate",
     "launch_server",
+    "pair",
     "run_benchmark",
     "run_episodes",
     "run_sharded_benchmark",

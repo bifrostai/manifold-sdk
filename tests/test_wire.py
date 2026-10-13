@@ -109,4 +109,4 @@ def test_a_ready_without_a_version_reads_as_version_5() -> None:
 def test_a_ready_ignores_a_field_from_a_newer_policy() -> None:
     ready = ReadyPayload.model_validate({"protocol_version": 9, "unknown": 1})
 
-    assert ready.model_dump() == {"protocol_version": 9}
+    assert ready.model_dump() == {"protocol_version": 9, "cameras": None}
