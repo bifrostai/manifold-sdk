@@ -1,6 +1,7 @@
 import numpy as np
 
 from manifold.sensors import CameraName
+from manifold.wire import HelloPayload, ReadyPayload
 from manifold.wire import codec as wire
 
 
@@ -92,3 +93,17 @@ def test_empty_array_divergence_between_unpack_ndarray_and_unpack_ndarray_full()
     full = wire.unpack_ndarray_full(empty)
     assert full is not None
     assert full.shape == (0, 3)
+
+
+def test_a_hello_without_a_version_reads_as_version_0() -> None:
+    assert HelloPayload.model_validate({"benchmark": {}}).protocol_version == 0
+
+
+def test_a_ready_without_a_version_reads_as_version_5() -> None:
+    assert ReadyPayload.model_validate({}).protocol_version == 5
+
+
+def test_a_ready_ignores_a_field_from_a_newer_policy() -> None:
+    ready = ReadyPayload.model_validate({"protocol_version": 9, "unknown": 1})
+
+    assert ready.model_dump() == {"protocol_version": 9}

@@ -44,6 +44,10 @@ is newer than itself. The benchmark refuses an action that its own spec does not
 accept. Only the last of the three protects a new benchmark from an old policy,
 because an old peer does not read this version number at all.
 
+READY includes the policy's `protocol_version`, so that a benchmark can
+tell which version the policy speaks. Nothing reads it yet, and a policy
+older than this change sends READY without it.
+
 The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
 synchronous peer round-trips identically without a version bump.
@@ -63,6 +67,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image
+from pydantic import BaseModel
 
 from manifold.core.values import Action, Observation
 from manifold.lib.compat import StrEnum
@@ -301,6 +306,22 @@ class FrameType(StrEnum):
     BYE = "bye"  # either side, clean shutdown.
     GET_SIGNATURE = "get_signature"  # any peer -> policy, before HELLO.
     SIGNATURE = "signature"  # policy -> peer, the reply to GET_SIGNATURE.
+
+
+class HelloPayload(BaseModel):
+    """The payload of a HELLO frame."""
+
+    # A HELLO without a version predates versioning.
+    protocol_version: int = 0
+    # Left unparsed, so the policy can drop cameras that are not in its SDK.
+    benchmark: dict[str, Any]
+
+
+class ReadyPayload(BaseModel):
+    """The payload of a READY frame."""
+
+    # A policy older than this change sends none, and speaks version 5 or older.
+    protocol_version: int = 5
 
 
 def encode_observation(
@@ -627,6 +648,8 @@ __all__ = [
     "MAX_FRAME_BYTES",
     "FrameChannel",
     "FrameType",
+    "HelloPayload",
+    "ReadyPayload",
     "decode_action",
     "decode_observation",
     "decode_rtc_fields",

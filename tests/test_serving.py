@@ -504,6 +504,49 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
     assert "ignoring cameras this SDK does not list: head" in events
 
 
+def test_serve_sends_its_protocol_version_in_ready():
+    from manifold.core import Benchmark, PolicySignature
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import serve
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    signature = PolicySignature(action_space=FRANKA_EE_DELTA.action, instruction=False)
+    benchmark = Benchmark(name="suite", embodiment=FRANKA_EE_DELTA, instruction=False)
+    endpoint = SimpleNamespace(
+        signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
+    )
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, endpoint),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(
+            FrameType.HELLO,
+            {
+                "protocol_version": BRIDGE_PROTOCOL_VERSION,
+                "benchmark": benchmark.model_dump(mode="json"),
+            },
+        )
+        reply = channel.recv()
+        channel.send(FrameType.BYE, {})
+
+    assert reply is not None and reply.get("type") == FrameType.READY
+    assert reply["payload"] == {"protocol_version": BRIDGE_PROTOCOL_VERSION}
+
+
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
 # The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so
