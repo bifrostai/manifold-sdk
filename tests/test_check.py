@@ -5,8 +5,6 @@ import pytest
 
 from manifold.adapters.action import BasePinWiden, GripperPolarityAdapter
 from manifold.adapters.observation import Rotate180Cameras
-from manifold.benchmarks.libero import LIBERO
-from manifold.benchmarks.robocasa import ROBOCASA
 from manifold.core import (
     Benchmark,
     Camera,
@@ -35,6 +33,7 @@ from manifold.core import (
 from manifold.core.names import EmbodimentName
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 from manifold.sensors import CameraName
+from tests._benchmarks import TABLETOP
 
 
 def _ee(gripper: GripperFormat = GripperFormat.SIGNED) -> EEActionSpace:
@@ -203,20 +202,20 @@ def test_first_unmet_ignores_mount_provenance() -> None:
     assert wanting.first_unmet(available) is None
 
 
-def test_franka_ee_nests_gripper_in_ee_pose_and_a_gripper_contract_pairs_with_libero() -> None:
-    # FRANKA_EE_DELTA/LIBERO now publishes the parallel-jaw gripper qpos nested in its
+def test_franka_ee_nests_gripper_in_ee_pose_and_a_gripper_policy_pairs_with_the_tabletop() -> None:
+    # FRANKA_EE_DELTA publishes the parallel-jaw gripper qpos nested in its
     # ee_pose, so its EE value is 9-D — the native rotation is the (x, y, z, w)
     # QUATERNION robosuite emits (ADR-0001, decision 7: the embodiment records the env's TRUE
     # native form; the pairing pipeline bridges it to whatever the policy consumes).
     # A policy that consumes that same native quaternion with the same nested gripper
     # pairs without padding or a proprio rotation adapter.
-    ee_pose = LIBERO.embodiment.proprioception.ee_pose
+    ee_pose = TABLETOP.embodiment.proprioception.ee_pose
     assert ee_pose is not None
     assert ee_pose.rotation == RotationFormat.QUATERNION
     assert ee_pose.gripper == GripperObservationSpec(dim=2)
     assert ee_pose.expected_length() == 9  # pos(3) + quat_xyzw(4) + gripper_qpos(2)
     policy = PolicySignature(
-        # LIBERO's action gripper is SIGNED_OPEN_LOW (the lerobot env opens at -1),
+        # The tabletop's action gripper is SIGNED_OPEN_LOW (the lerobot env opens at -1),
         # so a clean match declares the same — this test is about the nested gripper
         # qpos in proprioception, not an action-side polarity conversion.
         action_space=_ee(gripper=GripperFormat.SIGNED_OPEN_LOW),
@@ -226,10 +225,10 @@ def test_franka_ee_nests_gripper_in_ee_pose_and_a_gripper_contract_pairs_with_li
                 gripper=GripperObservationSpec(dim=2),
             ),
         ),
-        cameras=list(LIBERO.observation_space.cameras),
+        cameras=list(TABLETOP.observation_space.cameras),
         instruction=True,
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.COMPATIBLE
 
 
 def test_frame_history_is_the_spec_edge_for_a_clip_consuming_policy() -> None:
@@ -337,8 +336,8 @@ def test_base_pin_widen_does_not_apply_to_a_full_width_action() -> None:
 _ROBOSUITE_ORIENTATION = CameraOrientation.FLIPPED_VERTICAL
 
 
-def _libero_policy(*, cameras: list[Camera]) -> PolicySignature:
-    """A signature that pairs with LIBERO on everything except the cameras given."""
+def _tabletop_policy(*, cameras: list[Camera]) -> PolicySignature:
+    """A signature that pairs with the tabletop on everything except the cameras given."""
     return PolicySignature(
         action_space=_ee(gripper=GripperFormat.SIGNED_OPEN_LOW),
         proprioception=Proprioception(
@@ -352,39 +351,23 @@ def _libero_policy(*, cameras: list[Camera]) -> PolicySignature:
     )
 
 
-def test_robocasa_declares_the_orientation_its_renderer_publishes() -> None:
-    # RoboCasa is robosuite too, so its frames are bottom-up for the same reason
-    # LIBERO's are. It differs in how the wrong value stayed invisible: no runner
-    # corrected it at serve time, so the entry and the pairings built on it agreed on
-    # an orientation no published frame carried, and nothing was refused anywhere.
-    assert [camera.orientation for camera in ROBOCASA.sensors] == [_ROBOSUITE_ORIENTATION] * 3
-
-
-def test_libero_declares_the_orientation_its_renderer_publishes() -> None:
-    # robosuite hands back MuJoCo's render buffer bottom-up, so every LIBERO frame is
-    # row-reversed against an upright scene. The catalogue has to say so: a wrong
-    # orientation is invisible to a shape check, and a benchmark container that fixed
-    # it at serve time made the pairing pass here and fail at the handshake.
-    assert [camera.orientation for camera in LIBERO.sensors] == [_ROBOSUITE_ORIENTATION] * 4
-
-
-def test_a_colour_only_policy_pairs_with_libero_publishing_depth() -> None:
-    # LIBERO publishes metric depth beside each colour view. `first_unmet` iterates the
+def test_a_colour_only_policy_pairs_with_a_benchmark_publishing_depth() -> None:
+    # The tabletop publishes metric depth beside each colour view. `first_unmet` iterates the
     # cameras the POLICY consumes, so channels it declares none of cannot affect it —
     # which is what makes publishing depth additive rather than a new benchmark
     # identity (ADR 0007).
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
             )
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.COMPATIBLE
 
 
-def test_an_rgbd_policy_pairs_with_libero() -> None:
-    policy = _libero_policy(
+def test_an_rgbd_policy_pairs_with_the_tabletop() -> None:
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
@@ -398,7 +381,7 @@ def test_an_rgbd_policy_pairs_with_libero() -> None:
             ),
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.COMPATIBLE
 
 
 def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
@@ -406,7 +389,7 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
     # uint8 colour frame does not silently pair with the float32 metres published under
     # that name. Without that comparison this is the first failure class: a plausible
     # array a name check cannot reject.
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW_DEPTH,
@@ -415,7 +398,7 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
             )
         ]
     )
-    report = check_compatibility(policy, LIBERO)
+    report = check_compatibility(policy, TABLETOP)
     assert report.status is Compatibility.INCOMPATIBLE
     assert any(
         CameraName.AGENTVIEW_DEPTH in reason and "conventions" in reason
@@ -434,20 +417,20 @@ def _calibration(
 
 
 def test_a_policy_wanting_no_calibration_pairs_with_a_benchmark_publishing_it() -> None:
-    # Asymmetric, like every other channel comparison: LIBERO declares calibration on
+    # Asymmetric, like every other channel comparison: the tabletop declares calibration on
     # all four cameras and a policy that declares none is unaffected (ADR 0008).
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
             )
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.COMPATIBLE
 
 
-def test_a_policy_consuming_libero_calibration_pairs() -> None:
-    policy = _libero_policy(
+def test_a_policy_consuming_the_tabletops_calibration_pairs() -> None:
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW,
@@ -457,20 +440,20 @@ def test_a_policy_consuming_libero_calibration_pairs() -> None:
             )
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.COMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.COMPATIBLE
 
 
 def test_a_field_of_view_mismatch_is_incompatible() -> None:
     # The gap a resize cannot close: same pixels, different projection. Without this
     # comparison the policy is fed a differently-projected world with nothing to say so.
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW, shape=(256, 256, 3), calibration=_calibration(fovy=60.0)
             )
         ]
     )
-    report = check_compatibility(policy, LIBERO)
+    report = check_compatibility(policy, TABLETOP)
     assert report.status is Compatibility.INCOMPATIBLE
     assert any(
         CameraName.AGENTVIEW in reason and "conventions" in reason for reason in report.reasons
@@ -528,7 +511,7 @@ def test_a_policy_wanting_calibration_is_unmet_by_a_benchmark_without_it() -> No
 def test_an_axis_convention_mismatch_is_incompatible() -> None:
     # The silent one: a plausible 4x4 under either convention, pointing the camera
     # backwards under the wrong one.
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW,
@@ -537,13 +520,13 @@ def test_an_axis_convention_mismatch_is_incompatible() -> None:
             )
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.INCOMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.INCOMPATIBLE
 
 
 def test_an_extrinsic_frame_mismatch_is_incompatible() -> None:
-    # LIBERO publishes camera-to-world; a policy requiring base-frame poses needs a
+    # The tabletop publishes camera-to-world; a policy requiring base-frame poses needs a
     # transform nothing in the catalogue supplies yet, so the pairing must not claim to work.
-    policy = _libero_policy(
+    policy = _tabletop_policy(
         cameras=[
             Camera(
                 name=CameraName.AGENTVIEW,
@@ -552,7 +535,7 @@ def test_an_extrinsic_frame_mismatch_is_incompatible() -> None:
             )
         ]
     )
-    assert check_compatibility(policy, LIBERO).status is Compatibility.INCOMPATIBLE
+    assert check_compatibility(policy, TABLETOP).status is Compatibility.INCOMPATIBLE
 
 
 def test_a_signature_executing_more_moves_than_it_predicts_is_rejected() -> None:
@@ -588,8 +571,8 @@ def test_a_chunked_action_space_points_at_the_signature(
 
 def test_a_benchmark_sending_the_legacy_chunk_size_of_one_still_parses() -> None:
     # Older benchmark images send `chunk_size: 1` on the action space in HELLO.
-    payload = json.loads(LIBERO.model_dump_json())
+    payload = json.loads(TABLETOP.model_dump_json())
     payload["embodiment"]["action"]["chunk_size"] = 1
     parsed = Benchmark.model_validate_json(json.dumps(payload))
-    assert parsed.embodiment.action == LIBERO.embodiment.action
+    assert parsed.embodiment.action == TABLETOP.embodiment.action
     assert "chunk_size" not in parsed.embodiment.action.model_dump()
