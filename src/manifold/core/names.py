@@ -26,7 +26,10 @@ class CameraName(_Name):
     AGENTVIEW_LEFT_DEPTH = "agentview_left_depth"
     AGENTVIEW_RIGHT = "agentview_right"
     AGENTVIEW_RIGHT_DEPTH = "agentview_right_depth"
+    HEAD = "head"
+    LEFT_WRIST = "left_wrist"
     OVER_SHOULDER_LEFT = "over_shoulder_left"
+    RIGHT_WRIST = "right_wrist"
     WRIST = "wrist"
     WRIST_DEPTH = "wrist_depth"
 
@@ -49,6 +52,7 @@ class ControlMode(_Name):
 class EmbodimentName(_Name):
     """The name of each embodiment: a robot or assembly, then its `ControlMode`."""
 
+    ALOHA_AGILEX_JOINT_ABSOLUTE = "aloha_agilex_joint_absolute"
     DROID_JOINT_ABSOLUTE = "droid_joint_absolute"
     FRANKA_EE_DELTA = "franka_ee_delta"
     FRANKA_JOINT_ABSOLUTE = "franka_joint_absolute"

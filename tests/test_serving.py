@@ -429,7 +429,7 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
         sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     ).model_dump(mode="json")
-    advertised["sensors"].append({**advertised["sensors"][0], "name": "head"})
+    advertised["sensors"].append({**advertised["sensors"][0], "name": "chest"})
     endpoint = SimpleNamespace(
         signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
     )
@@ -460,7 +460,7 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
         channel.send(FrameType.BYE, {})
 
     assert reply is not None and reply.get("type") == FrameType.READY, events
-    assert "ignoring cameras this SDK does not list: head" in events
+    assert "ignoring cameras this SDK does not list: chest" in events
 
 
 def test_serve_sends_its_protocol_version_in_ready():
