@@ -14,8 +14,10 @@ from manifold.core import (
     PolicySignature,
     check_compatibility,
 )
+from manifold.core.sensor import Modality, Mount
 from manifold.embodiments import FRANKA_EE_DELTA
 from manifold.recipes import from_lerobot_checkpoint
+from manifold.sensors import agentview_left_depth, agentview_right_depth
 
 
 def _advertised(camera: str) -> dict[str, Any]:
@@ -99,3 +101,21 @@ def test_a_lerobot_draft_leaves_out_a_camera_with_an_unlisted_name(tmp_path: Pat
     draft = cast(PolicySignature, from_lerobot_checkpoint(tmp_path).draft_policy_spec())
 
     assert [camera.name for camera in draft.cameras] == [CameraName.WRIST]
+
+
+@pytest.mark.parametrize(
+    ("constructor", "name"),
+    [
+        (agentview_left_depth, CameraName.AGENTVIEW_LEFT_DEPTH),
+        (agentview_right_depth, CameraName.AGENTVIEW_RIGHT_DEPTH),
+    ],
+)
+def test_a_workspace_depth_camera_is_scene_mounted_metric_depth(constructor, name):
+    camera = constructor((8, 8, 1))
+
+    assert (camera.name, camera.mount, camera.modality, camera.dtype) == (
+        name,
+        Mount.SCENE,
+        Modality.DEPTH,
+        "float32",
+    )
