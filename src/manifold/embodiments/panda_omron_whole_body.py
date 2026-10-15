@@ -39,15 +39,14 @@ from manifold.core.embodiment import (
 )
 from manifold.core.names import EmbodimentName
 
-# The gripper is SIGNED ([-1, 1], +1 = closed for the PandaOmron), the polarity
-# the env applies — note this differs from FRANKA_EE_DELTA's open-low convention.
+# robosuite's PandaGripper closes at +1 and opens at -1.
 PANDA_OMRON_WHOLE_BODY = Embodiment(
     name=EmbodimentName.PANDA_OMRON_WHOLE_BODY,
     action=UnifiedActionSpace(
         width=12,
         payload=EEActionSpace(
             rotation=RotationFormat.AXIS_ANGLE,
-            gripper=GripperFormat.SIGNED,
+            gripper=GripperFormat.SIGNED_OPEN_LOW,
             frame=Frame.BASE,
             delta=True,
         ),
