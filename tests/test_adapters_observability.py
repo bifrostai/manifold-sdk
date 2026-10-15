@@ -229,7 +229,7 @@ def _depth_space(shape: tuple[int, ...]) -> ObservationSpace:
     return ObservationSpace(
         cameras=(
             Camera(
-                name=CameraName.AGENTVIEW_DEPTH,
+                name=CameraName.AGENTVIEW,
                 shape=shape,
                 dtype="float32",
                 modality=Modality.DEPTH,
@@ -252,12 +252,10 @@ def test_resize_cameras_resamples_a_depth_frame_without_interpolating() -> None:
         ],
         dtype=np.float32,
     ).reshape(4, 4, 1)
-    observation = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
+    observation = Observation(sensors={"agentview_depth": depth})
 
-    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW_DEPTH,), shape=(2, 2))
-    out = adapter.adapt(observation, source=_depth_space((4, 4, 1))).sensors[
-        CameraName.AGENTVIEW_DEPTH
-    ]
+    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(2, 2))
+    out = adapter.adapt(observation, source=_depth_space((4, 4, 1))).sensors["agentview_depth"]
 
     assert out.shape == (2, 2, 1)
     assert out.dtype == np.float32
@@ -272,12 +270,10 @@ def test_resize_cameras_pads_a_depth_frame_with_inf() -> None:
     # Aspect-preserving pad on depth fills with `inf`, not zero: a zero pad is a
     # surface at the lens, which is a distance, where `inf` says there is no reading.
     depth = np.full((4, 2, 1), 2.0, dtype=np.float32)
-    observation = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
+    observation = Observation(sensors={"agentview_depth": depth})
 
-    adapter = ResizeCameras(cameras=(CameraName.AGENTVIEW_DEPTH,), shape=(4, 4), pad=True)
-    out = adapter.adapt(observation, source=_depth_space((4, 2, 1))).sensors[
-        CameraName.AGENTVIEW_DEPTH
-    ]
+    adapter = ResizeCameras(cameras=("agentview_depth",), shape=(4, 4), pad=True)
+    out = adapter.adapt(observation, source=_depth_space((4, 2, 1))).sensors["agentview_depth"]
 
     assert out.shape == (4, 4, 1)
     assert np.isinf(out[:, 0, 0]).all()

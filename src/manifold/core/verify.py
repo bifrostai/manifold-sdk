@@ -745,7 +745,7 @@ def _run_observation(
         if policy_proprio.joint_pos is not None:
             policy_proprio.joint_pos.validate_value(result.state["joint_pos"])
         for wanted in policy_consumes.cameras:
-            wanted.validate_value(result.sensors[wanted.name])
+            wanted.validate_value(result.sensors[wanted.key])
     except Exception as exc:  # an adapter's data map failed on probe data
         _fail(checks, "observation", "observation pipeline failed on probe data", exc)
         return
@@ -781,13 +781,13 @@ def _run_observation(
     for wanted in policy_consumes.cameras:
         checks.append(
             VerifyCheck(
-                f"observation.camera.{wanted.name}.shape",
+                f"observation.camera.{wanted.key}.shape",
                 True,
                 f"shape {wanted.shape} and dtype {wanted.dtype} survive the chain",
             )
         )
         not_checked.append(
-            f"camera {wanted.name!r} orientation/channel content: "
+            f"camera {wanted.key!r} orientation/channel content: "
             "synthetic data cannot reveal a flip or a channel swap"
         )
 
@@ -989,7 +989,7 @@ def _probe_observation(contract: ObservationSpace) -> Observation:
         else:
             state[name] = np.asarray(spec.example(), dtype=np.float32)
     sensors: dict[str, np.ndarray] = {
-        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
+        camera.key: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
     }
     instruction = "" if contract.instruction else None
     return Observation(
@@ -1016,7 +1016,7 @@ def _probe_extrinsics(contract: ObservationSpace) -> dict[str, np.ndarray]:
             continue
         pose = np.eye(4, dtype=np.float64)
         pose[:3, 3] = (index + 1) * np.array([0.1, 0.2, 0.3])
-        poses[camera.name] = pose
+        poses[camera.key] = pose
     return poses
 
 
@@ -1144,7 +1144,7 @@ def probe_observation(contract: ObservationSpace, *, instruction: str = "") -> O
         else:
             state[name] = np.asarray(spec.example(), dtype=np.float32)
     sensors: dict[str, np.ndarray] = {
-        camera.name: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
+        camera.key: _gradient_frame(camera.shape, camera.dtype) for camera in contract.cameras
     }
     return Observation(
         state=state,

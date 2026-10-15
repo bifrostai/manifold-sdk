@@ -61,10 +61,16 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
     assert {name.value for name in EmbodimentName} == set(MODULES)
 
 
-def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
-    from manifold.sensors import CameraName
+def test_camera_keys_keep_the_strings_that_registered_versions_pair_on():
+    from manifold.core.sensor import Modality
+    from manifold.sensors import agentview, agentview_left, agentview_right, wrist
 
-    assert {name.value for name in CameraName} == {
+    keys = {
+        constructor((8, 8, 1), modality=modality).key
+        for constructor in (agentview, agentview_left, agentview_right, wrist)
+        for modality in (Modality.RGB, Modality.DEPTH)
+    }
+    assert keys | {"over_shoulder_left"} == {
         "agentview",
         "agentview_depth",
         "agentview_left",

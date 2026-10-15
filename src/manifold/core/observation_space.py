@@ -76,10 +76,10 @@ class ObservationSpace(BaseModel):
     cameras: tuple[Camera, ...] = ()
     instruction: bool = False
 
-    def camera(self, name: str) -> Camera | None:
-        """The camera channel named `name`, or None if this spec has none."""
+    def camera(self, key: str) -> Camera | None:
+        """The camera channel under `key`, or None if this spec has none."""
         for cam in self.cameras:
-            if cam.name == name:
+            if cam.key == key:
                 return cam
         return None
 
@@ -88,12 +88,12 @@ class ObservationSpace(BaseModel):
         return self.model_copy(update={"proprioception": proprioception})
 
     def with_camera(self, camera: Camera) -> ObservationSpace:
-        """A copy with the same-named camera replaced, preserving order.
+        """A copy with the camera under the same key replaced, preserving order.
 
-        If no camera of that name is present the cameras are unchanged — an
-        adapter rewriting a channel it does not carry is a no-op, not an append.
+        If no camera under that key is present the cameras are unchanged.
+        An adapter rewriting a channel that is not there is a no-op, not an append.
         """
-        cameras = tuple(camera if c.name == camera.name else c for c in self.cameras)
+        cameras = tuple(camera if c.key == camera.key else c for c in self.cameras)
         return self.model_copy(update={"cameras": cameras})
 
     def first_unmet(self, available: ObservationSpace) -> str | None:
@@ -115,11 +115,11 @@ class ObservationSpace(BaseModel):
         if proprio_unmet is not None:
             return f"proprioception.{proprio_unmet}"
         for wanted in self.cameras:
-            offered = available.camera(wanted.name)
+            offered = available.camera(wanted.key)
             if offered is None:
-                return f"camera {wanted.name!r}: not published"
+                return f"camera {wanted.key!r}: not published"
             if not _camera_conventions_match(wanted, offered):
-                return f"camera {wanted.name!r}: conventions differ"
+                return f"camera {wanted.key!r}: conventions differ"
         if self.instruction and not available.instruction:
             return "instruction: required but not published"
         return None

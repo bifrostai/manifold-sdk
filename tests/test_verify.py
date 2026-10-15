@@ -260,7 +260,7 @@ def test_static_failure_short_circuits_with_static_reasons() -> None:
     policy = PolicySignature(
         action_space=_ee(),
         proprioception=_franka_proprio(),
-        cameras=[Camera(name=CameraName.WRIST_DEPTH, shape=(8, 8, 3))],
+        cameras=[Camera(name="wrist_depth", shape=(8, 8, 3))],
         instruction=False,
     )
 

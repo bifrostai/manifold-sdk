@@ -20,7 +20,6 @@ import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.core.conventions import CameraAxes, Frame
-from manifold.core.names import CameraName
 from manifold.lib.compat import StrEnum
 
 
@@ -207,16 +206,16 @@ class Camera(BaseModel):
     keyed on it rather than a separate field. `orientation` and `channel_order`
     are the small typed conventions whose mismatch is silent and plausible
     (a valid-looking but flipped or colour-swapped frame), declared so a check
-    can catch them and a lossless adapter can bridge them. `name` is how a policy
-    and a benchmark refer to the same view (`CameraName.AGENTVIEW`,
-    `CameraName.WRIST`) without either hardcoding the other's internal naming.
+    can catch them and a lossless adapter can bridge them. `name` is the viewpoint
+    that a policy and a benchmark both refer to, such as `CameraName.WRIST`, and
+    `modality` names what the camera measures from it. `key` combines the two.
     `mount` is provenance — a deferred tag, not a bridging axis — so it is not
     compared when matching conventions.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    name: CameraName
+    name: str
     shape: tuple[int, ...] = Field(description="Tensor shape, typically (H, W, 3) for RGB.")
     dtype: str = "uint8"
     mount: Mount = Mount.SCENE
@@ -224,6 +223,13 @@ class Camera(BaseModel):
     orientation: CameraOrientation = CameraOrientation.UPRIGHT
     channel_order: ChannelOrder = ChannelOrder.RGB
     calibration: CameraCalibration | None = None
+
+    @property
+    def key(self) -> str:
+        """The camera's key in an observation: its name, plus its modality if not RGB."""
+        if self.modality is Modality.RGB:
+            return self.name
+        return f"{self.name}_{self.modality.value}"
 
     def example(self) -> np.ndarray:
         """A zero-filled array of this camera's shape and dtype."""
@@ -234,11 +240,11 @@ class Camera(BaseModel):
         actual_shape = tuple(int(d) for d in value.shape)
         if actual_shape != self.shape:
             raise ValueError(
-                f"Camera {self.name!r}: shape mismatch: expected {self.shape}, got {actual_shape}"
+                f"Camera {self.key!r}: shape mismatch: expected {self.shape}, got {actual_shape}"
             )
         if str(value.dtype) != self.dtype:
             raise ValueError(
-                f"Camera {self.name!r}: dtype mismatch: expected {self.dtype}, got {value.dtype}"
+                f"Camera {self.key!r}: dtype mismatch: expected {self.dtype}, got {value.dtype}"
             )
 
 

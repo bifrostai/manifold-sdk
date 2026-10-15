@@ -50,17 +50,17 @@ def _default_pool(
     proprioception rotation is added when the two `ee_pose` formats differ.
     """
     pool: list[ActionAdapter | ObservationAdapter] = []
-    published = {camera.name: camera for camera in benchmark.sensors}
+    published = {camera.key: camera for camera in benchmark.sensors}
     resize_targets: dict[str, tuple[int, ...]] = {}
     for camera in signature.cameras:
-        source = published.get(camera.name)
+        source = published.get(camera.key)
         if source is None:
             continue
         if source.orientation != camera.orientation:
-            pool.append(FlipVerticalCameras(cameras=(camera.name,)))
-            pool.append(Rotate180Cameras(cameras=(camera.name,)))
+            pool.append(FlipVerticalCameras(cameras=(camera.key,)))
+            pool.append(Rotate180Cameras(cameras=(camera.key,)))
         if source.shape != camera.shape:
-            resize_targets[camera.name] = camera.shape
+            resize_targets[camera.key] = camera.shape
     if resize_targets:
         pool.append(ResizeCameras(targets=resize_targets))
     policy_ee_pose = signature.proprioception.ee_pose

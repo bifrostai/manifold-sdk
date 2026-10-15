@@ -309,12 +309,12 @@ def test_depth_sensor_round_trips_losslessly_whatever_the_image_format(image_for
     # survives even under a lossy format (ADR 0007).
     depth = (np.arange(16, dtype=np.float32) / 8.0).reshape(4, 4, 1)
     depth[0, 0, 0] = np.inf
-    obs = Observation(sensors={CameraName.AGENTVIEW_DEPTH: depth})
+    obs = Observation(sensors={"agentview_depth": depth})
 
     decoded = decode_observation(encode_observation(obs, image_format=image_format))
 
-    assert decoded.sensors[CameraName.AGENTVIEW_DEPTH].dtype == np.float32
-    assert np.array_equal(decoded.sensors[CameraName.AGENTVIEW_DEPTH], depth)
+    assert decoded.sensors["agentview_depth"].dtype == np.float32
+    assert np.array_equal(decoded.sensors["agentview_depth"], depth)
 
 
 def test_colour_and_depth_sensors_travel_in_one_observation() -> None:
@@ -324,7 +324,7 @@ def test_colour_and_depth_sensors_travel_in_one_observation() -> None:
     obs = Observation(
         sensors={
             CameraName.AGENTVIEW: np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
-            CameraName.AGENTVIEW_DEPTH: depth,
+            "agentview_depth": depth,
         }
     )
 
@@ -332,19 +332,19 @@ def test_colour_and_depth_sensors_travel_in_one_observation() -> None:
 
     assert decoded.sensors[CameraName.AGENTVIEW].dtype == np.uint8
     assert decoded.sensors[CameraName.AGENTVIEW].shape == (4, 4, 3)
-    assert np.array_equal(decoded.sensors[CameraName.AGENTVIEW_DEPTH], depth)
+    assert np.array_equal(decoded.sensors["agentview_depth"], depth)
 
 
 def test_depth_sensor_keeps_a_narrower_float_dtype() -> None:
     # The wire dtype follows the array's own, so a benchmark declaring float16 depth
     # halves its payload with no second option to select.
     depth = np.array([[1.5, np.inf], [2.25, 3.0]], dtype=np.float16).reshape(2, 2, 1)
-    obs = Observation(sensors={CameraName.WRIST_DEPTH: depth})
+    obs = Observation(sensors={"wrist_depth": depth})
 
     decoded = decode_observation(encode_observation(obs))
 
-    assert decoded.sensors[CameraName.WRIST_DEPTH].dtype == np.float16
-    assert np.array_equal(decoded.sensors[CameraName.WRIST_DEPTH], depth)
+    assert decoded.sensors["wrist_depth"].dtype == np.float16
+    assert np.array_equal(decoded.sensors["wrist_depth"], depth)
 
 
 def _decode_as_a_pre_depth_peer(payload) -> dict:
@@ -372,7 +372,7 @@ def test_a_pre_depth_peer_decodes_a_depth_carrying_observation() -> None:
     obs = Observation(
         sensors={
             CameraName.AGENTVIEW: np.arange(4 * 4 * 3, dtype=np.uint8).reshape(4, 4, 3),
-            CameraName.AGENTVIEW_DEPTH: np.full((4, 4, 1), 1.25, dtype=np.float32),
+            "agentview_depth": np.full((4, 4, 1), 1.25, dtype=np.float32),
         }
     )
 
@@ -388,15 +388,15 @@ def test_depth_travels_under_its_own_payload_key() -> None:
     obs = Observation(
         sensors={
             CameraName.AGENTVIEW: np.zeros((2, 2, 3), dtype=np.uint8),
-            CameraName.AGENTVIEW_DEPTH: np.full((2, 2, 1), 0.5, dtype=np.float32),
+            "agentview_depth": np.full((2, 2, 1), 0.5, dtype=np.float32),
         }
     )
 
     payload = encode_observation(obs)
 
     assert set(payload["sensors"]) == {CameraName.AGENTVIEW}
-    assert set(payload["depth"]) == {CameraName.AGENTVIEW_DEPTH}
-    assert payload["depth"][CameraName.AGENTVIEW_DEPTH]["__ndarray__"] is True
+    assert set(payload["depth"]) == {"agentview_depth"}
+    assert payload["depth"]["agentview_depth"]["__ndarray__"] is True
 
 
 def test_the_depth_key_is_absent_from_a_colour_only_observation() -> None:
@@ -412,12 +412,12 @@ def test_depth_under_sensors_still_decodes() -> None:
     # still reads an ndarray wrapper there, so this decoder reads those payloads
     # unchanged rather than only the layout it now writes.
     depth = np.full((2, 2, 1), 2.5, dtype=np.float32)
-    payload = encode_observation(Observation(sensors={CameraName.WRIST_DEPTH: depth}))
+    payload = encode_observation(Observation(sensors={"wrist_depth": depth}))
     legacy = {**payload, "sensors": payload.pop("depth"), "depth": {}}
 
     decoded = decode_observation(legacy)
 
-    assert np.array_equal(decoded.sensors[CameraName.WRIST_DEPTH], depth)
+    assert np.array_equal(decoded.sensors["wrist_depth"], depth)
 
 
 def test_a_depth_key_that_is_not_a_dict_is_refused() -> None:
@@ -433,7 +433,7 @@ def test_a_depth_node_that_is_not_an_ndarray_is_refused() -> None:
     payload = encode_observation(
         Observation(sensors={CameraName.AGENTVIEW: np.zeros((2, 2, 3), np.uint8)})
     )
-    payload["depth"] = {CameraName.AGENTVIEW_DEPTH: payload["sensors"][CameraName.AGENTVIEW]}
+    payload["depth"] = {"agentview_depth": payload["sensors"][CameraName.AGENTVIEW]}
     with pytest.raises(ValueError, match="not a decodable ndarray wrapper"):
         decode_observation(payload)
 

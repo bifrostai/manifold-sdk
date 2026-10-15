@@ -48,6 +48,17 @@ READY includes the policy's `protocol_version`, so that a benchmark can
 tell which version the policy speaks. A policy at version 5 or older may
 send READY without it.
 
+Version 6 adds `cameras` to READY, the keys of the cameras that the policy reads,
+so that a benchmark renders only those. A benchmark writes its first HELLO at
+`MIN_BRIDGE_PROTOCOL_VERSION` and lists only its colour cameras in that HELLO, so
+that a version 5 policy accepts it. A version 5 policy finds a camera by its name
+alone, and a depth camera has the same name as the colour camera at its viewpoint.
+The HELLO's `supported_protocol_version` includes the benchmark's own version. A
+version 5 policy ignores that field and checks the HELLO. A version 6 policy
+replies to the first HELLO without checking it. The benchmark then sends a second
+HELLO, at the policy's version, with every camera. A HELLO without
+`supported_protocol_version` comes from a version 5 benchmark.
+
 The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
 synchronous peer round-trips identically without a version bump.
@@ -69,6 +80,7 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
+from manifold.core.benchmark import Benchmark
 from manifold.core.values import Action, Observation
 from manifold.lib.compat import StrEnum
 from manifold.wire.codec import (
@@ -86,7 +98,13 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 # The frame-and-codec contract version. Bump when that contract changes.
-BRIDGE_PROTOCOL_VERSION = 5
+BRIDGE_PROTOCOL_VERSION = 6
+
+# The version that a benchmark writes in its first HELLO, locked at 5 for backward
+# compatibility: a version 5 policy refuses a HELLO newer than itself. A
+# version 5 policy names no cameras in READY, and the benchmark must render
+# every colour camera that it publishes.
+MIN_BRIDGE_PROTOCOL_VERSION = 5
 
 # A length prefix is a 4-byte big-endian unsigned integer, so a single frame is
 # capped at 4 GiB by the wire format alone — far above any real payload.
@@ -294,8 +312,7 @@ class FrameType(StrEnum):
     Before HELLO, a peer may send GET_SIGNATURE. The policy replies SIGNATURE
     with its `PolicySignature` and the SDK version, and keeps the connection
     open. The Manifold CLI
-    asks when serve starts, then closes the connection. A benchmark may ask to
-    learn which cameras the policy reads, then send HELLO.
+    asks when serve starts, then closes the connection.
     """
 
     HELLO = "hello"  # benchmark advertises its contract on connect.
@@ -313,8 +330,9 @@ class HelloPayload(BaseModel):
 
     # A HELLO without a version predates versioning.
     protocol_version: int = 0
-    # Left unparsed, so the policy can drop cameras that are not in its SDK.
-    benchmark: dict[str, Any]
+    # A benchmark at version 5 or older sends none, and speaks `protocol_version`.
+    supported_protocol_version: int | None = None
+    benchmark: Benchmark
 
 
 class ReadyPayload(BaseModel):
@@ -322,6 +340,9 @@ class ReadyPayload(BaseModel):
 
     # A READY without a version comes from a policy at version 5 or older.
     protocol_version: int = 5
+    # The keys of the cameras that the policy reads. A policy older than version 6
+    # sends none, and a policy that does not check a HELLO sends none in reply.
+    cameras: list[str] | None = None
 
 
 def encode_observation(
@@ -646,6 +667,7 @@ def decode_rtc_fields(payload: dict[str, Any]) -> tuple[np.ndarray | None, int |
 __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
     "MAX_FRAME_BYTES",
+    "MIN_BRIDGE_PROTOCOL_VERSION",
     "FrameChannel",
     "FrameType",
     "HelloPayload",

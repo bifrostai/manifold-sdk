@@ -12,25 +12,21 @@ from __future__ import annotations
 from manifold.core.names import CameraName
 from manifold.sensors.cameras import (
     agentview,
-    agentview_depth,
     agentview_left,
-    agentview_left_depth,
     agentview_right,
-    agentview_right_depth,
+    head,
     over_shoulder_left,
+    over_shoulder_right,
     wrist,
-    wrist_depth,
 )
 
 __all__ = [
     "CameraName",
     "agentview",
-    "agentview_depth",
     "agentview_left",
-    "agentview_left_depth",
     "agentview_right",
-    "agentview_right_depth",
+    "head",
     "over_shoulder_left",
+    "over_shoulder_right",
     "wrist",
-    "wrist_depth",
 ]

@@ -12,6 +12,7 @@ from __future__ import annotations
 from manifold.wire.bridge import (
     BRIDGE_PROTOCOL_VERSION,
     MAX_FRAME_BYTES,
+    MIN_BRIDGE_PROTOCOL_VERSION,
     FrameChannel,
     FrameType,
     HelloPayload,
@@ -40,6 +41,7 @@ __all__ = [
     "BRIDGE_PROTOCOL_VERSION",
     "DEFAULT_FRAME_LANE",
     "MAX_FRAME_BYTES",
+    "MIN_BRIDGE_PROTOCOL_VERSION",
     "FrameChannel",
     "FrameType",
     "HelloPayload",

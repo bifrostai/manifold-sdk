@@ -8,8 +8,6 @@ must drive (the embodiment's `action`).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
-
 from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.core.conventions import GripperFormat
@@ -20,13 +18,9 @@ from manifold.core.embodiment import (
     JointActionSpace,
     UnifiedActionSpace,
 )
-from manifold.core.names import CameraName
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.sensor import Camera
 from manifold.lib.compat import assert_never
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 
 class Benchmark(BaseModel):
@@ -42,19 +36,6 @@ class Benchmark(BaseModel):
     embodiment: Embodiment
     sensors: list[Camera] = Field(default_factory=list)
     instruction: bool = True
-
-    @classmethod
-    def from_received(cls, payload: Mapping[str, Any]) -> Benchmark:
-        """The benchmark a peer sent, without the cameras this SDK does not list.
-
-        A peer built against a newer SDK may publish a camera named after a viewpoint
-        this one does not list. No policy on this SDK can read that camera, so it is
-        dropped rather than failing the parse. An unlisted embodiment still fails: a
-        robot this SDK does not know cannot be one its policy was built for.
-        """
-        listed = {name.value for name in CameraName}
-        sensors = [sensor for sensor in payload.get("sensors", []) if sensor.get("name") in listed]
-        return cls.model_validate({**payload, "sensors": sensors})
 
     @property
     def observation_space(self) -> ObservationSpace:
@@ -108,6 +89,20 @@ class Benchmark(BaseModel):
         if gripper is None:
             raise TypeError(f"{self!r} has no gripper action to target")
         return gripper
+
+    def with_sensors(self, keys: set[str]) -> Benchmark:
+        """The same benchmark publishing only the sensors under `keys`.
+
+        The returned benchmark lists the sensors in its own order. A benchmark
+        calls this before building its scene, with the cameras that the policy
+        reads plus any that the benchmark needs for itself, such as its live view.
+        A key that the benchmark does not publish raises `ValueError`.
+        """
+        unknown = keys - {sensor.key for sensor in self.sensors}
+        if unknown:
+            raise ValueError(f"{self.name} does not publish the sensors {sorted(unknown)}")
+        sensors = [sensor for sensor in self.sensors if sensor.key in keys]
+        return self.model_copy(update={"sensors": sensors})
 
 
 __all__ = ["Benchmark"]
