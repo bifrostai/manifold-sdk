@@ -588,7 +588,8 @@ def test_serve_sends_its_protocol_version_and_cameras_in_ready():
         "cameras": [CameraName.WRIST],
     }
     # A HELLO without `supported_protocol_version` comes from a version 5 benchmark.
-    assert f"benchmark supports bridge protocol {MIN_BRIDGE_PROTOCOL_VERSION}" in events
+    assert f"benchmark speaks bridge protocol {MIN_BRIDGE_PROTOCOL_VERSION}" in events
+    assert "paired; this policy reads cameras: wrist" in events
 
 
 def test_serve_checks_the_second_hello_from_a_benchmark_that_supports_a_newer_version():
@@ -632,8 +633,12 @@ def test_pair_returns_the_cameras_that_the_policy_reads():
     cameras = pair(f"127.0.0.1:{port}", _suite(), on_event=events.append)
 
     assert cameras == {CameraName.WRIST, "wrist_depth"}
-    assert events == ["the policy reads cameras: wrist, wrist_depth"]
-    assert f"benchmark supports bridge protocol {BRIDGE_PROTOCOL_VERSION}" in policy_events
+    assert events == [
+        f"the policy speaks bridge protocol {BRIDGE_PROTOCOL_VERSION} and reads cameras: "
+        "wrist, wrist_depth"
+    ]
+    assert f"benchmark speaks bridge protocol {BRIDGE_PROTOCOL_VERSION}" in policy_events
+    assert "benchmark listed only its colour cameras; waiting for its full list" in policy_events
 
 
 def _pair_with_a_policy_that_replies(*readies: dict[str, Any]):

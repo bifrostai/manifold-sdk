@@ -284,11 +284,12 @@ def _receive_benchmark(
     if payload is None:
         return None
     supported = payload.supported_protocol_version or payload.protocol_version
-    emit(f"benchmark supports bridge protocol {supported}")
+    emit(f"benchmark speaks bridge protocol {supported}")
     # A benchmark newer than version 5 reads this server's version from the first
     # READY, then sends the whole benchmark in a second HELLO at that version. The
     # first HELLO is not checked.
     if payload.protocol_version < min(supported, BRIDGE_PROTOCOL_VERSION):
+        emit("benchmark listed only its colour cameras; waiting for its full list")
         ready = ReadyPayload(protocol_version=BRIDGE_PROTOCOL_VERSION)
         channel.send(FrameType.READY, ready.model_dump(mode="json"))
         payload = _read_hello(channel.recv(), emit)
@@ -351,12 +352,13 @@ def _serve_session(
     # leak the freshly-minted per-session scratch).
     session = endpoint.session()
     try:
+        cameras = [camera.key for camera in signature.cameras]
+        emit(f"paired; this policy reads cameras: {', '.join(cameras) or 'none'}")
         channel.send(
             FrameType.READY,
-            ReadyPayload(
-                protocol_version=BRIDGE_PROTOCOL_VERSION,
-                cameras=[camera.key for camera in signature.cameras],
-            ).model_dump(mode="json"),
+            ReadyPayload(protocol_version=BRIDGE_PROTOCOL_VERSION, cameras=cameras).model_dump(
+                mode="json"
+            ),
         )
         while True:
             frame = channel.recv()
@@ -918,7 +920,9 @@ def _send_hello(channel: FrameChannel, hello: HelloPayload) -> ReadyPayload:
     return ReadyPayload.model_validate(reply["payload"])
 
 
-def _open(channel: FrameChannel, benchmark: Benchmark) -> frozenset[str]:
+def _open(
+    channel: FrameChannel, benchmark: Benchmark, emit: Callable[[str], None]
+) -> frozenset[str]:
     """Pair with the policy over `channel`, and return the keys of the cameras it reads.
 
     The first HELLO lists only the colour cameras, because a policy older than
@@ -949,7 +953,16 @@ def _open(channel: FrameChannel, benchmark: Benchmark) -> frozenset[str]:
             ),
         )
     if ready.cameras is None:
-        return frozenset(camera.key for camera in colour)
+        keys = sorted(camera.key for camera in colour)
+        emit(
+            f"the policy speaks bridge protocol {ready.protocol_version} or older and names "
+            f"no cameras, so every colour camera is sent: {', '.join(keys) or 'none'}"
+        )
+        return frozenset(keys)
+    emit(
+        f"the policy speaks bridge protocol {ready.protocol_version} and reads cameras: "
+        f"{', '.join(sorted(ready.cameras)) or 'none'}"
+    )
     return frozenset(ready.cameras)
 
 
@@ -970,9 +983,8 @@ def pair(
     host, port = _parse_server(server)
     with socket.create_connection((host, port)) as sock:
         channel = FrameChannel.from_socket(sock)
-        cameras = _open(channel, benchmark)
+        cameras = _open(channel, benchmark, on_event)
         channel.send(FrameType.BYE, {})
-    on_event(f"the policy reads cameras: {', '.join(sorted(cameras)) or 'none'}")
     return cameras
 
 
@@ -1063,7 +1075,7 @@ def _run_connected(
     ):
         sock.connect((host, port))
         channel = FrameChannel.from_socket(sock)
-        _open(channel, benchmark)
+        _open(channel, benchmark, emit)
         emit("policy confirmed the pairing (ready)")
 
         records: list[EpisodeRecord] = []
