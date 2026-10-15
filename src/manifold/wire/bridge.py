@@ -69,6 +69,7 @@ import numpy as np
 from PIL import Image
 from pydantic import BaseModel
 
+from manifold.core.benchmark import Benchmark
 from manifold.core.values import Action, Observation
 from manifold.lib.compat import StrEnum
 from manifold.wire.codec import (
@@ -313,8 +314,7 @@ class HelloPayload(BaseModel):
 
     # A HELLO without a version predates versioning.
     protocol_version: int = 0
-    # Left unparsed, so the policy can drop cameras that are not in its SDK.
-    benchmark: dict[str, Any]
+    benchmark: Benchmark
 
 
 class ReadyPayload(BaseModel):

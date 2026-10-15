@@ -1,8 +1,8 @@
-"""The names a policy and a benchmark share for cameras and embodiments.
+"""The names that a policy and a benchmark share for cameras and embodiments.
 
-Each name is a member of an enum, and a spec can only use a name this SDK lists.
-A benchmark received from a peer built against a newer SDK may publish a camera
-this one does not list; `Benchmark.from_received` drops it before parsing.
+`CameraName` lists the common camera viewpoints. A benchmark may also name a
+viewpoint of its own, and a policy reads that camera under the same name.
+An embodiment name is always a member of `EmbodimentName`.
 """
 
 from __future__ import annotations
@@ -18,17 +18,15 @@ class _Name(StrEnum):
 
 
 class CameraName(_Name):
-    """The name of each camera viewpoint."""
+    """The common camera viewpoints. A camera's modality names what it measures."""
 
     AGENTVIEW = "agentview"
-    AGENTVIEW_DEPTH = "agentview_depth"
     AGENTVIEW_LEFT = "agentview_left"
-    AGENTVIEW_LEFT_DEPTH = "agentview_left_depth"
     AGENTVIEW_RIGHT = "agentview_right"
-    AGENTVIEW_RIGHT_DEPTH = "agentview_right_depth"
+    HEAD = "head"
     OVER_SHOULDER_LEFT = "over_shoulder_left"
+    OVER_SHOULDER_RIGHT = "over_shoulder_right"
     WRIST = "wrist"
-    WRIST_DEPTH = "wrist_depth"
 
 
 class ControlMode(_Name):

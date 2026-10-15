@@ -1,5 +1,7 @@
 import numpy as np
 
+from manifold.core import Benchmark
+from manifold.embodiments import FRANKA_EE_DELTA
 from manifold.sensors import CameraName
 from manifold.wire import HelloPayload, ReadyPayload
 from manifold.wire import codec as wire
@@ -96,7 +98,8 @@ def test_empty_array_divergence_between_unpack_ndarray_and_unpack_ndarray_full()
 
 
 def test_a_hello_without_a_version_reads_as_version_0() -> None:
-    assert HelloPayload.model_validate({"benchmark": {}}).protocol_version == 0
+    benchmark = Benchmark(name="suite", embodiment=FRANKA_EE_DELTA).model_dump(mode="json")
+    assert HelloPayload.model_validate({"benchmark": benchmark}).protocol_version == 0
 
 
 def test_a_ready_without_a_version_reads_as_version_5() -> None:

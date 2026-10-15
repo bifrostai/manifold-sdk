@@ -27,7 +27,7 @@ from manifold.wire.bridge import pack_stream_frame
 
 CHANNELS = (
     Channel(name=CameraName.AGENTVIEW, kind=ChannelKind.IMAGE),
-    Channel(name=CameraName.AGENTVIEW_DEPTH, kind=ChannelKind.IMAGE),
+    Channel(name="agentview_depth", kind=ChannelKind.IMAGE),
     Channel(name="reward", kind=ChannelKind.SCALAR, group="Task"),
     Channel(name="instruction", kind=ChannelKind.TEXT),
 )
@@ -67,7 +67,7 @@ def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
                 {"table": _pose(0.0), "robot0_link0": _pose(step * 0.01)},
                 images={
                     CameraName.AGENTVIEW: np.full((4, 4, 3), step, dtype=np.uint8),
-                    CameraName.AGENTVIEW_DEPTH: np.full((4, 4), 1.5, dtype=np.float32),
+                    "agentview_depth": np.full((4, 4), 1.5, dtype=np.float32),
                 },
                 scalars={"reward": float(step)},
                 text={"instruction": "pick up the mug"},
@@ -84,7 +84,7 @@ def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
     assert last.scalars == {"reward": 2.0}
     assert last.text == {"instruction": "pick up the mug"}
     assert np.array_equal(last.images[CameraName.AGENTVIEW], np.full((4, 4, 3), 2, dtype=np.uint8))
-    np.testing.assert_allclose(last.images[CameraName.AGENTVIEW_DEPTH], np.full((4, 4), 1.5))
+    np.testing.assert_allclose(last.images["agentview_depth"], np.full((4, 4), 1.5))
     np.testing.assert_allclose(last.poses["robot0_link0"].position, [0.02, 0.0, 0.1], atol=1e-6)
 
 
@@ -324,18 +324,16 @@ def test_a_depth_value_float16_cannot_hold_is_refused(tmp_path):
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log,
         pytest.raises(ValueError, match="float16"),
     ):
-        log.write_step(
-            {}, images={CameraName.AGENTVIEW_DEPTH: np.full((2, 2), 1e5, dtype=np.float32)}
-        )
+        log.write_step({}, images={"agentview_depth": np.full((2, 2), 1e5, dtype=np.float32)})
 
 
 def test_an_infinite_depth_is_the_sentinel_that_survives(tmp_path):
     path = tmp_path / "episode.replay"
     frame = np.array([[1.5, np.inf], [0.25, np.inf]], dtype=np.float32)
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
-        log.write_step({}, images={CameraName.AGENTVIEW_DEPTH: frame})
+        log.write_step({}, images={"agentview_depth": frame})
 
-    decoded = read_replay_log(path).steps[0].images[CameraName.AGENTVIEW_DEPTH]
+    decoded = read_replay_log(path).steps[0].images["agentview_depth"]
     assert np.isinf(decoded[0, 1])
     np.testing.assert_allclose(decoded[0, 0], 1.5)
 
@@ -397,7 +395,7 @@ def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
             {},
             images={
                 CameraName.AGENTVIEW: np.full((4, 4, 3), 200, dtype=np.uint8),
-                CameraName.AGENTVIEW_DEPTH: np.full((4, 4), 1.5, dtype=np.float32),
+                "agentview_depth": np.full((4, 4), 1.5, dtype=np.float32),
             },
         )
 
@@ -406,7 +404,7 @@ def test_a_raw_frame_has_no_stored_bytes_to_pass_on(tmp_path):
     # neither offers bytes in place of what `images` decoded.
     assert step.encoded_images == {}
     assert step.images[CameraName.AGENTVIEW].shape == (4, 4, 3)
-    np.testing.assert_allclose(step.images[CameraName.AGENTVIEW_DEPTH], 1.5)
+    np.testing.assert_allclose(step.images["agentview_depth"], 1.5)
 
 
 def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
@@ -416,13 +414,13 @@ def test_a_compressed_log_still_decodes_its_depth_and_its_colour(tmp_path):
             {},
             images={
                 CameraName.AGENTVIEW: np.full((8, 8, 3), 120, dtype=np.uint8),
-                CameraName.AGENTVIEW_DEPTH: np.full((8, 8), 2.0, dtype=np.float32),
+                "agentview_depth": np.full((8, 8), 2.0, dtype=np.float32),
             },
         )
 
     step = read_replay_log(path).steps[0]
     assert step.images[CameraName.AGENTVIEW].shape == (8, 8, 3)
-    np.testing.assert_allclose(step.images[CameraName.AGENTVIEW_DEPTH], 2.0)
+    np.testing.assert_allclose(step.images["agentview_depth"], 2.0)
     assert set(step.encoded_images) == {CameraName.AGENTVIEW}
 
 

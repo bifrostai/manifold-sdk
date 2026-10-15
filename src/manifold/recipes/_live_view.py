@@ -81,7 +81,7 @@ class LiveViewPublisher:
         task_id: str,
     ) -> None:
         """Copy the selected camera frame into the latest-value slot without encoding or I/O."""
-        image = observation.sensors.get(self._camera.name)
+        image = observation.sensors.get(self._camera.key)
         if image is None:
             return
         self._camera.validate_value(image)

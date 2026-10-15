@@ -255,18 +255,6 @@ def _serve_connection(
         emit(f"connection from {addr} errored, dropping it: {exc!r}")
 
 
-def _received_benchmark(payload: dict[str, Any], emit: Callable[[str], None]) -> Benchmark:
-    """Parse the advertised benchmark, logging any camera this SDK does not list."""
-    benchmark = Benchmark.from_received(payload)
-    unlisted = sorted(
-        {str(sensor.get("name")) for sensor in payload.get("sensors", [])}
-        - {camera.name for camera in benchmark.sensors}
-    )
-    if unlisted:
-        emit(f"ignoring cameras this SDK does not list: {', '.join(unlisted)}")
-    return benchmark
-
-
 def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
@@ -320,8 +308,7 @@ def _serve_session(
             "fields that this server cannot read"
         )
         return True
-    payload = HelloPayload.model_validate(hello["payload"])
-    benchmark = _received_benchmark(payload.benchmark, emit)
+    benchmark = HelloPayload.model_validate(hello["payload"]).benchmark
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
@@ -976,10 +963,9 @@ def _run_connected(
         channel = FrameChannel.from_socket(sock)
         channel.send(
             FrameType.HELLO,
-            HelloPayload(
-                protocol_version=BRIDGE_PROTOCOL_VERSION,
-                benchmark=benchmark.model_dump(mode="json"),
-            ).model_dump(),
+            HelloPayload(protocol_version=BRIDGE_PROTOCOL_VERSION, benchmark=benchmark).model_dump(
+                mode="json"
+            ),
         )
         reply = channel.recv()
         if reply is None or reply.get("type") != FrameType.READY:

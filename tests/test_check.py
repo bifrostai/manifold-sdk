@@ -373,7 +373,7 @@ def test_an_rgbd_policy_pairs_with_the_tabletop() -> None:
                 name=CameraName.AGENTVIEW, shape=(256, 256, 3), orientation=_ROBOSUITE_ORIENTATION
             ),
             Camera(
-                name=CameraName.AGENTVIEW_DEPTH,
+                name=CameraName.AGENTVIEW,
                 shape=(256, 256, 1),
                 dtype="float32",
                 modality=Modality.DEPTH,
@@ -392,7 +392,7 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
     policy = _tabletop_policy(
         cameras=[
             Camera(
-                name=CameraName.AGENTVIEW_DEPTH,
+                name="agentview_depth",
                 shape=(256, 256, 3),
                 orientation=_ROBOSUITE_ORIENTATION,
             )
@@ -400,10 +400,7 @@ def test_consuming_a_depth_camera_as_colour_is_incompatible() -> None:
     )
     report = check_compatibility(policy, TABLETOP)
     assert report.status is Compatibility.INCOMPATIBLE
-    assert any(
-        CameraName.AGENTVIEW_DEPTH in reason and "conventions" in reason
-        for reason in report.reasons
-    )
+    assert any("agentview_depth" in reason and "conventions" in reason for reason in report.reasons)
 
 
 def _calibration(

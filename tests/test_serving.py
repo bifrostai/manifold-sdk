@@ -454,9 +454,9 @@ def test_serve_reads_the_next_frame_after_replying_to_get_signature():
     assert any(event.startswith("benchmark connected from") for event in events)
 
 
-def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
-    """A benchmark on a newer SDK may publish a camera this one does not list; a
-    policy that does not read it still gets READY."""
+def test_serve_pairs_with_a_benchmark_publishing_a_camera_that_the_sdk_does_not_list():
+    """A benchmark may name a camera of its own. A policy that does not read it
+    still pairs."""
     from manifold.core import Benchmark, Camera, PolicySignature
     from manifold.embodiments import FRANKA_EE_DELTA
     from manifold.recipes import serve
@@ -470,7 +470,7 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
         sensors=[Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))],
         instruction=False,
     ).model_dump(mode="json")
-    advertised["sensors"].append({**advertised["sensors"][0], "name": "head"})
+    advertised["sensors"].append({**advertised["sensors"][0], "name": "egocentric"})
     endpoint = SimpleNamespace(
         signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
     )
@@ -501,7 +501,6 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
         channel.send(FrameType.BYE, {})
 
     assert reply is not None and reply.get("type") == FrameType.READY, events
-    assert "ignoring cameras this SDK does not list: head" in events
 
 
 def test_serve_sends_its_protocol_version_in_ready():
@@ -990,7 +989,7 @@ def test_run_episodes_rejects_a_depth_live_view_camera():
         embodiment=FRANKA_EE_DELTA,
         sensors=[
             Camera(
-                name=CameraName.AGENTVIEW_DEPTH,
+                name=CameraName.AGENTVIEW,
                 shape=(256, 256, 1),
                 dtype="float32",
                 modality=Modality.DEPTH,
@@ -1007,7 +1006,7 @@ def test_run_episodes_rejects_a_depth_live_view_camera():
             episode_ids=[],
             max_steps=1,
             live_view_server="127.0.0.1:9001",
-            live_view_camera=CameraName.AGENTVIEW_DEPTH,
+            live_view_camera="agentview_depth",
         )
 
 

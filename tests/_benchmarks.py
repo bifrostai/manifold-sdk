@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from manifold.core.benchmark import Benchmark
 from manifold.core.conventions import CameraAxes, Frame
-from manifold.core.sensor import CameraCalibration, CameraIntrinsics, CameraOrientation
+from manifold.core.sensor import CameraCalibration, CameraIntrinsics, CameraOrientation, Modality
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
-from manifold.sensors.cameras import agentview, agentview_depth, wrist, wrist_depth
+from manifold.sensors.cameras import agentview, wrist
 
 # The square resolution every camera renders at, which the intrinsics are derived for.
 CAMERA_RES = 256
@@ -38,8 +38,8 @@ TABLETOP = Benchmark(
     sensors=[
         agentview((CAMERA_RES, CAMERA_RES, 3), _SCENE_CALIBRATION, _ORIENTATION),
         wrist((CAMERA_RES, CAMERA_RES, 3), _WRIST_CALIBRATION, _ORIENTATION),
-        agentview_depth((CAMERA_RES, CAMERA_RES, 1), _SCENE_CALIBRATION, _ORIENTATION),
-        wrist_depth((CAMERA_RES, CAMERA_RES, 1), _WRIST_CALIBRATION, _ORIENTATION),
+        agentview((CAMERA_RES, CAMERA_RES, 1), _SCENE_CALIBRATION, _ORIENTATION, Modality.DEPTH),
+        wrist((CAMERA_RES, CAMERA_RES, 1), _WRIST_CALIBRATION, _ORIENTATION, Modality.DEPTH),
     ],
     instruction=True,
 )
