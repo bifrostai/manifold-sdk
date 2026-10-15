@@ -45,8 +45,8 @@ accept. Only the last of the three protects a new benchmark from an old policy,
 because an old peer does not read this version number at all.
 
 READY includes the policy's `protocol_version`, so that a benchmark can
-tell which version the policy speaks. Nothing reads it yet, and a policy
-older than this change sends READY without it.
+tell which version the policy speaks. A policy at version 5 or older may
+send READY without it.
 
 The `lane` envelope field and the OBSERVATION/ACTION `action_prefix` and
 `timestep` fields are reserved (additive, optional, defaulted), so a current
@@ -320,7 +320,7 @@ class HelloPayload(BaseModel):
 class ReadyPayload(BaseModel):
     """The payload of a READY frame."""
 
-    # A policy older than this change sends none, and speaks version 5 or older.
+    # A READY without a version comes from a policy at version 5 or older.
     protocol_version: int = 5
 
 
