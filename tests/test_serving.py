@@ -504,6 +504,49 @@ def test_serve_pairs_with_a_benchmark_publishing_a_camera_it_has_no_name_for():
     assert "ignoring cameras this SDK does not list: head" in events
 
 
+def test_serve_sends_its_protocol_version_in_ready():
+    from manifold.core import Benchmark, PolicySignature
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import serve
+    from manifold.wire import BRIDGE_PROTOCOL_VERSION
+    from manifold.wire.bridge import FrameChannel, FrameType
+
+    signature = PolicySignature(action_space=FRANKA_EE_DELTA.action, instruction=False)
+    benchmark = Benchmark(name="suite", embodiment=FRANKA_EE_DELTA, instruction=False)
+    endpoint = SimpleNamespace(
+        signature=signature, session=lambda: SimpleNamespace(close=lambda: None)
+    )
+    port = _free_port()
+    listening = threading.Event()
+
+    def record(event: str) -> None:
+        if event.startswith("listening on"):
+            listening.set()
+
+    threading.Thread(
+        target=serve,
+        args=(cast(Any, endpoint),),
+        kwargs={"host": "127.0.0.1", "port": port, "on_event": record},
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as client:
+        channel = FrameChannel.from_socket(client)
+        channel.send(
+            FrameType.HELLO,
+            {
+                "protocol_version": BRIDGE_PROTOCOL_VERSION,
+                "benchmark": benchmark.model_dump(mode="json"),
+            },
+        )
+        reply = channel.recv()
+        channel.send(FrameType.BYE, {})
+
+    assert reply is not None and reply.get("type") == FrameType.READY
+    assert reply["payload"] == {"protocol_version": BRIDGE_PROTOCOL_VERSION}
+
+
 # --- run_episodes and run_sharded_benchmark ---------------------------------------
 #
 # The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so
@@ -1623,16 +1666,17 @@ def test_run_benchmark_refuses_an_action_the_benchmark_cannot_take(monkeypatch) 
 
 
 def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> None:
-    # A newer benchmark may carry fields that this server would drop without any
-    # error. The server refuses it before parsing the payload, rather than pair
-    # against a benchmark that it has misread. The empty benchmark below would not
-    # survive parsing, which is what makes the early refusal visible here.
+    # A newer benchmark may include fields that this server would drop without an
+    # error. The server refuses a newer benchmark before parsing the payload, so
+    # the server does not pair against a benchmark that the model has misread. The
+    # benchmark below is not a mapping, so the model rejects it. Without the
+    # version check, the test fails.
     from manifold.recipes import serving
     from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameType
 
     class _NewerHello:
         def recv(self):
-            payload = {"protocol_version": BRIDGE_PROTOCOL_VERSION + 1, "benchmark": {}}
+            payload = {"protocol_version": BRIDGE_PROTOCOL_VERSION + 1, "benchmark": "new"}
             return {"type": FrameType.HELLO, "payload": payload}
 
         def send(self, *_args) -> None:

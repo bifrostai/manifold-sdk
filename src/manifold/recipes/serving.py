@@ -49,7 +49,14 @@ from manifold.recipes._live_view import LiveViewPublisher
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
 from manifold.recipes.recording import NO_RECORDER
 from manifold.recipes.sharding import shard_episode_ids
-from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameChannel, FrameType, bridge
+from manifold.wire import (
+    BRIDGE_PROTOCOL_VERSION,
+    FrameChannel,
+    FrameType,
+    HelloPayload,
+    ReadyPayload,
+    bridge,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
@@ -313,7 +320,8 @@ def _serve_session(
             "fields that this server cannot read"
         )
         return True
-    benchmark = _received_benchmark(hello["payload"]["benchmark"], emit)
+    payload = HelloPayload.model_validate(hello["payload"])
+    benchmark = _received_benchmark(payload.benchmark, emit)
 
     signature = endpoint.signature
     resolved = _resolve_pipeline(pipeline, benchmark)
@@ -329,7 +337,9 @@ def _serve_session(
     # leak the freshly-minted per-session scratch).
     session = endpoint.session()
     try:
-        channel.send(FrameType.READY, {})
+        channel.send(
+            FrameType.READY, ReadyPayload(protocol_version=BRIDGE_PROTOCOL_VERSION).model_dump()
+        )
         while True:
             frame = channel.recv()
             if frame is None or frame.get("type") == FrameType.BYE:
@@ -966,10 +976,10 @@ def _run_connected(
         channel = FrameChannel.from_socket(sock)
         channel.send(
             FrameType.HELLO,
-            {
-                "protocol_version": BRIDGE_PROTOCOL_VERSION,
-                "benchmark": benchmark.model_dump(mode="json"),
-            },
+            HelloPayload(
+                protocol_version=BRIDGE_PROTOCOL_VERSION,
+                benchmark=benchmark.model_dump(mode="json"),
+            ).model_dump(),
         )
         reply = channel.recv()
         if reply is None or reply.get("type") != FrameType.READY:
