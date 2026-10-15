@@ -1666,16 +1666,17 @@ def test_run_benchmark_refuses_an_action_the_benchmark_cannot_take(monkeypatch) 
 
 
 def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> None:
-    # A newer benchmark may carry fields that this server would drop without any
-    # error. The server refuses it before parsing the payload, rather than pair
-    # against a benchmark that it has misread. The empty benchmark below would not
-    # survive parsing, which is what makes the early refusal visible here.
+    # A newer benchmark may include fields that this server would drop without an
+    # error. The server refuses a newer benchmark before parsing the payload, so
+    # the server does not pair against a benchmark that the model has misread. The
+    # benchmark below is not a mapping, so the model rejects it. Without the
+    # version check, the test fails.
     from manifold.recipes import serving
     from manifold.wire import BRIDGE_PROTOCOL_VERSION, FrameType
 
     class _NewerHello:
         def recv(self):
-            payload = {"protocol_version": BRIDGE_PROTOCOL_VERSION + 1, "benchmark": {}}
+            payload = {"protocol_version": BRIDGE_PROTOCOL_VERSION + 1, "benchmark": "new"}
             return {"type": FrameType.HELLO, "payload": payload}
 
         def send(self, *_args) -> None:

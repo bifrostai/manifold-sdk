@@ -312,8 +312,7 @@ def _serve_session(
     # Refuse such a sender before parsing, rather than pair against a benchmark that
     # was misread. An older sender is safe, because a field that it omits takes its
     # default value here.
-    payload = HelloPayload.model_validate(hello["payload"])
-    version = payload.protocol_version
+    version = hello["payload"].get("protocol_version", 0)
     if version > BRIDGE_PROTOCOL_VERSION:
         emit(
             f"benchmark uses bridge protocol {version}, newer than this server's "
@@ -321,6 +320,7 @@ def _serve_session(
             "fields that this server cannot read"
         )
         return True
+    payload = HelloPayload.model_validate(hello["payload"])
     benchmark = _received_benchmark(payload.benchmark, emit)
 
     signature = endpoint.signature
