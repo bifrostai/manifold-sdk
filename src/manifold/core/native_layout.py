@@ -36,7 +36,7 @@ class SourceKind(StrEnum):
     """
 
     CAMERA = "camera"  # obs.sensors[name] — a camera frame or clip.
-    STATE = "state"  # obs.state[name] — a proprioception vector ("ee_pose", "base_position").
+    STATE = "state"  # obs.state[name] — a proprioception vector ("ee_pose", "base_pose").
     INSTRUCTION = "instruction"  # obs.instruction — the language string.
 
 

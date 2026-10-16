@@ -47,7 +47,8 @@ def _default_pool(
     Only cameras that both sides declare get adapters. A camera whose
     orientation differs gets its own flip and rotation, so the resolver can fix
     each camera separately. A camera whose shape differs gets a resize. The
-    proprioception rotation is added when the two `ee_pose` formats differ.
+    proprioception rotation is added when the two `ee_pose` formats differ, and the
+    base pose rotation when the two `base_pose` formats differ.
     """
     pool: list[ActionAdapter | ObservationAdapter] = []
     published = {camera.name: camera for camera in benchmark.sensors}
@@ -71,6 +72,14 @@ def _default_pool(
         and policy_ee_pose.rotation != benchmark_ee_pose.rotation
     ):
         pool.append(ProprioRotationAdapter(target=policy_ee_pose.rotation))
+    policy_base = signature.proprioception.base_pose
+    benchmark_base = benchmark.embodiment.proprioception.base_pose
+    if (
+        policy_base is not None
+        and benchmark_base is not None
+        and policy_base.rotation != benchmark_base.rotation
+    ):
+        pool.append(ProprioRotationAdapter(target=policy_base.rotation, channel="base_pose"))
     return pool
 
 

@@ -18,9 +18,11 @@ from manifold.core.check import Compatibility, Report, check_compatibility
 from manifold.core.conventions import CameraAxes, Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     ActionSpace,
+    BasePoseObservationSpec,
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
+    ExtraObservationSpec,
     GripperObservationSpec,
     JointActionSpace,
     JointObservationSpec,
@@ -68,6 +70,7 @@ __all__ = [
     "ActionAdapter",
     "ActionSpace",
     "Assemble",
+    "BasePoseObservationSpec",
     "BatchAxis",
     "Benchmark",
     "Camera",
@@ -86,6 +89,7 @@ __all__ = [
     "EEObservationSpec",
     "Embodiment",
     "EmbodimentName",
+    "ExtraObservationSpec",
     "Frame",
     "GripperFormat",
     "GripperObservationSpec",

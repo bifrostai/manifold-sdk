@@ -2,7 +2,8 @@
 
 An Embodiment owns one canonical action space (the single representation it is
 defined in) plus its proprioception (the state it reports each step: end-effector
-pose, joint angles, or both). It is reusable across benchmarks. The cameras and
+pose, joint angles, a mobile base's pose and torso joints, and any extras). It is
+reusable across benchmarks. The cameras and
 task signals a benchmark adds live in `sensor.py` and `benchmark.py`.
 
 The action space is one typed spec carrying its conventions: rotation format,
@@ -24,7 +25,9 @@ from manifold.core.embodiment.action_space import (
     UnifiedActionSpace,
 )
 from manifold.core.embodiment.proprioception import (
+    BasePoseObservationSpec,
     EEObservationSpec,
+    ExtraObservationSpec,
     GripperObservationSpec,
     JointObservationSpec,
     Proprioception,
@@ -50,9 +53,11 @@ class Embodiment(BaseModel):
 
 __all__ = [
     "ActionSpace",
+    "BasePoseObservationSpec",
     "EEActionSpace",
     "EEObservationSpec",
     "Embodiment",
+    "ExtraObservationSpec",
     "GripperObservationSpec",
     "JointActionSpace",
     "JointObservationSpec",
