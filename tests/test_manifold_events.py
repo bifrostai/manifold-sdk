@@ -17,6 +17,8 @@ from manifold.replay import (
     Closed,
     EpisodeEnded,
     EpisodeStarted,
+    Failure,
+    FailureType,
     Grasped,
     GripperAction,
     GripperCommanded,
@@ -82,6 +84,7 @@ EVERY_TYPE = (
     *(cls(object="plate") for cls in (GripperHit, ObjectTipped, ObjectLeftScene)),
     ObjectDisplaced(object="ketchup", distance=0.07),
     GripperFullyClosed(),
+    Failure(failure_type=FailureType.COLLISION_ENVIRONMENT, object="gripper", reference="table"),
     Note(text="joint limit reached", severity=Severity.WARN),
     EpisodeEnded(success=True),
 )
@@ -111,7 +114,12 @@ def test_every_type_has_one_event_class():
 
 def test_every_type_of_event_round_trips(tmp_path):
     path = tmp_path / "episode.replay"
-    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+    with ReplayLogWriter(
+        path,
+        episode_idx=0,
+        channels=CHANNELS,
+        failure_types=[FailureType.COLLISION_ENVIRONMENT],
+    ) as log:
         log.write_step({"bowl": _pose()}, events=EVERY_TYPE)
     assert read_replay_log(path).steps[0].events == EVERY_TYPE
 
@@ -231,3 +239,50 @@ def test_an_unordered_stack_round_trips(tmp_path):
 def test_a_stack_needs_two_objects():
     with pytest.raises(ValueError, match="at least 2 items"):
         Stacked(objects=("cube_1",), is_active=True)
+
+
+def test_the_failure_types_a_header_lists_round_trip(tmp_path):
+    path = tmp_path / "episode.replay"
+    failure_types = [FailureType.SLIP_DROP, FailureType.COLLISION_OBJECT]
+    with ReplayLogWriter(
+        path, episode_idx=0, channels=CHANNELS, failure_types=failure_types
+    ) as log:
+        log.write_step({}, events=[Failure(failure_type=FailureType.SLIP_DROP, object="bowl")])
+    replay = read_replay_log(path)
+    assert replay.failure_types == tuple(failure_types)
+    assert replay.steps[0].events == (Failure(failure_type=FailureType.SLIP_DROP, object="bowl"),)
+
+
+def test_a_header_that_lists_no_failure_types_omits_the_key(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_step({})
+    header, _ = _frames(path)
+    assert "failure_types" not in header
+    assert read_replay_log(path).failure_types == ()
+
+
+def test_the_writer_refuses_a_failure_whose_type_the_header_does_not_list(tmp_path):
+    path = tmp_path / "episode.replay"
+    with (
+        ReplayLogWriter(
+            path, episode_idx=0, channels=CHANNELS, failure_types=[FailureType.SLIP_DROP]
+        ) as log,
+        pytest.raises(ValueError, match="not listed in the header"),
+    ):
+        log.write_step({}, events=[Failure(failure_type=FailureType.NO_GRASP, object="bowl")])
+
+
+def test_a_stored_failure_of_an_unknown_type_is_refused(tmp_path):
+    path = _log_with_step(tmp_path, [{"event_type": "failure", "failure_type": "levitated"}])
+    with pytest.raises(ValueError, match="failure_type"):
+        read_replay_log(path)
+
+
+def test_a_header_listing_an_unknown_failure_type_is_refused(tmp_path):
+    path = _log_with_step(tmp_path, [])
+    header, step = _frames(path)
+    header["failure_types"] = ["levitated"]
+    _rewrite(path, header, step)
+    with pytest.raises(ValueError, match="failure_types"):
+        read_replay_log(path)
