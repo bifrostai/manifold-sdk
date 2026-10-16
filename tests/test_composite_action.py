@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from typing import Any, ClassVar
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from manifold.adapters.action import (
+    BasePinWiden,
+    GripperPolarityAdapter,
+    GripperThresholdAdapter,
+    GroupAdapter,
+    RotationFormatAdapter,
+)
 from manifold.core import (
     ActionAdapter,
     ActionSpace,
@@ -32,6 +40,7 @@ from manifold.core import (
     verify,
 )
 from manifold.core.names import EmbodimentName
+from manifold.recipes.resolve import resolve
 from manifold.sensors import CameraName
 
 _CAMERA = Camera(name=CameraName.AGENTVIEW, shape=(8, 8, 3))
@@ -445,3 +454,241 @@ def test_verify_catches_an_arm_rotation_value_written_into_the_base() -> None:
 
     assert not report.ok
     assert not _check(report, "action.mobile_base").passed
+
+
+def _rc365_with(**arm_update: Any) -> CompositeActionSpace:
+    arm = _RC365.groups[0].model_copy(update=arm_update)
+    return _RC365.model_copy(update={"groups": (arm, *_RC365.groups[1:])})
+
+
+_ARM = _RC365.groups[0]
+
+
+class _HoldOpen(ActionAdapter):
+    """A bug: always sends an open gripper."""
+
+    from_spec: ClassVar[type[BaseModel]] = EEActionSpace
+    to_spec: ClassVar[type[BaseModel]] = EEActionSpace
+    lossless: ClassVar[bool] = True
+
+    def applies(self, source: BaseModel) -> bool:
+        return isinstance(source, EEActionSpace)
+
+    def produce(self, source: BaseModel) -> BaseModel:
+        return source
+
+    def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
+        return [*(float(v) for v in values[:-1]), -1.0]
+
+
+class _WidenQuaternionArm(ActionAdapter):
+    """Widens a quaternion arm to RoboCasa365's whole body, with the rest held still."""
+
+    from_spec: ClassVar[type[BaseModel]] = EEActionSpace
+    to_spec: ClassVar[type[BaseModel]] = CompositeActionSpace
+    lossless: ClassVar[bool] = True
+
+    def applies(self, source: BaseModel) -> bool:
+        return isinstance(source, EEActionSpace) and source.rotation is RotationFormat.QUATERNION
+
+    def produce(self, source: BaseModel) -> BaseModel:
+        return _RC365.model_copy(update={"groups": (source, *_RC365.groups[1:])})
+
+    def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
+        return [*(float(v) for v in values), 0.0, 0.0, 0.0, 0.0, -1.0]
+
+
+def test_a_lifted_rotation_adapter_bridges_a_quaternion_arm() -> None:
+    policy = _policy(_rc365_with(rotation=RotationFormat.QUATERNION))
+    pipeline = Pipeline(action=[GroupAdapter(0, RotationFormatAdapter(RotationFormat.AXIS_ANGLE))])
+
+    assert check_compatibility(policy, _benchmark(_RC365)).status.value == "incompatible"
+    report = check_compatibility(policy, _benchmark(_RC365), pipeline=pipeline)
+    assert report.status.value == "compatible_via_pipeline", report.reasons
+    assert report.lossless is True
+    checked = verify(policy, _benchmark(_RC365), pipeline)
+    assert checked.ok, checked.reasons
+    assert _check(checked, "action.ee.rotation").passed
+    assert _check(checked, "action.mobile_base").passed
+
+
+@pytest.mark.parametrize(
+    ("policy_update", "bench_update", "inner"),
+    [
+        (
+            {"rotation": RotationFormat.QUATERNION},
+            {},
+            RotationFormatAdapter(RotationFormat.AXIS_ANGLE),
+        ),
+        (
+            {"gripper": GripperFormat.SIGNED},
+            {},
+            GripperPolarityAdapter(GripperFormat.SIGNED_OPEN_LOW),
+        ),
+        (
+            {"gripper": GripperFormat.UNSIGNED},
+            {},
+            GripperThresholdAdapter(GripperFormat.SIGNED_OPEN_LOW),
+        ),
+        ({}, {"gripper": GripperFormat.SIGNED}, GripperThresholdAdapter(GripperFormat.SIGNED)),
+        ({}, {}, _HoldOpen()),
+    ],
+)
+def test_a_lifted_adapter_verifies_as_it_does_on_a_bare_arm(
+    policy_update: dict[str, Any], bench_update: dict[str, Any], inner: ActionAdapter
+) -> None:
+    bare_policy = _policy(_ARM.model_copy(update=policy_update))
+    bare_bench = _benchmark(_ARM.model_copy(update=bench_update))
+    whole_policy, whole_bench = (
+        _policy(_rc365_with(**policy_update)),
+        _benchmark(_rc365_with(**bench_update)),
+    )
+    bare, lifted = Pipeline(action=[inner]), Pipeline(action=[GroupAdapter(0, inner)])
+
+    bare_report = verify(bare_policy, bare_bench, bare)
+    lifted_report = verify(whole_policy, whole_bench, lifted)
+
+    for name in ("position", "rotation", "gripper", "gripper.closed"):
+        expected = _check(bare_report, f"action.{name}").passed
+        assert _check(lifted_report, f"action.ee.{name}").passed == expected, name
+    assert (
+        check_compatibility(whole_policy, whole_bench, pipeline=lifted).lossless
+        == check_compatibility(bare_policy, bare_bench, pipeline=bare).lossless
+    )
+
+
+def _arm_pool() -> list[ActionAdapter]:
+    return [
+        *(RotationFormatAdapter(rotation) for rotation in RotationFormat),
+        *(GripperPolarityAdapter(gripper) for gripper in GripperFormat),
+        *(GripperThresholdAdapter(gripper) for gripper in GripperFormat),
+    ]
+
+
+@pytest.mark.parametrize(
+    "policy_update",
+    [
+        {"rotation": RotationFormat.QUATERNION},
+        {"gripper": GripperFormat.UNSIGNED},
+        {"rotation": RotationFormat.EULER_XYZ, "gripper": GripperFormat.SIGNED},
+    ],
+)
+def test_the_resolver_finds_the_bare_arm_chain_lifted(policy_update: dict[str, Any]) -> None:
+    pool = _arm_pool()
+
+    bare = resolve(_policy(_ARM.model_copy(update=policy_update)), _benchmark(_ARM), pool)
+    whole = resolve(_policy(_rc365_with(**policy_update)), _benchmark(_RC365), pool)
+
+    assert bare is not None and whole is not None
+    lifted = [adapter for adapter in whole.action if isinstance(adapter, GroupAdapter)]
+    assert len(lifted) == len(whole.action)
+    assert [adapter.inner for adapter in lifted] == list(bare.action)
+    assert verify(_policy(_rc365_with(**policy_update)), _benchmark(_RC365), whole).ok
+
+
+def test_the_resolver_lifts_adapters_onto_a_whole_body_action_reached_mid_chain() -> None:
+    arm = _ARM.model_copy(update={"rotation": RotationFormat.QUATERNION})
+    pool = [_WidenQuaternionArm(), RotationFormatAdapter(RotationFormat.AXIS_ANGLE)]
+
+    pipeline = resolve(_policy(arm), _benchmark(_RC365), pool)
+
+    assert pipeline is not None
+    assert [repr(adapter) for adapter in pipeline.action[1:]] == [
+        "GroupAdapter(0, RotationFormatAdapter)"
+    ]
+    assert isinstance(pipeline.action[0], _WidenQuaternionArm)
+
+
+def test_the_resolver_wraps_only_adapters_that_keep_a_groups_kind() -> None:
+    action = _rc365_with(rotation=RotationFormat.QUATERNION)
+    pool = [BasePinWiden(), RotationFormatAdapter(RotationFormat.AXIS_ANGLE)]
+
+    found = resolve(_policy(action), _benchmark(_RC365), pool)
+
+    assert found is not None
+    assert [repr(adapter) for adapter in found.action] == ["GroupAdapter(0, RotationFormatAdapter)"]
+    assert resolve(_policy(action), _benchmark(_RC365), [BasePinWiden()]) is None
+
+
+def test_the_resolver_bridges_many_arm_groups_one_at_a_time() -> None:
+    off = _ARM.model_copy(
+        update={"rotation": RotationFormat.QUATERNION, "gripper": GripperFormat.UNSIGNED}
+    )
+    torso = _RC365.groups[2]
+    still = torso.model_copy(update={"command": Command.ABSOLUTE})
+    policy_action = CompositeActionSpace(groups=(off, off, off, off, torso))
+    target = CompositeActionSpace(groups=(_ARM, _ARM, _ARM, _ARM, torso))
+    unreachable = CompositeActionSpace(groups=(_ARM, _ARM, _ARM, _ARM, still))
+
+    start = time.perf_counter()
+    found = resolve(_policy(policy_action), _benchmark(target), _arm_pool())
+    missing = resolve(_policy(target), _benchmark(unreachable), _arm_pool())
+
+    assert time.perf_counter() - start < 5.0
+    assert found is not None and len(found.action) == 8
+    assert missing is None
+
+
+class _ClipPositions(ActionAdapter):
+    """Clips an arm's position to the unit range, as a policy's action head might."""
+
+    from_spec: ClassVar[type[BaseModel]] = EEActionSpace
+    to_spec: ClassVar[type[BaseModel]] = EEActionSpace
+    lossless: ClassVar[bool] = False
+
+    def applies(self, source: BaseModel) -> bool:
+        return isinstance(source, EEActionSpace)
+
+    def produce(self, source: BaseModel) -> BaseModel:
+        return source
+
+    def adapt(self, values: Any, *, source: BaseModel) -> list[float]:
+        out = [float(v) for v in values]
+        return [*(min(1.0, max(-1.0, v)) for v in out[:3]), *out[3:]]
+
+
+def test_a_lifted_adapter_on_a_later_group_sees_probe_values_a_bare_arm_would() -> None:
+    two_arms = CompositeActionSpace(groups=(_ARM, _ARM))
+
+    report = verify(
+        _policy(two_arms),
+        _benchmark(two_arms),
+        Pipeline(action=[GroupAdapter(1, _ClipPositions())]),
+    )
+
+    assert report.ok, report.reasons
+
+
+def test_a_group_adapter_refuses_a_negative_index() -> None:
+    with pytest.raises(ValueError, match="0 or more"):
+        GroupAdapter(-1, RotationFormatAdapter(RotationFormat.AXIS_ANGLE))
+
+
+def test_a_group_adapter_takes_a_composite_whose_groups_are_a_list() -> None:
+    quaternion = _ARM.model_copy(update={"rotation": RotationFormat.QUATERNION})
+    listed = _RC365.model_copy(update={"groups": [quaternion, *_RC365.groups[1:]]})
+    pipeline = Pipeline(action=[GroupAdapter(0, RotationFormatAdapter(RotationFormat.AXIS_ANGLE))])
+
+    assert check_compatibility(_policy(listed), _benchmark(_RC365), pipeline=pipeline).ok
+    assert verify(_policy(listed), _benchmark(_RC365), pipeline).ok
+
+
+def test_a_group_adapter_refuses_a_stateful_adapter() -> None:
+    class Stateful(_Rewrite):
+        state_key: ClassVar[str | None] = "history"
+
+    with pytest.raises(ValueError, match="stateless"):
+        GroupAdapter(0, Stateful(list))
+
+
+def test_a_group_adapter_refuses_an_adapter_whose_output_no_group_holds() -> None:
+    with pytest.raises(ValueError, match="keeps an arm, torso or base spec"):
+        GroupAdapter(0, BasePinWiden())
+
+
+def test_a_lifted_adapter_is_as_lossless_as_the_adapter_it_wraps() -> None:
+    lossy = GroupAdapter(0, GripperThresholdAdapter(GripperFormat.SIGNED_OPEN_LOW))
+
+    assert lossy.lossless is False
+    assert GroupAdapter(0, RotationFormatAdapter(RotationFormat.AXIS_ANGLE)).lossless is True
+    assert GroupAdapter.lossless is False

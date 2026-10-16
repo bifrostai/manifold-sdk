@@ -32,7 +32,10 @@ the robot reads them, then an optional mode slot.
   `binary_0.5` (RoboCasa365's gym wrapper).
 
 This is not the per-field compositional spec ADR 0001 rejected: each group is a
-whole spec with its conventions inline, and the split is by body part.
+whole spec with its conventions inline, and the split is by body part. An existing
+adapter that keeps a group's kind applies to one group through `GroupAdapter`,
+which takes `lossless` from the adapter it wraps. The resolver bridges two
+whole-body actions group by group, searching each differing group as a bare arm.
 
 Proprioception gains `base_pose` (a position then a rotation, in a declared frame),
 `torso_pos` (joints, no gripper) and `extras` (any other value, by state key, width
@@ -51,7 +54,8 @@ when its benchmark moves to this SDK.
 sides of the mode cut. When a chain rebases the ee_pose into the base frame by the
 declared base pose, it compares the ee_pose against the probe seen from that pose.
 
-No embodiment declares a composite yet. PandaOmron moves when its pairings do,
-and its unified-only adapters (`BasePinWiden`, `UnifiedGripperThresholdAdapter`,
-`DiscreteBinarize`) need composite counterparts first. Until then ADR 0001's
-Decision 4, which calls the unified action whole-body, still describes PandaOmron.
+No embodiment declares a composite yet. PandaOmron moves when its pairings do.
+`GroupAdapter` covers its gripper threshold, but widening an arm-only action
+(`BasePinWiden`) and snapping the mode (`DiscreteBinarize`) need composite
+counterparts first. Until then ADR 0001's Decision 4, which calls the unified
+action whole-body, still describes PandaOmron.
