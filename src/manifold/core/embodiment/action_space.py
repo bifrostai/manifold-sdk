@@ -15,6 +15,7 @@ from pydantic import Field, model_validator
 
 from manifold.core.conventions import Frame, GripperFormat, RotationFormat, ee_step_layout
 from manifold.core.embodiment.spec import ValueSpec
+from manifold.lib.compat import StrEnum, assert_never
 
 
 def _reject_chunk_size(data: Any) -> Any:
@@ -142,15 +143,126 @@ class UnifiedActionSpace(ValueSpec):
         return self.width
 
 
+class Command(StrEnum):
+    """What a torso or mobile-base value commands."""
+
+    ABSOLUTE = "absolute"
+    DELTA = "delta"
+    VELOCITY = "velocity"
+
+
+class TorsoActionSpace(ValueSpec):
+    """The torso joints between a mobile base and the arms, such as a lift."""
+
+    kind: Literal["torso"] = "torso"
+    dof: int = Field(default=1, ge=1)
+    command: Command
+
+    _reject_chunk_size = model_validator(mode="before")(_reject_chunk_size)
+
+    def expected_length(self) -> int:
+        """Floats in one torso command: one per joint."""
+        return self.dof
+
+
+class MobileBaseActionSpace(ValueSpec):
+    """A mobile base: holonomic (forward, sideways, yaw) or differential (forward, yaw)."""
+
+    kind: Literal["mobile_base"] = "mobile_base"
+    dof: int = Field(ge=1)
+    command: Command
+    frame: Frame = Frame.BASE
+
+    _reject_chunk_size = model_validator(mode="before")(_reject_chunk_size)
+
+    def expected_length(self) -> int:
+        """Floats in one base command: one per degree of freedom."""
+        return self.dof
+
+
+class HybridModeSlot(StrEnum):
+    """The extra last value of robosuite's HybridMobileBase controller, and its cut.
+
+    It sets what each arm's delta is added to: the arm's previous target when the
+    value is on the high side of the cut, its measured pose otherwise. Every part of
+    the body still acts every step. robosuite reads the raw value against 0
+    (`BINARY_0`); RoboCasa365's gym wrapper snaps it at 0.5 first (`BINARY_0_5`).
+    -1 is on the low side of both cuts, and 1 on the high side.
+    """
+
+    BINARY_0 = "binary_0"  # high when the value is > 0
+    BINARY_0_5 = "binary_0.5"  # high when the value is >= 0.5
+
+    def is_high(self, value: float) -> bool:
+        """True when `value` is on the high side of this cut."""
+        if self is HybridModeSlot.BINARY_0:
+            return value > 0.0
+        if self is HybridModeSlot.BINARY_0_5:
+            return value >= 0.5
+        return assert_never(self)
+
+
+# One group of a whole-body action: an arm, a torso or a mobile base.
+ActionGroup = Annotated[
+    EEActionSpace | JointActionSpace | TorsoActionSpace | MobileBaseActionSpace,
+    Field(discriminator="kind"),
+]
+
+
+class CompositeActionSpace(ValueSpec):
+    """A whole-body action: each group's values back to back, then a mode slot if any.
+
+    Arms reuse `EEActionSpace` and `JointActionSpace`, each with its own gripper and
+    `arm_count`. `TorsoActionSpace` and `MobileBaseActionSpace` cover the rest of a
+    mobile robot. The groups appear in the order the robot reads them.
+    """
+
+    kind: Literal["composite"] = "composite"
+    groups: tuple[ActionGroup, ...] = Field(min_length=1)
+    hybrid_mode_slot: HybridModeSlot | None = None
+
+    _reject_chunk_size = model_validator(mode="before")(_reject_chunk_size)
+
+    def expected_length(self) -> int:
+        """Floats in a single action: every group, then the mode slot if declared."""
+        width = sum(group.expected_length() for group in self.groups)
+        return width + (1 if self.hybrid_mode_slot is not None else 0)
+
+    def group_names(self) -> list[str]:
+        """Each group's kind, numbered when a kind appears more than once."""
+        kinds = [group.kind for group in self.groups]
+        return [
+            f"{kind}{kinds[:index].count(kind)}" if kinds.count(kind) > 1 else kind
+            for index, kind in enumerate(kinds)
+        ]
+
+    def slices(self) -> list[tuple[str, int, int]]:
+        """Each group's name and [start, stop) in the action, then the mode slot's."""
+        out, start = [], 0
+        for name, group in zip(self.group_names(), self.groups, strict=True):
+            stop = start + group.expected_length()
+            out.append((name, start, stop))
+            start = stop
+        if self.hybrid_mode_slot is not None:
+            out.append(("hybrid_mode", start, start + 1))
+        return out
+
+
 ActionSpace = Annotated[
-    EEActionSpace | JointActionSpace | UnifiedActionSpace,
+    EEActionSpace | JointActionSpace | UnifiedActionSpace | CompositeActionSpace,
     Field(discriminator="kind"),
 ]
 
 
 __all__ = [
+    "ActionGroup",
     "ActionSpace",
+    "Command",
+    "CompositeActionSpace",
     "EEActionSpace",
+    "HybridModeSlot",
     "JointActionSpace",
+    "MobileBaseActionSpace",
+    "TorsoActionSpace",
     "UnifiedActionSpace",
 ]

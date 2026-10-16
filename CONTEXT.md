@@ -46,10 +46,24 @@ _Avoid_: proxy policy, hosted policy, remote policy
 
 ## The embodiment
 
+**whole-body action** - the action of a robot that moves more than its arms: its
+arm, torso and mobile-base groups, each a complete spec, back to back in the
+order the robot reads them, then an optional mode slot. Declared as a
+`CompositeActionSpace`, though PandaOmron still declares its own as a
+`UnifiedActionSpace`. See ADR 0010.
+_Avoid_: full-body action
+
+**mode slot** - the last value of robosuite's HybridMobileBase action. On its high
+side each arm's delta is added to the arm's previous target, and on its low side
+to its measured pose. It does not switch between the arm and the base: every part
+acts on every step. See ADR 0010.
+_Avoid_: control mode, base mode, base switch
+
 **base pose** - the pose of a mobile robot's base: a position then a rotation, in a
-declared frame. Sent under the `base_pose` state key.
+declared frame. Sent under the `base_pose` state key. See ADR 0010.
 _Avoid_: base position, base rotation, odometry
 
 **extra** - a value a robot reports that no typed proprioception field holds, such
 as finger velocities: declared by its state key, its width and its meaning in words.
+See ADR 0010.
 _Avoid_: extra channel, undeclared state

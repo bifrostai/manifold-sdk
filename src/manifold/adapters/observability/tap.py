@@ -108,7 +108,7 @@ class ActionTap(ActionAdapter):
     `sink` (defaults to a module logger).
 
     `from_spec`/`to_spec` are the shared `ValueSpec` base, so the tap observes any
-    action space (EE, joint, unified). This is why it is author-inserted into
+    action space (EE, joint, unified, composite). This is why it is author-inserted into
     `apply_action`, never resolved: `_check_action` matches a chain link by *exact*
     type (`type(current) is adapter.from_spec`), which a universal base-typed tap
     would not satisfy mid-chain — but a tap never needs `check` to select it (it is
