@@ -51,7 +51,7 @@ from PIL import Image
 from pydantic import TypeAdapter
 
 from manifold.lib.compat import StrEnum
-from manifold.replay.events import ManifoldEvent
+from manifold.replay.events import Failure, FailureType, ManifoldEvent
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -385,6 +385,10 @@ class ReplayLog:
     # publisher had none to give. A step's `extrinsics` may include a camera absent
     # here: a pose is useful on its own, intrinsics are what a projection needs.
     cameras: tuple[CameraPinhole, ...] = ()
+    # The failure types that the benchmark detects. For a type listed
+    # here, a step with no `Failure` of that type had none; every other
+    # type is the grader's to work out.
+    failure_types: tuple[FailureType, ...] = ()
 
 
 class ReplayLogWriter:
@@ -410,6 +414,7 @@ class ReplayLogWriter:
         image_format: ImageFormat = "jpeg",
         overview_group: str | None = None,
         cameras: Iterable[CameraPinhole] = (),
+        failure_types: Iterable[FailureType] = (),
     ) -> None:
         """Open `path` for writing and emit the header.
 
@@ -427,6 +432,10 @@ class ReplayLogWriter:
         rather than every step (ADR 0008). Without them a consumer cannot project a
         depth frame, though the poses are still readable.
 
+        `failure_types` lists the failure types that the benchmark detects. For
+        each listed type, the benchmark records every occurrence (ADR 0009). The
+        writer omits the key when the list is empty.
+
         A scalar channel's `row` is checked per group. Every channel in a group
         must declare a row, or every channel must omit it. This prevents the reader
         from combining explicit rows with its default layout.
@@ -437,6 +446,7 @@ class ReplayLogWriter:
         """
         self._channels = tuple(channels)
         self._kinds = {channel.name: channel.kind for channel in self._channels}
+        self._failure_types = tuple(dict.fromkeys(failure_types))
         self._image_format = image_format
         _check_overview_group(overview_group, self._channels)
         _check_rows(self._channels)
@@ -448,31 +458,31 @@ class ReplayLogWriter:
         # the log can record, and writing it anyway would store a row that reads
         # back identical to the one before it.
         self._last_extrinsics: dict[str, tuple[bytes, bytes]] = {}
+        header: dict[str, Any] = {
+            "version": REPLAY_LOG_VERSION,
+            "episode_idx": episode_idx,
+            "overview_group": overview_group,
+            "channels": [
+                {"name": c.name, "kind": str(c.kind), "group": c.group, "row": c.row}
+                for c in self._channels
+            ],
+            "cameras": [
+                {
+                    "name": c.name,
+                    "fx": float(c.fx),
+                    "fy": float(c.fy),
+                    "cx": float(c.cx),
+                    "cy": float(c.cy),
+                    "width": int(c.width),
+                    "height": int(c.height),
+                }
+                for c in tuple(cameras)
+            ],
+        }
+        if self._failure_types:
+            header["failure_types"] = [str(failure_type) for failure_type in self._failure_types]
         self._file = path.open("wb")
-        self._write(
-            ReplayFrameType.HEADER,
-            {
-                "version": REPLAY_LOG_VERSION,
-                "episode_idx": episode_idx,
-                "overview_group": overview_group,
-                "channels": [
-                    {"name": c.name, "kind": str(c.kind), "group": c.group, "row": c.row}
-                    for c in self._channels
-                ],
-                "cameras": [
-                    {
-                        "name": c.name,
-                        "fx": float(c.fx),
-                        "fy": float(c.fy),
-                        "cx": float(c.cx),
-                        "cy": float(c.cy),
-                        "width": int(c.width),
-                        "height": int(c.height),
-                    }
-                    for c in tuple(cameras)
-                ],
-            },
-        )
+        self._write(ReplayFrameType.HEADER, header)
 
     def __enter__(self) -> ReplayLogWriter:
         return self
@@ -536,9 +546,15 @@ class ReplayLogWriter:
 
         Raises:
             ValueError: If a value is given for a name the header did not declare,
-                or for a name it declared as another kind, or if an image is
-                neither a colour nor a depth frame.
+                or for a name it declared as another kind, if an image is neither a
+                colour nor a depth frame, or if a `Failure` has a type that the
+                header does not list.
         """
+        for event in events:
+            if isinstance(event, Failure) and event.failure_type not in self._failure_types:
+                raise ValueError(
+                    f"failure type {str(event.failure_type)!r} is not listed in the header"
+                )
         self._check_declared(images, ChannelKind.IMAGE)
         self._check_declared(scalars, ChannelKind.SCALAR)
         self._check_declared(text, ChannelKind.TEXT)
@@ -642,9 +658,9 @@ def read_replay_log(path: Path) -> ReplayLog:
         header = next(frames, None)
         if header is None or header.get("type") != ReplayFrameType.HEADER:
             raise ValueError("a replay log opens with a header frame")
-        version, episode_idx, overview_group, channels, cameras = _read_header(
-            header.get("payload", {})
-        )
+        header_payload = header.get("payload", {})
+        version, episode_idx, overview_group, channels, cameras = _read_header(header_payload)
+        failure_types = _read_failure_types(header_payload)
         bodies: tuple[SceneBody, ...] = ()
         steps: list[ReplayStep] = []
         carried: dict[str, Pose] = {}
@@ -655,6 +671,7 @@ def read_replay_log(path: Path) -> ReplayLog:
                 bodies = _read_scene(payload)
             elif kind == ReplayFrameType.STEP:
                 step = _read_step(payload, version)
+                _check_failures_listed(step.events, failure_types)
                 carried.update(step.extrinsics)
                 # A copy per step, not the shared dict: a consumer that mutates one
                 # step's extrinsics must not rewrite every later step's too.
@@ -668,6 +685,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         steps=tuple(steps),
         overview_group=overview_group,
         cameras=cameras,
+        failure_types=failure_types,
     )
 
 
@@ -875,6 +893,31 @@ def _read_header(
             )
         )
     return version, episode_idx, overview_group, tuple(channels), _read_cameras(payload)
+
+
+def _read_failure_types(payload: dict[str, Any]) -> tuple[FailureType, ...]:
+    """The failure types that the header lists."""
+    raw = payload.get("failure_types", [])
+    if (
+        not isinstance(raw, list)
+        or not all(isinstance(value, str) and value in set(FailureType) for value in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise ValueError(
+            f"header `failure_types` must be a list of distinct FailureType values, got {raw!r}"
+        )
+    return tuple(FailureType(value) for value in raw)
+
+
+def _check_failures_listed(
+    events: tuple[ManifoldEvent, ...], failure_types: tuple[FailureType, ...]
+) -> None:
+    """Refuse a stored `Failure` whose type the header does not list, as the writer does."""
+    for event in events:
+        if isinstance(event, Failure) and event.failure_type not in failure_types:
+            raise ValueError(
+                f"failure type {str(event.failure_type)!r} is not listed in the header"
+            )
 
 
 def _read_cameras(payload: dict[str, Any]) -> tuple[CameraPinhole, ...]:

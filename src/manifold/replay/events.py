@@ -58,6 +58,7 @@ class ManifoldEventType(StrEnum):
     OBJECT_DISPLACED = "object_displaced"
     OBJECT_TIPPED = "object_tipped"
     OBJECT_LEFT_SCENE = "object_left_scene"
+    FAILURE = "failure"
     NOTE = "note"
 
 
@@ -73,6 +74,31 @@ class StackOrder(StrEnum):
 
     BOTTOM_TO_TOP = "bottom_to_top"
     TOP_TO_BOTTOM = "top_to_bottom"
+
+
+class FailureType(StrEnum):
+    """A type in the failure taxonomy (ADR 0009). No other type is a failure."""
+
+    NO_CONTACT = "no_contact"
+    GRASP_POSITION_OFFSET = "grasp_position_offset"
+    GRASP_ORIENTATION_OFFSET = "grasp_orientation_offset"
+    NO_GRASP = "no_grasp"
+    PLACE_POSITION_OFFSET = "place_position_offset"
+    PLACE_ORIENTATION_OFFSET = "place_orientation_offset"
+    ACTUATION_INCOMPLETE = "actuation_incomplete"
+    SLIP_DROP = "slip_drop"
+    COLLISION_OBJECT = "collision_object"
+    COLLISION_ENVIRONMENT = "collision_environment"
+    OBJECT_MOVED_UNAIDED = "object_moved_unaided"
+    ENVIRONMENT_OCCUPIED = "environment_occupied"
+    ENVIRONMENT_BLOCKING = "environment_blocking"
+    WRONG_DESTINATION = "wrong_destination"
+    WRONG_OBJECT = "wrong_object"
+    VIEW_OCCLUDED = "view_occluded"
+    PREREQUISITE_SKIPPED = "prerequisite_skipped"
+    STEP_MISSED = "step_missed"
+    WRONG_ORDER = "wrong_order"
+    AMBIGUOUS_INSTRUCTION = "ambiguous_instruction"
 
 
 class Severity(StrEnum):
@@ -289,6 +315,21 @@ class GripperFullyClosed(_Event):
     )
 
 
+class Failure(_Event):
+    """A failure of `failure_type` that the simulator detected, with its objects.
+
+    `object` and `reference` name the objects that the failure involved. Both
+    are optional: `object` is left out when the failure names no single object,
+    such as `wrong_order` or `step_missed`. A benchmark records one only for a
+    type that its log header lists (ADR 0009).
+    """
+
+    event_type: Literal[ManifoldEventType.FAILURE] = ManifoldEventType.FAILURE
+    failure_type: FailureType
+    object: _Name | None = None
+    reference: _Name | None = None
+
+
 class Note(_Event):
     """Free text for a reader. A grader never reads a note."""
 
@@ -324,6 +365,7 @@ ManifoldEvent = Annotated[
     | ObjectLeftScene
     | ObjectDisplaced
     | GripperFullyClosed
+    | Failure
     | Note,
     Field(discriminator="event_type"),
 ]
