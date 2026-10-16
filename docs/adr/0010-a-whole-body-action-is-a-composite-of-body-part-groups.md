@@ -32,7 +32,11 @@ that the robot reads them in, then an optional mode slot.
   at 0.5 and above (`binary_0.5`). The slot comes after the last group.
 
 Each group is a whole spec with its conventions inline, split by body part, so
-this differs from the per-field compositional spec that ADR 0001 rejected.
+this differs from the per-field compositional spec that ADR 0001 rejected. An
+existing stateless adapter that keeps a group's kind applies to a single group
+through `GroupAdapter`, which takes `lossless` from the adapter that it wraps. The
+resolver bridges two whole-body actions group by group, searching each differing
+group on its own.
 
 Proprioception gains `base_pose` (a position then a rotation, in a declared frame)
 and `torso_pos` (joints, no gripper). Each is a new value under its own state key,
