@@ -43,3 +43,9 @@ forward by calling an inference server it dials over the network. The signature,
 the native layouts and the session are unchanged, so a policy served this way is
 not a distinct kind of version: only `forward` differs.
 _Avoid_: proxy policy, hosted policy, remote policy
+
+## The embodiment
+
+**base pose** - the pose of a mobile robot's base: a position then a rotation, in a
+declared frame. Sent under the `base_pose` state key.
+_Avoid_: base position, base rotation, odometry

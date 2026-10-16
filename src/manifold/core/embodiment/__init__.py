@@ -2,8 +2,9 @@
 
 An Embodiment owns one canonical action space (the single representation it is
 defined in) plus its proprioception (the state it reports each step: end-effector
-pose, joint angles, or both). It is reusable across benchmarks. The cameras and
-task signals a benchmark adds live in `sensor.py` and `benchmark.py`.
+pose, joint angles, a mobile base's pose and torso joints). It is reusable across
+benchmarks. The cameras and task signals a benchmark adds live in `sensor.py` and
+`benchmark.py`.
 
 The action space is one typed spec carrying its conventions: rotation format,
 gripper polarity, frame, and delta-vs-absolute. Two action spaces are compatible

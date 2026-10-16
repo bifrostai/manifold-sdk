@@ -16,7 +16,11 @@ rotated by the base orientation's inverse, and re-encoded in the `ee_pose`'s cur
 rotation format; position is the translated, rotated offset. Each arm's gripper
 slot, and every other channel, pass through untouched.
 
-The base pose is read from `base_pose_channel` (default ``"base_pose"``) and may be
+The base pose is read from `base_pose_channel` (default ``"base_pose"``). When that
+channel is a proprioception field declared as a base pose, the declared spec
+decides its form: the value is decoded in the declared rotation format, a value of any
+other length is an error, and the adapter applies only when the declared base frame
+is `source_frame`. Any other channel has no declared form, so its value may be
 either a flat 16-element row-major 4x4 homogeneous matrix, or a 7-element
 ``[x, y, z, qx, qy, qz, qw]`` position+quaternion (scalar-last, matching the SDK's
 QUATERNION convention). Because the rebase is a rigid transform, the rotation
@@ -34,18 +38,31 @@ from scipy.spatial.transform import Rotation
 
 from manifold.core.adapter import ObservationAdapter
 from manifold.core.conventions import Frame, ee_step_layout
+from manifold.core.embodiment import EEObservationSpec
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.values import Observation
 from manifold.lib.rotation import from_matrix, to_matrix
 
 
-def _homogeneous(value: Any) -> np.ndarray:
+def _homogeneous(value: Any, spec: EEObservationSpec | None = None) -> np.ndarray:
     """Coerce a base-pose channel value to a 4x4 homogeneous matrix.
 
-    Accepts a 16-element row-major 4x4 flat array (or a (4, 4) array), or a
+    With a declared `spec`, the value is its position then its rotation. Without
+    one, accepts a 16-element row-major 4x4 flat array (or a (4, 4) array), or a
     7-element ``[x, y, z, qx, qy, qz, qw]`` position+quaternion (scalar-last).
     """
     array = np.asarray(value, dtype=np.float64).reshape(-1)
+    if spec is not None:
+        if array.size != spec.expected_length():
+            raise ValueError(
+                f"base_pose is declared as {spec.expected_length()} floats "
+                f"({spec.rotation} rotation), got {array.size}"
+            )
+        pos_len, rot_len, _ = ee_step_layout(spec.rotation, None)
+        matrix = np.eye(4, dtype=np.float64)
+        matrix[:3, :3] = to_matrix(array[pos_len : pos_len + rot_len].tolist(), spec.rotation)
+        matrix[:3, 3] = array[:pos_len]
+        return matrix
     if array.size == 16:
         return array.reshape(4, 4)
     if array.size == 7:
@@ -77,12 +94,21 @@ class DynamicFrameRebaseAdapter(ObservationAdapter):
         self.base_pose_channel = base_pose_channel
 
     def applies(self, source: BaseModel) -> bool:
-        """True when the reported pose is in `source_frame`."""
+        """True when the reported pose, and a declared base pose, are in `source_frame`."""
+        if not isinstance(source, ObservationSpace):
+            return False
+        ee_pose = source.proprioception.ee_pose
+        base_pose = self._declared_base(source)
         return (
-            isinstance(source, ObservationSpace)
-            and source.proprioception.ee_pose is not None
-            and source.proprioception.ee_pose.frame == self.source_frame
+            ee_pose is not None
+            and ee_pose.frame == self.source_frame
+            and (base_pose is None or base_pose.frame == self.source_frame)
         )
+
+    def _declared_base(self, source: ObservationSpace) -> EEObservationSpec | None:
+        """The declared spec of the channel that this reads, if it is a declared base pose."""
+        spec = getattr(source.proprioception, self.base_pose_channel, None)
+        return spec if isinstance(spec, EEObservationSpec) else None
 
     def produce(self, source: BaseModel) -> ObservationSpace:
         """The same spec with its `ee_pose` frame set to the target frame."""
@@ -97,14 +123,15 @@ class DynamicFrameRebaseAdapter(ObservationAdapter):
 
     def adapt(self, observation: Any, *, source: BaseModel) -> Observation:
         """Rebase the `ee_pose` by ``inv(base_pose) @ ee_pose``; other channels pass through."""
-        ee_pose = self._spec(source).proprioception.ee_pose
+        spec = self._spec(source)
+        ee_pose = spec.proprioception.ee_pose
         if ee_pose is None:
             raise TypeError("DynamicFrameRebaseAdapter needs a proprioception with an ee_pose")
         if self.base_pose_channel not in observation.state:
             raise KeyError(
                 f"DynamicFrameRebaseAdapter needs a {self.base_pose_channel!r} state channel"
             )
-        base = _homogeneous(observation.state[self.base_pose_channel])
+        base = _homogeneous(observation.state[self.base_pose_channel], self._declared_base(spec))
 
         values = [float(v) for v in observation.state["ee_pose"]]
         # The loop below reads exactly `arm_count` arms. If the value is longer than
