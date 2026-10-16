@@ -23,7 +23,9 @@ parties implement.
 
 The three required class attributes (`from_spec`, `to_spec`, `lossless`) are
 declared as bare `ClassVar` annotations without defaults, and a concrete adapter
-sets each as a class attribute. This is a documented convention, not a statically
+sets each as a class attribute. An adapter that wraps another, such as
+`GroupAdapter`, also sets `lossless` on each instance, from the adapter it wraps;
+read it from the instance. This is a documented convention, not a statically
 enforced one: `ty` does not flag a subclass that leaves a bare `ClassVar` unset,
 so an adapter that omits one is caught at runtime on first access (an
 `AttributeError`) rather than at definition time. We accept that first-use

@@ -1,10 +1,15 @@
-"""What a robot reports about its own state: end-effector pose or joint angles."""
+"""What a robot reports about its own state: end-effector pose, joints, base, torso, extras."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from manifold.core.conventions import Frame, GripperFormat, RotationFormat, ee_step_layout
+from manifold.core.conventions import (
+    Frame,
+    GripperFormat,
+    RotationFormat,
+    ee_step_layout,
+)
 from manifold.core.embodiment.spec import ValueSpec
 
 
@@ -94,19 +99,92 @@ class JointObservationSpec(ValueSpec):
         return self
 
 
+class BasePoseObservationSpec(ValueSpec):
+    """The pose of a mobile robot's base.
+
+    One value is 3 floats of position (xyz, meters), then the rotation (3, 4, or 6
+    floats per `rotation`). There is one base, so there is no `arm_count`. `frame`
+    is the frame the pose is expressed in, usually the world.
+    """
+
+    rotation: RotationFormat
+    frame: Frame = Frame.WORLD
+
+    def expected_length(self) -> int:
+        """Floats in one base pose: the position, then the rotation."""
+        return sum(ee_step_layout(self.rotation, None))
+
+
+class ExtraObservationSpec(ValueSpec):
+    """A state value no typed field holds, such as finger velocities: `dim` floats.
+
+    `name` is the `Observation.state` key it travels under. Matching compares `name`
+    and `dim`; `meaning` describes the values for a reader. A value a typed field can
+    hold, such as a base pose, belongs in that field.
+    """
+
+    name: str = Field(min_length=1)
+    dim: int = Field(ge=1)
+    meaning: str = Field(min_length=1)
+
+    def expected_length(self) -> int:
+        """Floats in one value: `dim`."""
+        return self.dim
+
+
 class Proprioception(BaseModel):
     """What the robot reports about its own state each step.
 
-    Set `ee_pose`, `joint_pos`, or any combination. All may be left unset for a
-    robot that reports no proprioception. Gripper finger state, when reported, is
-    nested in the end-effector value (`EEObservationSpec.gripper`), mirroring the
-    action side where the gripper is a field of `EEActionSpace`.
+    Set `ee_pose`, `joint_pos`, `base_pose`, `torso_pos`, or any combination. All may
+    be left unset for a robot that reports no proprioception. `torso_pos` holds the
+    joints between a mobile base and its arms, such as a lift, with no gripper. Each
+    field's name is the key its value travels under in `Observation.state`. Gripper
+    finger state, when reported, is nested in the end-effector value
+    (`EEObservationSpec.gripper`), mirroring the action side where the gripper is a
+    field of `EEActionSpace`. `extras` lists, by name, any other value the robot
+    reports.
     """
 
     model_config = ConfigDict(frozen=True)
 
     ee_pose: EEObservationSpec | None = None
     joint_pos: JointObservationSpec | None = None
+    base_pose: BasePoseObservationSpec | None = None
+    torso_pos: JointObservationSpec | None = None
+    extras: tuple[ExtraObservationSpec, ...] = ()
+
+    @classmethod
+    def spec_fields(cls) -> tuple[str, ...]:
+        """The typed fields, each holding one spec or None: every field but `extras`."""
+        return tuple(name for name in cls.model_fields if name != "extras")
+
+    def extra(self, name: str) -> ExtraObservationSpec | None:
+        """The extra named `name`, or None if this declares none."""
+        return next((extra for extra in self.extras if extra.name == name), None)
+
+    @classmethod
+    def pose_fields(cls) -> tuple[str, ...]:
+        """The fields whose spec is a pose, a position then a rotation."""
+        return ("ee_pose", "base_pose")
+
+    @model_validator(mode="after")
+    def _check_torso_is_one_chain(self) -> Proprioception:
+        """Refuse a torso with a gripper or more than one arm: it holds joints only."""
+        torso = self.torso_pos
+        if torso is not None and (torso.gripper is not None or torso.arm_count != 1):
+            raise ValueError("torso_pos holds the torso joints only: no gripper, one chain")
+        return self
+
+    @model_validator(mode="after")
+    def _check_extras_are_named_once(self) -> Proprioception:
+        """Refuse an extra named twice, or named after a typed field."""
+        names = [extra.name for extra in self.extras]
+        for name in names:
+            if names.count(name) > 1:
+                raise ValueError(f"extra {name!r} is declared twice")
+            if name in self.spec_fields():
+                raise ValueError(f"extra {name!r} is a typed field: declare it there")
+        return self
 
     def first_unmet(self, available: Proprioception) -> str | None:
         """The first component this needs that `available` does not match, or None.
@@ -114,17 +192,24 @@ class Proprioception(BaseModel):
         Used to check that a benchmark publishes the proprioception a policy
         consumes: `self` is what the policy requires, `available` is what is offered.
         The `ee_pose` comparison includes its nested gripper, so a policy that
-        needs gripper qpos is unmet against a benchmark whose ee_pose lacks it.
+        needs gripper qpos is unmet against a benchmark whose ee_pose lacks it. An
+        extra is met by an extra of the same name and width.
         """
-        if self.ee_pose is not None and available.ee_pose != self.ee_pose:
-            return "ee_pose"
-        if self.joint_pos is not None and available.joint_pos != self.joint_pos:
-            return "joint_pos"
+        for name in self.spec_fields():
+            needed = getattr(self, name)
+            if needed is not None and getattr(available, name) != needed:
+                return name
+        for extra in self.extras:
+            offered = available.extra(extra.name)
+            if offered is None or offered.dim != extra.dim:
+                return f"extras.{extra.name}"
         return None
 
 
 __all__ = [
+    "BasePoseObservationSpec",
     "EEObservationSpec",
+    "ExtraObservationSpec",
     "GripperObservationSpec",
     "JointObservationSpec",
     "Proprioception",

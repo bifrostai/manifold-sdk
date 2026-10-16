@@ -9,6 +9,7 @@ from manifold.adapters.action.gripper_threshold import (
     GripperThresholdAdapter,
     UnifiedGripperThresholdAdapter,
 )
+from manifold.adapters.action.group import GroupAdapter
 from manifold.adapters.action.rotation import RotationFormatAdapter
 from manifold.adapters.action.unified_slice import UnifiedSliceAdapter
 
@@ -17,6 +18,7 @@ __all__ = [
     "DiscreteBinarize",
     "GripperPolarityAdapter",
     "GripperThresholdAdapter",
+    "GroupAdapter",
     "RotationFormatAdapter",
     "UnifiedGripperThresholdAdapter",
     "UnifiedSliceAdapter",

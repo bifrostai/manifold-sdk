@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import (
     ActionSpace,
+    CompositeActionSpace,
     EEActionSpace,
     Embodiment,
     JointActionSpace,
@@ -89,20 +90,34 @@ class Benchmark(BaseModel):
         "Read a benchmark's gripper convention" is a general query a gripper
         adapter makes when it builds its chain, so it lives here on `Benchmark`
         rather than in any one caller. The action space is a union (EE / joint /
-        unified); this checks it exhaustively and returns whichever variant's
-        `gripper` applies, raising if the benchmark has no gripper to target
-        rather than silently mis-typing it.
+        unified / composite); this checks it exhaustively and returns whichever
+        variant's `gripper` applies, raising if the benchmark has no gripper to
+        target rather than silently mis-typing it. A composite returns the gripper
+        its arm groups share, and raises if they do not share one.
 
         Raises:
             TypeError: If the action space has no gripper — an EE or joint space
-                with `gripper=None`, or a unified space with no payload or a
-                payload with `gripper=None`.
+                with `gripper=None`, a unified space with no payload or a payload
+                with `gripper=None`, or a composite with no arm gripper — or if a
+                composite's arm groups declare different grippers.
         """
         action = self.action_space
         if isinstance(action, (EEActionSpace, JointActionSpace)):
             gripper = action.gripper
         elif isinstance(action, UnifiedActionSpace):
             gripper = action.payload.gripper if action.payload is not None else None
+        elif isinstance(action, CompositeActionSpace):
+            grippers = [
+                group.gripper
+                for group in action.groups
+                if isinstance(group, (EEActionSpace, JointActionSpace))
+            ]
+            # An arm group without a gripper does not share the others' gripper.
+            if len(set(grippers)) > 1:
+                raise TypeError(
+                    f"{self!r} has arm groups that do not share one gripper: {grippers}"
+                )
+            gripper = grippers[0] if grippers else None
         else:
             assert_never(action)
         if gripper is None:
