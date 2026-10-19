@@ -4,9 +4,11 @@ import pkgutil
 import pytest
 
 import manifold.embodiments
-from manifold.core.embodiment import Embodiment
+from manifold.core.conventions import GripperFormat
+from manifold.core.embodiment import EEActionSpace, Embodiment, UnifiedActionSpace
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
+from manifold.embodiments import FRANKA_EE_DELTA, PANDA_OMRON_WHOLE_BODY
 
 # Read off the package directory, not off `ALL`, so a newly added file is checked
 # whether or not the catalog has been told about it.
@@ -75,3 +77,15 @@ def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
         "wrist",
         "wrist_depth",
     }
+
+
+def test_the_robosuite_panda_grippers_close_at_plus_one():
+    # PandaOmron and the LIBERO Franka both drive robosuite's PandaGripper, whose
+    # `format_action` closes at +1 and opens at -1.
+    omron = PANDA_OMRON_WHOLE_BODY.action
+    franka = FRANKA_EE_DELTA.action
+    assert isinstance(omron, UnifiedActionSpace) and isinstance(omron.payload, EEActionSpace)
+    assert isinstance(franka, EEActionSpace)
+
+    assert omron.payload.gripper is GripperFormat.SIGNED_OPEN_LOW
+    assert franka.gripper is GripperFormat.SIGNED_OPEN_LOW
