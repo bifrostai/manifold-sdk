@@ -13,6 +13,7 @@ from manifold.core import (
     CameraIntrinsics,
     CameraOrientation,
     Compatibility,
+    CompositeActionSpace,
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
@@ -265,20 +266,25 @@ def test_frame_history_is_the_spec_edge_for_a_clip_consuming_policy() -> None:
 
 
 def _panda_omron_arm() -> EEActionSpace:
-    # The 7-D arm payload PANDA_OMRON_WHOLE_BODY's 12-D whole-body action carries, declared
-    # standalone — the action a 7-D arm-only policy (Cosmos RoboCasa) emits.
+    # PANDA_OMRON_WHOLE_BODY's arm group, declared standalone: the action a 7-D
+    # arm-only policy (Cosmos RoboCasa) emits.
     action = PANDA_OMRON_WHOLE_BODY.action
-    assert isinstance(action, UnifiedActionSpace)
-    arm = action.payload
+    assert isinstance(action, CompositeActionSpace)
+    arm = action.groups[0]
     assert isinstance(arm, EEActionSpace)
     return arm
 
 
+def _unified_whole_body() -> UnifiedActionSpace:
+    # The 12-D padded buffer that BasePinWiden widens an arm action to.
+    return UnifiedActionSpace(width=12, payload=_panda_omron_arm())
+
+
 def _robocasa_benchmark() -> Benchmark:
-    # A PANDA_OMRON_WHOLE_BODY benchmark whose action is the 12-D whole-body UnifiedActionSpace.
+    # A RoboCasa benchmark whose action is the 12-D whole-body UnifiedActionSpace.
     return Benchmark(
         name="robocasa",
-        embodiment=PANDA_OMRON_WHOLE_BODY,
+        embodiment=PANDA_OMRON_WHOLE_BODY.model_copy(update={"action": _unified_whole_body()}),
         sensors=[Camera(name=CameraName.AGENTVIEW_LEFT, shape=(224, 224, 3))],
         instruction=True,
     )
@@ -286,7 +292,7 @@ def _robocasa_benchmark() -> Benchmark:
 
 def test_base_pin_widen_bridges_a_7d_arm_action_to_the_12d_whole_body_space() -> None:
     # A 7-D arm-only policy (the Cosmos RoboCasa case) emits the PANDA_OMRON_WHOLE_BODY arm
-    # payload; BasePinWiden widens it to the benchmark's 12-D UnifiedActionSpace by
+    # group; BasePinWiden widens it to the benchmark's 12-D UnifiedActionSpace by
     # appending the base-pin tail, so the action chain reaches the benchmark's space.
     policy = PolicySignature(
         action_space=_panda_omron_arm(),
@@ -306,7 +312,7 @@ def test_base_pin_widen_produces_the_exact_benchmark_action_space() -> None:
     adapter = BasePinWiden(width=12)
     arm = _panda_omron_arm()
     assert adapter.applies(arm)
-    assert adapter.produce(arm) == PANDA_OMRON_WHOLE_BODY.action
+    assert adapter.produce(arm) == _unified_whole_body()
 
 
 def test_base_pin_widen_appends_the_pin_tail() -> None:

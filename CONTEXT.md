@@ -49,8 +49,7 @@ _Avoid_: proxy policy, hosted policy, remote policy
 **whole-body action** - the action of a robot that moves more than its arms: its
 arm, torso and mobile-base groups, each a complete spec, back to back in the
 order that the robot reads them in, then an optional mode slot. Declared as a
-`CompositeActionSpace`, though PandaOmron still declares its own as a
-`UnifiedActionSpace`. See ADR 0010.
+`CompositeActionSpace`, as PandaOmron's is. See ADR 0010.
 _Avoid_: full-body action
 
 **mode slot** - the last value of a whole-body action, such as the mode value of

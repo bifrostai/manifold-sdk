@@ -43,8 +43,9 @@ class BasePinWiden(ActionAdapter):
     """Widen a 7-D arm `EEActionSpace` to a `width`-D unified buffer, pinning the base.
 
     The arm action is followed by a constant base-pin tail so the emitted action
-    reaches the benchmark's whole-body width. `width` defaults to 12 (the RoboCasa
-    PandaOmron whole-body action); the tail length is `width` minus the arm length.
+    reaches the benchmark's whole-body width. `width` defaults to 12 (RoboCasa's
+    PandaOmron action as a unified buffer); the tail length is `width` minus the
+    arm length.
     """
 
     from_spec: ClassVar[type[BaseModel]] = EEActionSpace
