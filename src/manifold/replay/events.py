@@ -38,6 +38,7 @@ class ManifoldEventType(StrEnum):
     GRASPED = "grasped"
     GRIPPER_TOUCHING = "gripper_touching"
     UPRIGHT = "upright"
+    UNTOUCHED = "untouched"
     OPEN = "open"
     CLOSED = "closed"
     TURNED_ON = "turned_on"
@@ -51,6 +52,12 @@ class ManifoldEventType(StrEnum):
     IN_FRONT_OF = "in_front_of"
     BEHIND = "behind"
     TOUCHING = "touching"
+    NEAR = "near"
+    FACING = "facing"
+    UNDER_WATER = "under_water"
+    SWEPT = "swept"
+    WASHED = "washed"
+    STIRRED = "stirred"
     STACKED = "stacked"
     GRIPPER_COMMANDED = "gripper_commanded"
     GRIPPER_HIT = "gripper_hit"
@@ -131,6 +138,19 @@ class Upright(ObjectFact):
     """`object` stands upright."""
 
     event_type: Literal[ManifoldEventType.UPRIGHT] = ManifoldEventType.UPRIGHT
+
+
+class Untouched(ObjectFact):
+    """The gripper has not touched `object` since the episode began.
+
+    The benchmark records the fact as active on the first step and as inactive on the
+    first touch, and does not record it again in that episode, even after the gripper
+    lets go. It reports a touch that the task itself remembers, such as a flag that a
+    task sets on the first contact, so a grader can test "never touched" without
+    replaying the episode's contacts.
+    """
+
+    event_type: Literal[ManifoldEventType.UNTOUCHED] = ManifoldEventType.UNTOUCHED
 
 
 class Open(ObjectFact):
@@ -222,6 +242,58 @@ class Touching(RelationFact):
     event_type: Literal[ManifoldEventType.TOUCHING] = ManifoldEventType.TOUCHING
 
 
+class Near(RelationFact):
+    """`object` is close to `reference`."""
+
+    event_type: Literal[ManifoldEventType.NEAR] = ManifoldEventType.NEAR
+
+
+class Facing(RelationFact):
+    """`object`, such as the robot, faces `reference`."""
+
+    event_type: Literal[ManifoldEventType.FACING] = ManifoldEventType.FACING
+
+
+class UnderWater(RelationFact):
+    """`object` is in the water that runs from `reference`, such as a tap."""
+
+    event_type: Literal[ManifoldEventType.UNDER_WATER] = ManifoldEventType.UNDER_WATER
+
+
+class Swept(RelationFact):
+    """`object` moved across `reference` while touching it, as a sponge scrubs a board.
+
+    The benchmark records the fact as active once, when the sweep that the task tracks
+    is long enough, and does not record it as inactive in that episode. It reports the
+    contact points that the task itself collects, so the threshold is the task's.
+    """
+
+    event_type: Literal[ManifoldEventType.SWEPT] = ManifoldEventType.SWEPT
+
+
+class Washed(RelationFact):
+    """`object` stayed under the water from `reference` for as long as the task requires.
+
+    The benchmark records the fact as active once, when the time that the task counts
+    reaches the task's threshold, and does not record it as inactive in that episode.
+    For example, a task counts the steps that lettuce spends under a sink's tap.
+    """
+
+    event_type: Literal[ManifoldEventType.WASHED] = ManifoldEventType.WASHED
+
+
+class Stirred(RelationFact):
+    """`object` was stirred in `reference` for as long as the task requires.
+
+    The benchmark records the fact as active once, when the stirring that the task
+    counts reaches the task's threshold, and does not record it as inactive in that
+    episode. For example, a task counts the steps on which a spatula moves vegetables
+    in a pot.
+    """
+
+    event_type: Literal[ManifoldEventType.STIRRED] = ManifoldEventType.STIRRED
+
+
 class Stacked(_Event):
     """`objects` are stacked on one another.
 
@@ -304,6 +376,7 @@ ManifoldEvent = Annotated[
     | Grasped
     | GripperTouching
     | Upright
+    | Untouched
     | Open
     | Closed
     | TurnedOn
@@ -317,6 +390,12 @@ ManifoldEvent = Annotated[
     | InFrontOf
     | Behind
     | Touching
+    | Near
+    | Facing
+    | UnderWater
+    | Swept
+    | Washed
+    | Stirred
     | Stacked
     | GripperCommanded
     | GripperHit
