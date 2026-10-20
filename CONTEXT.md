@@ -30,6 +30,11 @@ such as the gripper hitting the table. A benchmark records what it observed;
 grading decides what it means. See ADR 0009.
 _Avoid_: latch, log line, tracker message
 
+**annotation** - notes and text lines that a benchmark adds to a replay log's step
+after it wrote that step. Appended as a frame of its own and merged into that step
+when the log is read. It adds no event other than a `Note`. See ADR 0011.
+_Avoid_: amendment, patch, backfill
+
 **success signal** - the per-step flag saying the benchmark's task is satisfied.
 Replay data rather than a contract channel, since no policy consumes it, so a
 replay log declares it and `Benchmark` does not. Distinct from an episode's
