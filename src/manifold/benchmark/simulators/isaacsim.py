@@ -21,16 +21,16 @@ The scene is read from the USD stage under the env's own prim, such as
 `/World/envs/env_3`. Each drawn prim is grouped under its nearest ancestor with
 `UsdPhysics.RigidBodyAPI`, which is the prim that PhysX moves. A prim without such
 an ancestor is fixed, such as a table, and is posed once from the stage. Isaac Lab
-tracks the links of each articulation and the root of each rigid object, and a
-step reads their poses from Isaac Lab's tensors rather than from the stage.
+tracks the links of each articulation and the root of each rigid object. Each
+step reads their poses from Isaac Lab's tensors.
 
-Isaac Lab lays a batched env out as a grid and reports world positions, so every
-position that this module returns is in the env's own frame: the env's origin in
-`scene.env_origins` is subtracted from it.
+Isaac Lab lays a batched env out as a grid and reports world positions. This
+module subtracts the env's origin in `scene.env_origins`, so the positions that
+it returns are in the env's frame.
 
-Isaac Lab's `isaaclab` package orders quaternions `wxyz` before its version 1.0.0
-and `xyzw` from 1.0.0 on, which Isaac Lab 3.0 ships. `attach` reads the version,
-and every quaternion that this module returns is `xyzw`.
+Isaac Lab's `isaaclab` package orders quaternions `wxyz` before version 1.0.0 and
+`xyzw` from 1.0.0 on. `attach` reads the version, and the quaternions that this
+module returns are `xyzw`.
 """
 
 from __future__ import annotations
@@ -44,14 +44,19 @@ import signal
 import sys
 import traceback
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from manifold.benchmark.simulators import Simulator, follow, orientation, rotation_matrix
+from manifold.benchmark.simulators import (
+    BOX_VERTICES,
+    Simulator,
+    bounding_box_part,
+)
 from manifold.core.embodiment import JointActionSpace
-from manifold.lib.rotation import wxyz_to_xyzw
+from manifold.lib.rotation import rotation_matrix_from_xyzw, wxyz_to_xyzw, xyzw_from_rotation_matrix
 from manifold.replay import (
     ReplayMesh,
     ReplayPose,
@@ -81,16 +86,11 @@ _NEAR_CLIP_METRES = 0.01
 # The colour of a part with no material colour and no display colour.
 _GREY = (0.7, 0.7, 0.7, 1.0)
 
-# A fixed body or an articulation's link whose prim has more vertices than this is
-# drawn as its bounding box. This keeps scanned set dressing out of every log. A
-# rigid object is never drawn as a box, because the task moves it.
-_BOX_VERTICES = 50_000
-
-# The shader inputs that hold a material's constant colour. A UsdPreviewSurface
+# The shader inputs for a material's constant colour. A UsdPreviewSurface
 # names it `diffuseColor`, and Omniverse's MDL shaders use the other names.
 _COLOUR_INPUTS = ("diffuseColor", "diffuse_color_constant", "base_color_constant", "diffuse_tint")
 
-# The factor that a camera's frame is box-averaged by before the replay holds it.
+# The factor that a camera's frame is box-averaged by before the replay stores it.
 _IMAGE_DIVISOR = 2
 
 # A contact force of at least this many newtons counts as the gripper touching an object.
@@ -104,7 +104,7 @@ _GRIPPER_NEAR_METRES = 0.08
 _OBJECT_NEAR_METRES = 0.10
 
 # What Isaac Lab tracks for a body: "link" or "root", the asset's name in the
-# scene, and the link's cache in the asset's `body_names`.
+# scene, and the link's index in the asset's `body_names`, or 0 for a root.
 _TrackedBody = tuple[str, str, int]
 
 
@@ -112,10 +112,11 @@ _TrackedBody = tuple[str, str, int]
 class _IsaacSimEpisodeCache:
     """What `replay_bodies` found in the env at the start of an episode, for each later step.
 
-    Finding it walks the USD stage, which is too slow to repeat at each step.
+    `replay_bodies` walks the USD stage to find these values, and a walk is too slow
+    to repeat at each step.
 
     `bodies` maps each scene body to what Isaac Lab tracks for it, or to the pose
-    in the env's frame of a fixed body. `sensors` has each contact sensor that
+    in the env's frame of a fixed body. `sensors` contains each contact sensor that
     the scalars plot, with the names of the objects that it filters on.
     """
 
@@ -133,19 +134,19 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     """Where an Isaac Lab env is, and how Isaac Sim is launched.
 
     `path` is the attribute path from the env that `on_load` returns to Isaac Lab's
-    env, such as `env.unwrapped` for a gym env. `app` has the keyword arguments of Isaac Lab's
+    env, such as `env.unwrapped` for a gym env. `app` contains the keyword arguments of Isaac Lab's
     `AppLauncher`, such as `{"headless": true, "enable_cameras": true}`. `robot` is
     the scene's name for the robot's articulation.
 
     `IsaacSimSimulator.apply_settings` sets `max_position_iterations`, `env_spacing`
     and `camera_far_clip` on an env's config. A null value keeps the env's own value.
     `max_position_iterations` caps PhysX's position solver iterations in a step, from
-    1 to 255. Isaac Lab's own cap is 255. `env_spacing` is the distance in metres
+    1 to 255. `env_spacing` is the distance in metres
     between neighbouring envs. `camera_far_clip` is the distance in metres past which
     the cameras draw nothing.
     """
 
-    # A config spells out every value, so it takes no key that it does not list.
+    # A config lists all of its values, so an unknown key raises.
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     name: Literal["isaacsim"]
@@ -160,8 +161,8 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
 def _take_sigsegv() -> None:
     """Give SIGSEGV to `faulthandler`, which ends the process on a segfault.
 
-    It sets the signal's handler again on every call, so it also takes the signal
-    back from a handler that an extension installed since the last call.
+    Each call sets the handler again, so it replaces a handler that an extension
+    installed since the last call.
     """
     faulthandler.enable(all_threads=True)
 
@@ -182,7 +183,7 @@ def _camera_cfgs(scene_cfg: Any) -> list[Any]:
             continue
         try:
             value = getattr(scene_cfg, name)
-        except Exception:  # a property that needs a built scene raises
+        except Exception:  # A property that needs a built scene raises.
             continue
         if isinstance(value, (CameraCfg, TiledCameraCfg)):
             cameras.append(value)
@@ -244,9 +245,8 @@ class IsaacSimSimulator(Simulator):
     def supported_versions(self) -> dict[str, str]:
         """The version range of Isaac Lab's `isaaclab` package.
 
-        RoboLab runs `isaaclab` 0.44.8 on Isaac Sim 5.0, and IsaacLab-Arena runs
-        `isaaclab` 6.1.17 on Isaac Sim 6.0.1. Isaac Sim does not install a Python
-        package with its version.
+        The range covers `isaaclab` 0.44 on Isaac Sim 5.0 up to `isaaclab` 6.1 on
+        Isaac Sim 6.0. Isaac Sim installs no Python package with its version.
         """
         return {"isaaclab": ">=0.44,<6.2"}
 
@@ -277,11 +277,10 @@ class IsaacSimSimulator(Simulator):
     def stop(self) -> None:
         """End the process with the runner's exit code.
 
-        Kit's `close` ends the process itself with exit code 0, even when an
-        exception is on its way out of the runner, and Python never prints that
-        exception. So `stop` does not call `close`. It prints the exception, flushes
-        the output, and ends the process with `os._exit`: with exit code 1 after an
-        exception, and 0 otherwise.
+        Kit's `close` ends the process with exit code 0, even while an exception
+        propagates out of the runner, and Python does not print that exception. So
+        `stop` does not call `close`. It prints the exception, flushes the output,
+        and calls `os._exit` with exit code 1 after an exception, or 0 otherwise.
         """
         failure = sys.exc_info()[1]
         if failure is not None:
@@ -291,15 +290,15 @@ class IsaacSimSimulator(Simulator):
         os._exit(1 if failure is not None else 0)
 
     def attach(self, env: Any, env_ids: Sequence[int]) -> None:
-        """Read env ids `env_ids` from the Isaac Lab env at the config's path in `env`.
+        """Attach env ids `env_ids` to the Isaac Lab env at the config's path in `env`.
 
-        The env's `unwrapped` is read when it has one. Env id `env_ids[i]` is row
-        `i` of Isaac Lab's tensors, so a batched env's env id is its row. `attach`
-        also gives SIGSEGV to `faulthandler` again, because the env build can load an
-        extension that installs its own handler.
+        `attach` uses the env's `unwrapped` when it has one. Env id `env_ids[i]` is
+        row `i` of Isaac Lab's tensors. `attach` also gives SIGSEGV to `faulthandler`
+        again, because the env build can load an extension that installs its own
+        handler.
         """
         _take_sigsegv()
-        found = follow(env, self._config.path)
+        found = attrgetter(self._config.path)(env)
         isaac = getattr(found, "unwrapped", found)
         self._scalar_last = self._isaaclab_orders_xyzw()
         for row, env_id in enumerate(env_ids):
@@ -311,9 +310,8 @@ class IsaacSimSimulator(Simulator):
 
         Each part's vertices are in its body's frame. A body that Isaac Lab tracks
         is framed at the pose that Isaac Lab reports, and a fixed body at the
-        pose of its prim on the stage. The objects, the robot's joints and links,
-        the termination terms, the contact sensors and the extra cameras that the
-        other methods read are also indexed here.
+        pose of its prim on the stage. `replay_bodies` also fills the episode cache
+        that the other replay methods read.
         """
         # The SDK does not depend on Isaac Sim. An Isaac Sim benchmark image installs it.
         from pxr import Usd, UsdGeom, UsdPhysics, UsdShade  # ty: ignore[unresolved-import]
@@ -357,12 +355,12 @@ class IsaacSimSimulator(Simulator):
             world = (homogeneous @ self._matrix(cache.GetLocalToWorldTransform(prim)).T)[
                 :, :3
             ] * metres
-            rotation = rotation_matrix(pose.orientation)
+            rotation = rotation_matrix_from_xyzw(pose.orientation)
             local = (world - np.asarray(pose.position, dtype=np.float64)) @ rotation
             found = self._parts(prim, shape, local, (UsdGeom, UsdShade))
-            if len(local) > _BOX_VERTICES and (tracked is None or tracked[0] != "root"):
+            if len(local) > BOX_VERTICES and (tracked is None or tracked[0] != "root"):
                 boxed.append(name)
-                found = [self._box(found)]
+                found = [bounding_box_part(found)]
             parts.setdefault(name, []).extend(found)
         if boxed or skipped:
             _logger.info(
@@ -397,7 +395,7 @@ class IsaacSimSimulator(Simulator):
         return poses
 
     def replay_extrinsics(self, env_id: int) -> dict[str, ReplayPose]:
-        """None: the config does not say which camera sensor produces each spec camera."""
+        """An empty dict, because the config does not state which sensor produces each camera."""
         return {}
 
     def replay_images(self, env_id: int) -> dict[str, np.ndarray]:
@@ -414,7 +412,7 @@ class IsaacSimSimulator(Simulator):
         return frames
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
-        """The robot's joints, the task's terms and distances, and the forces of the physics.
+        """The robot's joints, the task's terms and distances, and the physics forces.
 
         The arm's joints are the first joints of the config's robot, as many as the
         spec gives each arm, and the gripper's are the rest.
@@ -469,7 +467,7 @@ class IsaacSimSimulator(Simulator):
     ) -> list[RerunScalar]:
         """Whether each termination term fires, and each object's distance from the end effector.
 
-        A distance is 0 when the observation holds no end effector position.
+        A distance is 0 when `ee_position` is None.
         """
         scalars = []
         for term in cache.terms:
@@ -550,8 +548,8 @@ class IsaacSimSimulator(Simulator):
         `contacts/<sensor>/<object>` is the largest force between the sensor's bodies
         and that object, and `contacts/<sensor>` is the sensor's net force when it
         filters on no object. `contacts/<link>` is the norm of the wrench through the
-        link's joint, which Isaac Lab 3 no longer reports, so it reads 0 there. The
-        forces are None when no contact sensor filters on objects.
+        link's joint. Isaac Lab 3 does not report this wrench, so the value is 0 there.
+        The forces are None when no contact sensor filters on objects.
         """
         scalars = []
         forces: dict[str, float] | None = None
@@ -605,7 +603,7 @@ class IsaacSimSimulator(Simulator):
     def _episode_cache(
         self, isaac: Any, bodies: dict[str, _TrackedBody | ReplayPose]
     ) -> _IsaacSimEpisodeCache:
-        """What the scalars, the poses and the images read for one episode."""
+        """The values that the replay methods read at each step of an episode."""
         scene = isaac.scene
         robot = scene[self._config.robot]
         joints = len(robot.joint_names)
@@ -625,8 +623,8 @@ class IsaacSimSimulator(Simulator):
     def _numpy(value: Any) -> np.ndarray:
         """An Isaac Lab tensor as a numpy array on the host.
 
-        Isaac Lab 3 hands out warp arrays wrapped in a `ProxyArray`, whose `torch`
-        property is a torch tensor. Earlier releases hand out torch tensors.
+        Isaac Lab 3 returns warp arrays wrapped in a `ProxyArray`, whose `torch`
+        property is a torch tensor. Earlier releases return torch tensors.
         """
         value = getattr(value, "torch", value)
         if hasattr(value, "detach"):
@@ -668,9 +666,9 @@ class IsaacSimSimulator(Simulator):
 
     @staticmethod
     def _arm_joints(config: BenchmarkConfig) -> int | None:
-        """The joints of one arm, from the spec's joint action or joint observation.
+        """The number of joints of one arm, from the spec's joint action or joint observation.
 
-        None means that the spec counts no joints, and every joint is the arm's.
+        None means that the spec counts no joints, so all joints belong to the arm.
         """
         embodiment = config.spec.embodiment
         if isinstance(embodiment.action, JointActionSpace):
@@ -714,11 +712,11 @@ class IsaacSimSimulator(Simulator):
 
         A sensor is on the robot when its prim is below the robot's prim. Of the
         sensors on one body, only the sensor with the most filtered objects is read,
-        because its one read has the forces of the others. A task can declare a
-        sensor for every pair of objects, and reading each of them is slow and can
-        fail. Each object is named by the last part of its filter's prim path. The
-        sensors are told apart from cameras by `filter_prim_paths_expr` in their
-        config, so that no sensor's data is read to find out what it is.
+        because its read contains the forces of the others. A task can declare a
+        sensor for each pair of objects, and reading each of them is slow and can
+        fail. Each object is named by the last part of its filter's prim path. A
+        contact sensor is told apart from a camera by `filter_prim_paths_expr` in its
+        config, so that this method reads no sensor's data.
         """
         chosen: dict[str, tuple[str, tuple[str, ...]]] = {}
         for name, sensor in scene.sensors.items():
@@ -787,14 +785,14 @@ class IsaacSimSimulator(Simulator):
         scale[scale == 0.0] = 1.0
         return ReplayPose(
             position=(matrix[:3, 3] * metres).astype(np.float32),
-            orientation=orientation(rotation / scale),
+            orientation=xyzw_from_rotation_matrix(rotation / scale),
         )
 
     @staticmethod
     def _skip_reason(prim: Any, geom: Any) -> str | None:
         """Why a drawable prim is left out of the scene, or None to keep it.
 
-        A prim whose purpose is `guide` or `proxy` is not for rendering, and Isaac
+        A prim whose purpose is `guide` or `proxy` is not for rendering, and Isaac Sim
         gives a collision shape the purpose `guide`. An invisible prim is not rendered.
         A prim below a `collisions` prim is a collision shape of an Isaac asset.
         """
@@ -838,7 +836,7 @@ class IsaacSimSimulator(Simulator):
 
         A mesh, a cube and a cylinder are drawn. A sphere, a capsule or a cone is left
         out, so that a replay never draws a shape that the simulator does not have.
-        The third value holds the triangles of each polygon of a mesh, and is None for
+        The third value contains the triangles of each polygon of a mesh, and is None for
         a cube or a cylinder, which have no subsets.
         """
         if prim.IsA(geom.Mesh):
@@ -934,7 +932,7 @@ class IsaacSimSimulator(Simulator):
 
     @staticmethod
     def _part(vertices: np.ndarray, faces: np.ndarray, colour: Any) -> ReplayScenePart:
-        """A part that holds only the vertices that its faces use."""
+        """A part that contains only the vertices that its faces use."""
         used = np.unique(faces)
         remap = np.full(len(vertices), -1, dtype=np.int64)
         remap[used] = np.arange(len(used))
@@ -980,19 +978,6 @@ class IsaacSimSimulator(Simulator):
         if not covered.all():
             parts.append(IsaacSimSimulator._part(vertices, triangles[~covered], fallback))
         return parts
-
-    @staticmethod
-    def _box(parts: list[ReplayScenePart]) -> ReplayScenePart:
-        """The parts of one prim as their bounding box, in the first part's colour."""
-        vertices = np.concatenate(
-            [np.asarray(part.mesh.vertices, dtype=np.float64) for part in parts]
-        )
-        low, high = vertices.min(axis=0), vertices.max(axis=0)
-        return ReplayScenePart(
-            mesh=ReplayMesh.box(np.maximum((high - low) / 2.0, 1e-4).tolist()),
-            position=((low + high) / 2.0).astype(np.float32),
-            color=parts[0].color,
-        )
 
 
 __all__ = [

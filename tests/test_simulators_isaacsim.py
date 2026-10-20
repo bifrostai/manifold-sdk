@@ -546,7 +546,7 @@ def test_the_vertices_are_in_their_bodys_frame(isaac: SimpleNamespace) -> None:
 def test_a_heavy_fixed_body_is_drawn_as_its_box_but_a_rigid_object_is_not(
     isaac: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("manifold.benchmark.simulators.isaacsim._BOX_VERTICES", 3)
+    monkeypatch.setattr("manifold.benchmark.simulators.isaacsim.BOX_VERTICES", 3)
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
     bodies = {body.name: body for body in simulator.replay_bodies(0)}
     assert [len(part.mesh.vertices) for part in bodies["finger"].parts] == [8]

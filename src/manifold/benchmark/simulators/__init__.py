@@ -1,9 +1,9 @@
-"""Shared code for each simulator, such as MuJoCo or Isaac Sim, in a module for each.
+"""The `Simulator` base class and the helpers that the simulator modules share.
 
-A `Simulator` runs a simulator's process, and reads from the simulator what a
-replay needs: the scene's bodies and meshes, each body's pose, each camera's pose,
-the cameras that the policy does not see, and the simulator's own scalars, such as
-joint torques and contact forces.
+Each simulator, such as MuJoCo or Isaac Sim, has a module in this package. A
+`Simulator` runs a simulator's process. It also reads the values of a replay from
+the simulator: the scene's bodies and meshes, each body's pose, each camera's pose,
+the extra cameras, and scalars such as joint torques and contact forces.
 """
 
 from __future__ import annotations
@@ -13,9 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from manifold.core.conventions import RotationFormat
 from manifold.lib.compat import assert_never
-from manifold.lib.rotation import from_matrix, to_matrix
+from manifold.replay import ReplayMesh, ReplayScenePart
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -26,79 +25,48 @@ if TYPE_CHECKING:
     from manifold.replay import ReplayPose, ReplaySceneBody, RerunScalar
 
 
-# The `xyzw` quaternion of no rotation.
-_IDENTITY_XYZW = (0.0, 0.0, 0.0, 1.0)
+# The replay draws a scene part with more vertices than this as its bounding box, such
+# as a scanned table. A very large mesh would make each replay log large.
+BOX_VERTICES = 50_000
 
 
-def orientation(rotation: np.ndarray) -> np.ndarray:
-    """Return a 3x3 rotation matrix as an `xyzw` quaternion in float32.
+def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
+    """A box part that bounds `parts`, in the colour of the first part.
 
-    A matrix that is not a rotation, such as a matrix of zeros or of NaN, gives the
-    quaternion of no rotation, so the scene still draws the body or the camera.
+    The vertices of each part must be in the body's frame, with the part at the
+    body's origin.
     """
-    try:
-        quaternion = np.asarray(
-            from_matrix(np.asarray(rotation, dtype=np.float64), RotationFormat.QUATERNION),
-            dtype=np.float32,
-        )
-    except (ValueError, np.linalg.LinAlgError):
-        return np.array(_IDENTITY_XYZW, dtype=np.float32)
-    if not np.isfinite(quaternion).all():
-        return np.array(_IDENTITY_XYZW, dtype=np.float32)
-    return quaternion
-
-
-def rotation_matrix(quaternion: np.ndarray | Sequence[float]) -> np.ndarray:
-    """Return an `xyzw` quaternion as a 3x3 rotation matrix.
-
-    A quaternion that is not a rotation, such as a quaternion of zeros or of NaN, gives
-    the identity matrix.
-    """
-    try:
-        matrix = to_matrix(
-            np.asarray(quaternion, dtype=np.float64).reshape(-1).tolist(),
-            RotationFormat.QUATERNION,
-        )
-    except ValueError:
-        return np.eye(3)
-    if not np.isfinite(matrix).all():
-        return np.eye(3)
-    return matrix
-
-
-def follow(env: Any, path: str) -> Any:
-    """The object at the attribute path `path` from `env`, such as `env.sim` for `"sim"`."""
-    found = env
-    for name in path.split("."):
-        found = getattr(found, name)
-    return found
+    vertices = np.concatenate([np.asarray(part.mesh.vertices, dtype=np.float64) for part in parts])
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    return ReplayScenePart(
+        mesh=ReplayMesh.box(np.maximum((high - low) / 2.0, 1e-4).tolist()),
+        position=((low + high) / 2.0).astype(np.float32),
+        color=parts[0].color,
+    )
 
 
 class Simulator(ABC):
-    """Run one simulator's process, and read the simulator for the replay.
+    """A base class that runs a simulator's process and reads the simulator for the replay.
 
     The Service calls `start` before the hooks' `on_start`, `attach` after each
-    `on_load`, and `stop` after `on_stop`. `start` and `stop` run the simulator's
-    process, which a benchmark needs whether or not it writes a replay.
+    `on_load`, and `stop` after `on_stop`. A benchmark needs the process whether or
+    not it writes a replay.
 
-    The methods named `replay_*` read the simulator for the replay, and only the
-    Client's replay recorder calls them. `attach` gives them the env to read.
+    Only the Client's replay recorder calls the `replay_*` methods. They read the env
+    that `attach` gave.
 
-    To add a simulator, follow the rules in ADR 0011 under "Simulator classes":
+    To add a simulator:
 
     1. Add a module with `Benchmark<Simulator>SimulatorConfig` and
        `<Simulator>Simulator`. If the replay methods read values once for each
        episode, also add `_<Simulator>EpisodeCache`.
     2. Add the config to the type of `BenchmarkConfig.simulator`, and add a branch
        to `make_simulator`.
-    3. Implement the methods and the property of this class. Add no other public
-       method, except a static method that the hooks call to set the config's
-       values on an env before the env is built.
-    4. Make each other method private. If it uses only its arguments, make it a
-       static method. If it reads `self`, make it an instance method.
-    5. If a private method returns a value, name it for that value, such as
-       `_body_name`. If it returns nothing, name it with a verb for what it does,
-       such as `_log_skipped_geoms`.
+    3. Implement the methods and the property of this class. The only other public
+       method can be a static method that the hooks call to set config values on an
+       env before the env is built.
+    4. Name and shape the private methods by the rules in ADR 0011, under
+       "Simulator classes".
     """
 
     @property
@@ -107,7 +75,7 @@ class Simulator(ABC):
         """The version range of each Python package that this simulator reads.
 
         Each key is a package name, and each value is a range in pip's syntax, such as
-        `">=3.2,<3.9"`. The ranges cover the versions that benchmark images have run.
+        `">=3.2,<3.9"`. A range covers the versions that benchmark images have run.
         The Service logs a warning for an installed version outside its range.
         """
 
@@ -124,7 +92,7 @@ class Simulator(ABC):
         """Read env ids `env_ids` from `env` until the next `attach`.
 
         `env` is an env that `on_load` returned. A single Service attaches each env
-        with its own id. A batched Service attaches its one env with every env id.
+        with its own id. A batched Service attaches its single env with all env ids.
         """
 
     @abstractmethod
@@ -150,9 +118,9 @@ class Simulator(ABC):
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
         """Env `env_id`'s scalars now: the same names, in the same order, at every step.
 
-        `ee_position` is the end effector's position from the observation, which
-        the distances to objects are measured from, or None when the observation
-        holds none.
+        `ee_position` is the end effector's position in the observation, or None if
+        the observation has no end effector pose. The distances to objects start at
+        this position.
         """
 
 
@@ -163,6 +131,7 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         IsaacSimSimulator,
     )
     from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig, MujocoSimulator
+    from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig, SapienSimulator
 
     simulator = config.simulator
     if simulator is None:
@@ -171,13 +140,14 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         return MujocoSimulator(simulator)
     if isinstance(simulator, BenchmarkIsaacSimSimulatorConfig):
         return IsaacSimSimulator(simulator, config)
+    if isinstance(simulator, BenchmarkSapienSimulatorConfig):
+        return SapienSimulator(simulator)
     return assert_never(simulator)
 
 
 __all__ = [
+    "BOX_VERTICES",
     "Simulator",
-    "follow",
+    "bounding_box_part",
     "make_simulator",
-    "orientation",
-    "rotation_matrix",
 ]

@@ -1,15 +1,15 @@
-"""Read and check a benchmark's config file.
+"""The config file of a benchmark, and the functions to read and check it.
 
-A benchmark version is a JSON config file plus a hooks file, `hooks.py`, next to it.
-The config has these values: where upstream comes from, which Service runs it, how
-many envs run at once, the run seed and step limit, the values that only the hooks
-read, and the spec. The spec is the same JSON as the `spec.json` that registration
-reads, and `--check` writes it unchanged. The hooks file has the upstream calls
-that differ between benchmarks.
+A benchmark version consists of a JSON config file and a hooks file, `hooks.py`, in
+the same directory. The config states where upstream comes from, which Service runs
+it, how many envs run at once, the run seed and the step limit, the values that only
+the hooks read, and the spec. The spec has the same JSON as the `spec.json` that
+registration reads, and `--check` writes it unchanged. The hooks file contains the
+upstream calls.
 
-A benchmark with several images, such as one for each suite, keeps the shared values
-in a base config. Each image's config gives the base's file in `extends` and lists only
-the values that it changes:
+A benchmark with several images, such as an image for each suite, can put the shared
+values in a base config. The config of each image lists the base config in `extends`
+and lists only the values that it changes:
 
     {"extends": "config-base.json", "run": {"max_steps": 520}}
 
@@ -17,9 +17,9 @@ the values that it changes:
 nested key replaces only that key, a list replaces the whole list, and `null`
 removes the key.
 
-`BenchmarkConfig` checks a config. `BenchmarkConfig.model_json_schema()` gives the
-same rules as a JSON Schema, which an editor can use to check a config as it is
-written.
+`BenchmarkConfig` checks a config. `BenchmarkConfig.model_json_schema()` returns the
+same rules as a JSON Schema. An editor can use the schema to check a config while a
+developer writes it.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorConfig
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
+from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig
 from manifold.core.benchmark import Benchmark
 from manifold.wire import ImageFormat
 
@@ -41,8 +42,8 @@ if TYPE_CHECKING:
 class _BenchmarkConfigBase(BaseModel):
     """A section of the config file, such as `upstream` or `run`.
 
-    A config spells out every value, so a section takes no key that it does not
-    list, and it cannot change once it is read.
+    A section rejects keys that it does not declare, because the config states every
+    value. A section cannot change after `load_config` reads it.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -72,9 +73,9 @@ class BenchmarkSingleServiceConfig(_BenchmarkConfigBase):
 
 
 class BenchmarkBatchedServiceConfig(_BenchmarkConfigBase):
-    """A Service with a simulator that holds all envs.
+    """A Service with a simulator that contains all envs.
 
-    `reset_together` is set for a simulator that can only restart all envs at once.
+    `reset_together` is true for a simulator that can reset its envs only all at once.
     """
 
     type: Literal["batched"]
@@ -90,12 +91,12 @@ class BenchmarkEnvConfig(_BenchmarkConfigBase):
 class BenchmarkRunConfig(_BenchmarkConfigBase):
     """The run seed, the step limit, the step period, and how images reach the policy.
 
-    `max_steps` is None when upstream ends episodes itself, or when the hooks return
-    each task's own limit in `ResetResult.max_steps`. `step_seconds` is the
-    simulated time between two steps, such as 0.05 for a 20 Hz controller;
-    the replay divides a change between steps by it to plot a velocity.
-    `image_format` is how each camera image is encoded on its way to the policy:
-    `raw`, `jpeg` or `png`.
+    `max_steps` is None when upstream ends episodes itself, or when the hooks return the
+    limit of each task in `ResetResult.max_steps`. `step_seconds` is the simulated time
+    between two steps, such as 0.05 for a 20 Hz controller. The replay recorder divides
+    a change between two steps by `step_seconds` to compute a velocity. `image_format`
+    is the encoding of each camera image on its way to the policy: `raw`, `jpeg` or
+    `png`.
     """
 
     seed: int
@@ -105,7 +106,7 @@ class BenchmarkRunConfig(_BenchmarkConfigBase):
 
 
 class BenchmarkReplayConfig(_BenchmarkConfigBase):
-    """The cameras that each replay frame holds, by the spec's names.
+    """The cameras that each replay frame contains, by their names in the spec.
 
     The live view streams `cameras[0]`.
     """
@@ -116,14 +117,14 @@ class BenchmarkReplayConfig(_BenchmarkConfigBase):
 class BenchmarkConfig(_BenchmarkConfigBase):
     """A benchmark's config file: its values, its Service, and its spec.
 
-    `simulator` is the simulator that the replay reads its scene and physics
-    from, or is None for a benchmark whose replay holds no scene. `spec` is the
-    SDK's `Benchmark`: its name, embodiment, sensors and instruction. A policy's
-    signature is checked against it.
+    `simulator` configures the simulator that the replay reads the scene and physics
+    from. It is None for a benchmark whose replay contains no scene. `spec` is the
+    SDK's `Benchmark`: its name, embodiment, sensors and instruction. Pairing checks a
+    policy's signature against `spec`.
 
-    `extras` holds the values that only the hooks read, such as a warm-up step count
-    from upstream's eval script, under upstream's names. A value that several
-    benchmarks share gets its own key instead.
+    `extras` contains the values that only the hooks read, under upstream's names. An
+    example is a count of warm-up steps from upstream's eval script. A value that
+    several benchmarks use gets its own key in the config.
     """
 
     benchmark: BenchmarkVersionConfig
@@ -137,7 +138,9 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     run: BenchmarkRunConfig
     simulator: (
         Annotated[
-            BenchmarkMujocoSimulatorConfig | BenchmarkIsaacSimSimulatorConfig,
+            BenchmarkMujocoSimulatorConfig
+            | BenchmarkIsaacSimSimulatorConfig
+            | BenchmarkSapienSimulatorConfig,
             Field(discriminator="name"),
         ]
         | None
@@ -148,7 +151,7 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     @model_validator(mode="before")
     @classmethod
     def _check_spec_keys(cls, data: Any) -> Any:
-        """Require every key of the spec, because `Benchmark` fills in some of them."""
+        """Require all keys of the spec, because `Benchmark` has defaults for some keys."""
         spec = data.get("spec") if isinstance(data, dict) else None
         if isinstance(spec, dict):
             keys = set(Benchmark.model_fields)
@@ -185,9 +188,10 @@ def _merge_patch(target: Any, patch: Any) -> Any:
 
 
 def _read_config(path: Path, extended_by: tuple[Path, ...]) -> dict[str, Any]:
-    """The config at `path` as JSON, with each base config that it extends applied.
+    """The JSON of the config at `path`, merged onto each base config that it extends.
 
-    `extended_by` lists the configs that extend this one, to find a loop.
+    `extended_by` lists the configs that extend this config. The function uses the list
+    to detect a loop.
     """
     resolved = path.resolve()
     if resolved in extended_by:
