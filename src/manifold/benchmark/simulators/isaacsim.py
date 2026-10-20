@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict
 
-from manifold.benchmark.simulators import Simulator, follow
+from manifold.benchmark.simulators import BOX_VERTICES, Simulator, bounding_box_part, follow
 from manifold.core.conventions import RotationFormat
 from manifold.core.embodiment import JointActionSpace
 from manifold.lib.rotation import from_matrix, to_matrix, wxyz_to_xyzw
@@ -62,11 +62,6 @@ _FILE_LIMIT = 16384
 
 # The colour of a part with no material colour and no display colour.
 _GREY = (0.7, 0.7, 0.7, 1.0)
-
-# A fixed body or an articulation's link whose prim has more vertices than this is
-# drawn as its bounding box. This keeps scanned set dressing out of every log. A
-# rigid object is never drawn as a box, because the task moves it.
-_BOX_VERTICES = 50_000
 
 # The shader inputs that hold a material's constant colour. A UsdPreviewSurface
 # names it `diffuseColor`, and Omniverse's MDL shaders use the other names.
@@ -241,9 +236,9 @@ class IsaacSimSimulator(Simulator):
             rotation = to_matrix(pose.orientation.tolist(), RotationFormat.QUATERNION)
             local = (world - np.asarray(pose.position, dtype=np.float64)) @ rotation
             found = self._parts(prim, shape, local, (UsdGeom, UsdShade))
-            if len(local) > _BOX_VERTICES and (tracked is None or tracked[0] != "root"):
+            if len(local) > BOX_VERTICES and (tracked is None or tracked[0] != "root"):
                 boxed.append(name)
-                found = [self._box(found)]
+                found = [bounding_box_part(found)]
             parts.setdefault(name, []).extend(found)
         if boxed or skipped:
             _logger.info(
@@ -863,19 +858,6 @@ class IsaacSimSimulator(Simulator):
         if not covered.all():
             parts.append(IsaacSimSimulator._part(vertices, triangles[~covered], fallback))
         return parts
-
-    @staticmethod
-    def _box(parts: list[ReplayScenePart]) -> ReplayScenePart:
-        """The parts of one prim as their bounding box, in the first part's colour."""
-        vertices = np.concatenate(
-            [np.asarray(part.mesh.vertices, dtype=np.float64) for part in parts]
-        )
-        low, high = vertices.min(axis=0), vertices.max(axis=0)
-        return ReplayScenePart(
-            mesh=ReplayMesh.box(np.maximum((high - low) / 2.0, 1e-4).tolist()),
-            position=((low + high) / 2.0).astype(np.float32),
-            color=parts[0].color,
-        )
 
 
 __all__ = [

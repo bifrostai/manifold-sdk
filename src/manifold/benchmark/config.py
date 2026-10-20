@@ -31,6 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorConfig
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
+from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig
 from manifold.core.benchmark import Benchmark
 from manifold.wire import ImageFormat
 
@@ -137,7 +138,9 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     run: BenchmarkRunConfig
     simulator: (
         Annotated[
-            BenchmarkMujocoSimulatorConfig | BenchmarkIsaacSimSimulatorConfig,
+            BenchmarkMujocoSimulatorConfig
+            | BenchmarkIsaacSimSimulatorConfig
+            | BenchmarkSapienSimulatorConfig,
             Field(discriminator="name"),
         ]
         | None

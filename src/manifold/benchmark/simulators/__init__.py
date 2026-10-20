@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from manifold.lib.compat import assert_never
+from manifold.replay import ReplayMesh, ReplayScenePart
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -22,6 +23,27 @@ if TYPE_CHECKING:
 
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.replay import ReplayPose, ReplaySceneBody, RerunScalar
+
+
+# A part of the scene with more vertices than this is drawn as its bounding box, such
+# as a scanned table or a camera's detailed housing. This keeps very large meshes out
+# of every replay log.
+BOX_VERTICES = 50_000
+
+
+def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
+    """The parts of one body as their bounding box, in the first part's colour.
+
+    Each part's vertices must already be in the body's frame, with the part posed
+    at the body's origin.
+    """
+    vertices = np.concatenate([np.asarray(part.mesh.vertices, dtype=np.float64) for part in parts])
+    low, high = vertices.min(axis=0), vertices.max(axis=0)
+    return ReplayScenePart(
+        mesh=ReplayMesh.box(np.maximum((high - low) / 2.0, 1e-4).tolist()),
+        position=((low + high) / 2.0).astype(np.float32),
+        color=parts[0].color,
+    )
 
 
 def follow(env: Any, path: str) -> Any:
@@ -109,6 +131,7 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         IsaacSimSimulator,
     )
     from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig, MujocoSimulator
+    from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig, SapienSimulator
 
     simulator = config.simulator
     if simulator is None:
@@ -117,11 +140,15 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         return MujocoSimulator(simulator)
     if isinstance(simulator, BenchmarkIsaacSimSimulatorConfig):
         return IsaacSimSimulator(simulator, config)
+    if isinstance(simulator, BenchmarkSapienSimulatorConfig):
+        return SapienSimulator(simulator)
     return assert_never(simulator)
 
 
 __all__ = [
+    "BOX_VERTICES",
     "Simulator",
+    "bounding_box_part",
     "follow",
     "make_simulator",
 ]
