@@ -10,10 +10,13 @@ from PIL import Image
 
 from manifold.replay import (
     REPLAY_LOG_VERSION,
+    TEXT_LINE_SEPARATOR,
     CameraPinhole,
     Channel,
     ChannelKind,
+    Grasped,
     Mesh,
+    Note,
     Pose,
     ReplayFrameType,
     ReplayLogWriter,
@@ -627,3 +630,110 @@ def test_a_header_camera_list_that_is_not_a_list_is_refused(tmp_path):
     )
     with pytest.raises(ValueError, match="'cameras' must be a list"):
         read_replay_log(path)
+
+
+def _annotated(tmp_path, annotate):
+    """A three-step log whose step 1 says "grasp", then whatever `annotate` adds."""
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_step({})
+        log.write_step({}, text={"instruction": "grasp"}, events=[Note(text="own")])
+        log.write_step({})
+        annotate(log)
+    return path
+
+
+def test_an_annotation_lands_on_the_step_it_names(tmp_path):
+    def annotate(log: ReplayLogWriter) -> None:
+        log.annotate(1, text={"instruction": ["subtask 2/3"]}, notes=[Note(text="subtask 2/3")])
+        log.annotate(0, text={"instruction": ["subtask 1/3", "started"]})
+
+    steps = read_replay_log(_annotated(tmp_path, annotate)).steps
+    assert steps[0].text == {"instruction": f"subtask 1/3{TEXT_LINE_SEPARATOR}started"}
+    assert steps[1].text == {"instruction": f"grasp{TEXT_LINE_SEPARATOR}subtask 2/3"}
+    assert list(steps[1].events) == [Note(text="own"), Note(text="subtask 2/3")]
+    assert steps[2].text == {}
+
+
+def test_a_step_not_yet_written_cannot_be_annotated(tmp_path):
+    with pytest.raises(ValueError, match="step 3 has not been written"):
+        _annotated(tmp_path, lambda log: log.annotate(3, notes=[Note(text="late")]))
+
+
+def test_an_annotation_names_only_declared_text_channels(tmp_path):
+    with pytest.raises(ValueError, match="'reward' is declared scalar"):
+        _annotated(tmp_path, lambda log: log.annotate(0, text={"reward": ["1"]}))
+
+
+def test_an_annotation_of_a_step_the_log_lacks_is_refused(tmp_path):
+    path = _annotated(tmp_path, lambda log: None)
+    with path.open("ab") as handle:
+        handle.write(
+            pack_stream_frame(
+                str(ReplayFrameType.ANNOTATIONS), {"step": 7, "text": {}, "notes": []}, seq=9
+            )
+        )
+    with pytest.raises(ValueError, match="names step 7"):
+        read_replay_log(path)
+
+
+def test_an_annotation_adds_only_notes(tmp_path):
+    path = _annotated(tmp_path, lambda log: None)
+    grasp = {"event_type": "grasped", "object": "bowl", "is_active": True}
+    with path.open("ab") as handle:
+        handle.write(
+            pack_stream_frame(
+                str(ReplayFrameType.ANNOTATIONS), {"step": 0, "text": {}, "notes": [grasp]}, seq=9
+            )
+        )
+    with pytest.raises(ValueError, match=r"for list\[Note\]"):
+        read_replay_log(path)
+
+
+def test_the_writer_adds_only_notes(tmp_path):
+    with pytest.raises(ValueError, match="adds only notes, not Grasped"):
+        _annotated(
+            tmp_path, lambda log: log.annotate(0, notes=[Grasped(object="bowl", is_active=True)])
+        )
+
+
+def test_an_annotation_line_is_one_line(tmp_path):
+    with pytest.raises(ValueError, match="not a string"):
+        _annotated(tmp_path, lambda log: log.annotate(0, text={"instruction": "grasp"}))
+    for line in ("a / b", "pick /", "/ place", "", " padded"):
+        with pytest.raises(ValueError, match="would not read back as one line"):
+            _annotated(
+                tmp_path, lambda log, line=line: log.annotate(0, text={"instruction": [line]})
+            )
+
+
+def test_a_step_is_an_int(tmp_path):
+    with pytest.raises(ValueError, match="a step is an int, not float"):
+        _annotated(tmp_path, lambda log: log.annotate(1.0, notes=[Note(text="late")]))
+
+
+def test_an_empty_annotation_writes_no_frame(tmp_path):
+    path = _annotated(tmp_path, lambda log: log.annotate(0))
+    assert read_replay_log(path).steps[0].text == {}
+
+
+def test_annotations_of_one_step_keep_their_order(tmp_path):
+    def annotate(log: ReplayLogWriter) -> None:
+        log.annotate(2, text={"instruction": ["first"]}, notes=[Note(text="first")])
+        log.annotate(2, text={"instruction": ["second"]}, notes=[Note(text="second")])
+
+    step = read_replay_log(_annotated(tmp_path, annotate)).steps[2]
+    assert step.text == {"instruction": f"first{TEXT_LINE_SEPARATOR}second"}
+    assert list(step.events) == [Note(text="first"), Note(text="second")]
+
+
+def test_steps_written_after_an_annotation_read_as_written(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_step({})
+        log.annotate(0, notes=[Note(text="early")])
+        log.write_step({}, text={"instruction": "later"})
+    steps = read_replay_log(path).steps
+    assert [step.index for step in steps] == [0, 1]
+    assert list(steps[0].events) == [Note(text="early")]
+    assert steps[1].text == {"instruction": "later"}

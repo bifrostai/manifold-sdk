@@ -11,9 +11,10 @@ The framing is the wire's: `pack_stream_frame` puts a four-byte big-endian lengt
 in front of a msgpack body, and arrays are encoded as the codec's `__ndarray__`
 and `__image__` wrappers (ADR 0005). Frames are appended as the episode runs - a
 header, then the scene, then one per step - so an episode killed halfway leaves a
-log readable to its last complete frame. A frame that is *whole* but will not
-decode is a different thing and raises, so a corrupted middle cannot pass for a
-short tail.
+log readable to its last complete frame. An annotations frame, appended after the
+step it names, adds notes and text lines to that step (ADR 0011). A frame that is
+*whole* but will not decode is a different thing and raises, so a corrupted middle
+cannot pass for a short tail.
 
 `REPLAY_LOG_VERSION` is the log's own contract version, separate
 from `BRIDGE_PROTOCOL_VERSION`: a wire bump leaves stored logs valid, and a
@@ -43,7 +44,7 @@ other.
 from __future__ import annotations
 
 import io
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -51,7 +52,7 @@ from PIL import Image
 from pydantic import TypeAdapter
 
 from manifold.lib.compat import StrEnum
-from manifold.replay.events import ManifoldEvent
+from manifold.replay.events import ManifoldEvent, Note
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -78,6 +79,10 @@ REPLAY_LOG_VERSION = 5
 # 5 requires a step's `events`; a 3 or a 4 reads as a log whose steps carry none.
 _READABLE_LOG_VERSIONS = frozenset({3, 4, 5})
 _FIRST_VERSION_WITH_EVENTS = 5
+
+# `read_replay_log` joins the lines that an annotation adds to a text channel's value
+# with this separator. The runner logs each line as a row of its own.
+TEXT_LINE_SEPARATOR = " / "
 
 # The suffix a log file carries, and the directory it goes in relative to the
 # output directory a benchmark is given. The runner globs for both.
@@ -109,6 +114,7 @@ class ReplayFrameType(StrEnum):
     HEADER = "header"  # the version and the channels every step declares.
     SCENE = "scene"  # the scene bodies and their geometry, once.
     STEP = "step"  # one per step: a pose per body, plus the declared channels.
+    ANNOTATIONS = "annotations"  # notes and text lines for a step already written.
 
 
 class ChannelKind(StrEnum):
@@ -387,6 +393,28 @@ class ReplayLog:
     cameras: tuple[CameraPinhole, ...] = ()
 
 
+def _annotation_lines(name: str, lines: Any) -> list[str]:
+    """The lines of an annotation for channel `name`, refusing what would not read back."""
+    if isinstance(lines, str):
+        raise ValueError(f"the lines for {name!r} must be a list of strings, not a string")  # noqa: TRY004
+    checked = list(lines)
+    for line in checked:
+        if not isinstance(line, str):
+            raise ValueError(f"a line for {name!r} must be a string, not {type(line).__name__}")  # noqa: TRY004
+        # A line that is empty, or that a join with its neighbours would split
+        # differently, would not read back as the same line.
+        edge = TEXT_LINE_SEPARATOR.strip()
+        if (
+            TEXT_LINE_SEPARATOR in line
+            or line != line.strip()
+            or not line
+            or line.startswith(edge)
+            or line.endswith(edge)
+        ):
+            raise ValueError(f"a line for {name!r} would not read back as one line: {line!r}")
+    return checked
+
+
 class ReplayLogWriter:
     """Appends one episode's replay log, frame by frame, as the episode runs.
 
@@ -559,6 +587,50 @@ class ReplayLogWriter:
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
 
+    def annotate(
+        self,
+        step: int,
+        *,
+        text: Mapping[str, Sequence[str]] | None = None,
+        notes: Sequence[Note] = (),
+    ) -> None:
+        """Add text lines and notes to a step already written.
+
+        This is for what a benchmark learns only later, such as a segment of the
+        episode whose start is known once the episode ends. The frame is appended.
+        `read_replay_log` adds its lines to the end of each channel's value on `step`,
+        joined with `TEXT_LINE_SEPARATOR`. It adds its notes after the step's own events.
+
+        The only events that this can add are notes. A grader reads neither notes nor
+        text. A reader without annotations frames skips the frame and reads the log
+        without the annotations, so a grader grades the log the same way.
+
+        Raises:
+            ValueError: If `step` has not been written, a name in `text` is not a
+                declared text channel, a line is not a string or holds
+                `TEXT_LINE_SEPARATOR`, or an event in `notes` is not a `Note`.
+        """
+        if not isinstance(step, int) or isinstance(step, bool):
+            raise ValueError(f"a step is an int, not {type(step).__name__}")  # noqa: TRY004
+        if not 0 <= step < self._steps:
+            raise ValueError(f"step {step} has not been written; {self._steps} have")
+        self._check_declared(text, ChannelKind.TEXT)
+        lines_by_channel = {
+            name: _annotation_lines(name, lines) for name, lines in (text or {}).items()
+        }
+        for note in notes:
+            if not isinstance(note, Note):
+                raise ValueError(f"an annotation adds only notes, not {type(note).__name__}")  # noqa: TRY004
+        dumped = [note.model_dump(mode="json") for note in notes]
+        # The rule that the reader applies, so a note written here reads back.
+        _NOTES.validate_python(dumped)
+        if not any(lines_by_channel.values()) and not dumped:
+            return
+        self._write(
+            ReplayFrameType.ANNOTATIONS,
+            {"step": step, "text": lines_by_channel, "notes": dumped},
+        )
+
     def _moved_extrinsics(self, extrinsics: Mapping[str, Pose]) -> dict[str, Pose]:
         """The subset whose stored form differs from the one last written.
 
@@ -633,6 +705,9 @@ def read_replay_log(path: Path) -> ReplayLog:
     reader gets carries a pose for every camera seen so far, so a consumer never
     walks backwards to find the last one written.
 
+    Each annotations frame is merged into the step that it names (see
+    `ReplayLogWriter.annotate`).
+
     Raises:
         ValueError: If the first frame is not a header, the version is one this
             reader does not accept, or a complete frame is malformed.
@@ -648,6 +723,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         bodies: tuple[SceneBody, ...] = ()
         steps: list[ReplayStep] = []
         carried: dict[str, Pose] = {}
+        annotations: list[dict[str, Any]] = []
         for frame in frames:
             kind = frame.get("type")
             payload = frame.get("payload", {})
@@ -660,6 +736,10 @@ def read_replay_log(path: Path) -> ReplayLog:
                 # step's extrinsics must not rewrite every later step's too.
                 step.extrinsics.update(carried)
                 steps.append(step)
+            elif kind == ReplayFrameType.ANNOTATIONS:
+                annotations.append(payload)
+    for payload in annotations:
+        _annotate(steps, payload)
     return ReplayLog(
         version=version,
         episode_idx=episode_idx,
@@ -963,6 +1043,9 @@ def _compressed_image(node: Any) -> EncodedImage | None:
 # Reads a step's stored events back into their classes, refusing a malformed one.
 _EVENTS = TypeAdapter(list[ManifoldEvent])
 
+# An annotations frame may add notes and no other event.
+_NOTES = TypeAdapter(list[Note])
+
 
 def _read_step(payload: dict[str, Any], version: int) -> ReplayStep:
     index = payload.get("index")
@@ -996,6 +1079,36 @@ def _read_step(payload: dict[str, Any], version: int) -> ReplayStep:
         text={name: str(value) for name, value in raw_text.items()},
         events=tuple(_EVENTS.validate_python(raw_events)),
     )
+
+
+def _annotate(steps: list[ReplayStep], payload: Any) -> None:
+    """Add an annotations frame's lines and notes to the step that it names."""
+    if not isinstance(payload, dict):
+        raise ValueError("an annotations frame's payload must be a dict")  # noqa: TRY004
+    index = payload.get("step")
+    if (
+        not isinstance(index, int)
+        or isinstance(index, bool)
+        or not 0 <= index < len(steps)
+        or steps[index].index != index
+    ):
+        raise ValueError(f"an annotations frame names step {index!r}, which the log lacks")
+    raw_text = payload.get("text", {})
+    raw_notes = payload.get("notes", [])
+    if not isinstance(raw_text, dict) or not isinstance(raw_notes, list):
+        raise ValueError("an annotations frame's text must be a dict and its notes a list")  # noqa: TRY004
+    step = steps[index]
+    text = dict(step.text)
+    for name, lines in raw_text.items():
+        if not isinstance(lines, list) or not all(isinstance(line, str) for line in lines):
+            raise ValueError(f"an annotations frame's lines for {name!r} must be strings")
+        if not lines:
+            continue
+        joined = [line for line in (text.get(name), *lines) if line]
+        if joined:
+            text[name] = TEXT_LINE_SEPARATOR.join(joined)
+    notes = tuple(_NOTES.validate_python(raw_notes))
+    steps[index] = replace(step, text=text, events=(*step.events, *notes))
 
 
 def _read_pose(node: Any) -> Pose:
@@ -1048,6 +1161,7 @@ __all__ = [
     "REPLAY_LOG_DIR",
     "REPLAY_LOG_SUFFIX",
     "REPLAY_LOG_VERSION",
+    "TEXT_LINE_SEPARATOR",
     "Channel",
     "ChannelKind",
     "EncodedImage",
