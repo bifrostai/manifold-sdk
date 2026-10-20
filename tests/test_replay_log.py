@@ -10,15 +10,15 @@ from PIL import Image
 
 from manifold.replay import (
     REPLAY_LOG_VERSION,
-    CameraPinhole,
-    Channel,
-    ChannelKind,
-    Mesh,
-    Pose,
+    ReplayCameraPinhole,
+    ReplayChannel,
+    ReplayChannelKind,
     ReplayFrameType,
     ReplayLogWriter,
-    SceneBody,
-    ScenePart,
+    ReplayMesh,
+    ReplayPose,
+    ReplaySceneBody,
+    ReplayScenePart,
     read_replay_log,
     replay_log_path,
 )
@@ -26,24 +26,26 @@ from manifold.sensors import CameraName
 from manifold.wire.bridge import pack_stream_frame
 
 CHANNELS = (
-    Channel(name=CameraName.AGENTVIEW, kind=ChannelKind.IMAGE),
-    Channel(name=CameraName.AGENTVIEW_DEPTH, kind=ChannelKind.IMAGE),
-    Channel(name="reward", kind=ChannelKind.SCALAR, group="Task"),
-    Channel(name="instruction", kind=ChannelKind.TEXT),
+    ReplayChannel(name=CameraName.AGENTVIEW, kind=ReplayChannelKind.IMAGE),
+    ReplayChannel(name=CameraName.AGENTVIEW_DEPTH, kind=ReplayChannelKind.IMAGE),
+    ReplayChannel(name="reward", kind=ReplayChannelKind.SCALAR, group="Task"),
+    ReplayChannel(name="instruction", kind=ReplayChannelKind.TEXT),
 )
 
 
-def _bodies() -> tuple[SceneBody, ...]:
+def _bodies() -> tuple[ReplaySceneBody, ...]:
     return (
-        SceneBody(
+        ReplaySceneBody(
             name="table",
-            parts=(ScenePart(mesh=Mesh.box([0.4, 0.6, 0.02]), color=(0.5, 0.4, 0.3, 1.0)),),
+            parts=(
+                ReplayScenePart(mesh=ReplayMesh.box([0.4, 0.6, 0.02]), color=(0.5, 0.4, 0.3, 1.0)),
+            ),
         ),
-        SceneBody(
+        ReplaySceneBody(
             name="robot0_link0",
             parts=(
-                ScenePart(
-                    mesh=Mesh(
+                ReplayScenePart(
+                    mesh=ReplayMesh(
                         vertices=np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.0, 0.1, 0.0]]),
                         faces=np.array([[0, 1, 2]]),
                     ),
@@ -54,8 +56,8 @@ def _bodies() -> tuple[SceneBody, ...]:
     )
 
 
-def _pose(x: float) -> Pose:
-    return Pose(position=np.array([x, 0.0, 0.1]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+def _pose(x: float) -> ReplayPose:
+    return ReplayPose(position=np.array([x, 0.0, 0.1]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
 
 
 def test_a_log_round_trips_its_header_scene_and_steps(tmp_path):
@@ -118,7 +120,7 @@ def test_the_writer_rejects_an_overview_group_without_a_scalar_channel(tmp_path)
 
 
 def test_an_overview_group_may_use_the_default_channel_group(tmp_path):
-    """`Channel.group` defaults to the first segment of the channel name.
+    """`ReplayChannel.group` defaults to the first segment of the channel name.
 
     An overview group may use that default.
     """
@@ -126,7 +128,7 @@ def test_an_overview_group_may_use_the_default_channel_group(tmp_path):
     with ReplayLogWriter(
         path,
         episode_idx=0,
-        channels=(Channel(name="joints/0", kind=ChannelKind.SCALAR),),
+        channels=(ReplayChannel(name="joints/0", kind=ReplayChannelKind.SCALAR),),
         image_format="raw",
         overview_group="joints",
     ) as log:
@@ -138,8 +140,8 @@ def test_an_overview_group_may_use_the_default_channel_group(tmp_path):
 def test_a_channel_row_round_trips(tmp_path):
     path = tmp_path / "episode.replay"
     channels = (
-        Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
-        Channel(name="ee_pos_x", kind=ChannelKind.SCALAR, group="Action", row=1),
+        ReplayChannel(name="gripper", kind=ReplayChannelKind.SCALAR, group="Action", row=0),
+        ReplayChannel(name="ee_pos_x", kind=ReplayChannelKind.SCALAR, group="Action", row=1),
     )
     with ReplayLogWriter(path, episode_idx=0, channels=channels, image_format="raw") as log:
         log.write_scene(())
@@ -161,8 +163,8 @@ def test_the_writer_rejects_partially_numbered_channel_rows(tmp_path):
             tmp_path / "episode.replay",
             episode_idx=0,
             channels=(
-                Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
-                Channel(name="ee_pos_x", kind=ChannelKind.SCALAR, group="Action"),
+                ReplayChannel(name="gripper", kind=ReplayChannelKind.SCALAR, group="Action", row=0),
+                ReplayChannel(name="ee_pos_x", kind=ReplayChannelKind.SCALAR, group="Action"),
             ),
             image_format="raw",
         )
@@ -173,8 +175,8 @@ def test_one_group_may_number_its_rows_while_another_does_not(tmp_path):
     leave the rest to the reader."""
     path = tmp_path / "episode.replay"
     channels = (
-        Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=0),
-        Channel(name="success", kind=ChannelKind.SCALAR, group="Task"),
+        ReplayChannel(name="gripper", kind=ReplayChannelKind.SCALAR, group="Action", row=0),
+        ReplayChannel(name="success", kind=ReplayChannelKind.SCALAR, group="Task"),
     )
     with ReplayLogWriter(path, episode_idx=0, channels=channels, image_format="raw") as log:
         log.write_scene(())
@@ -187,7 +189,11 @@ def test_a_negative_row_is_refused(tmp_path):
         ReplayLogWriter(
             tmp_path / "episode.replay",
             episode_idx=0,
-            channels=(Channel(name="gripper", kind=ChannelKind.SCALAR, group="Action", row=-1),),
+            channels=(
+                ReplayChannel(
+                    name="gripper", kind=ReplayChannelKind.SCALAR, group="Action", row=-1
+                ),
+            ),
             image_format="raw",
         )
 
@@ -204,7 +210,7 @@ def test_a_boxs_geometry_survives_the_float16_vertices(tmp_path):
 
 
 def test_a_tessellated_cylinder_is_closed_and_bounded():
-    mesh = Mesh.cylinder(radius=0.05, half_length=0.2, segments=8)
+    mesh = ReplayMesh.cylinder(radius=0.05, half_length=0.2, segments=8)
 
     assert mesh.faces.shape == (32, 3)
     assert mesh.faces.max() == len(mesh.vertices) - 1
@@ -439,7 +445,9 @@ def test_a_decoded_colour_frame_is_the_callers_to_mutate(tmp_path, image_format)
 
 def test_two_scene_bodies_may_not_share_a_name(tmp_path):
     path = tmp_path / "episode.replay"
-    body = SceneBody(name="table", parts=(ScenePart(mesh=Mesh.box([0.1, 0.1, 0.1])),))
+    body = ReplaySceneBody(
+        name="table", parts=(ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+    )
     with (
         ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log,
         pytest.raises(ValueError, match="share a name"),
@@ -449,11 +457,11 @@ def test_two_scene_bodies_may_not_share_a_name(tmp_path):
 
 def test_a_frame_no_reader_would_accept_is_refused_at_write(tmp_path):
     path = tmp_path / "episode.replay"
-    huge = SceneBody(
+    huge = ReplaySceneBody(
         name="huge",
         parts=(
-            ScenePart(
-                mesh=Mesh(
+            ReplayScenePart(
+                mesh=ReplayMesh(
                     vertices=np.zeros((12_000_000, 3), dtype=np.float32),
                     faces=np.zeros((1, 3), dtype=np.uint32),
                 ),
@@ -481,17 +489,17 @@ def test_a_log_goes_beside_the_rollup(tmp_path):
 # --- camera calibration and extrinsics (ADR 0008) -----------------------------
 
 _CAMERAS = (
-    CameraPinhole(
+    ReplayCameraPinhole(
         name=CameraName.AGENTVIEW, fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256
     ),
-    CameraPinhole(
+    ReplayCameraPinhole(
         name=CameraName.WRIST, fx=101.4, fy=101.4, cx=128.0, cy=128.0, width=256, height=256
     ),
 )
 
 
-def _extrinsic(z: float) -> Pose:
-    return Pose(position=np.array([0.5, 0.0, z]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+def _extrinsic(z: float) -> ReplayPose:
+    return ReplayPose(position=np.array([0.5, 0.0, z]), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
 
 
 def test_header_camera_intrinsics_round_trip(tmp_path):

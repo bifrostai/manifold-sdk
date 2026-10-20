@@ -12,8 +12,6 @@ from manifold.replay import (
     Above,
     Behind,
     CenteredOn,
-    Channel,
-    ChannelKind,
     Closed,
     EpisodeEnded,
     EpisodeStarted,
@@ -36,9 +34,11 @@ from manifold.replay import (
     On,
     Open,
     Outside,
-    Pose,
+    ReplayChannel,
+    ReplayChannelKind,
     ReplayFrameType,
     ReplayLogWriter,
+    ReplayPose,
     RightOf,
     Severity,
     Stacked,
@@ -53,7 +53,7 @@ from manifold.wire.bridge import pack_stream_frame, read_stream_frame
 if TYPE_CHECKING:
     from pathlib import Path
 
-CHANNELS = (Channel(name="reward", kind=ChannelKind.SCALAR),)
+CHANNELS = (ReplayChannel(name="reward", kind=ReplayChannelKind.SCALAR),)
 
 EVERY_TYPE = (
     EpisodeStarted(
@@ -90,8 +90,8 @@ EVERY_TYPE = (
 )
 
 
-def _pose() -> Pose:
-    return Pose(position=np.zeros(3), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
+def _pose() -> ReplayPose:
+    return ReplayPose(position=np.zeros(3), orientation=np.array([0.0, 0.0, 0.0, 1.0]))
 
 
 def _log_with_step(tmp_path: Path, events: list) -> Path:
