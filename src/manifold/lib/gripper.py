@@ -55,9 +55,31 @@ def from_openness(fraction: float, fmt: GripperFormat) -> float:
     return closed + fraction * (opened - closed)
 
 
+def is_gripper_shut(value: float, fmt: GripperFormat) -> bool | None:
+    """Whether `value` commands the gripper shut under `fmt`, or None when it commands neither.
+
+    The command is measured from -1 open to +1 shut. A continuous command is shut
+    above +0.5, open below -0.5, and neither in between. A discrete command is shut
+    above 0, and open otherwise.
+    """
+    command = 1 - 2 * openness(value, fmt)
+    if fmt in _DISCRETE:
+        return command > 0
+    if command > 0.5:
+        return True
+    if command < -0.5:
+        return False
+    return None
+
+
 def remap(value: float, source: GripperFormat, target: GripperFormat) -> float:
     """Convert one gripper value from the `source` encoding to the `target`."""
     return from_openness(openness(value, source), target)
 
 
-__all__ = ["from_openness", "openness", "remap"]
+__all__ = [
+    "from_openness",
+    "is_gripper_shut",
+    "openness",
+    "remap",
+]
