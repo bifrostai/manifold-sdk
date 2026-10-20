@@ -51,7 +51,7 @@ from PIL import Image
 from pydantic import TypeAdapter
 
 from manifold.lib.compat import StrEnum
-from manifold.replay.events import Failure, FailureType, ManifoldEvent
+from manifold.replay.events import FailureEvent, FailureType, ManifoldEvent
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -386,7 +386,7 @@ class ReplayLog:
     # here: a pose is useful on its own, intrinsics are what a projection needs.
     cameras: tuple[ReplayCameraPinhole, ...] = ()
     # The failure types that the benchmark detects. For a type listed
-    # here, a step with no `Failure` of that type had none; every other
+    # here, a step with no `FailureEvent` of that type had none; every other
     # type is the grader's to work out.
     failure_types: tuple[FailureType, ...] = ()
 
@@ -547,11 +547,11 @@ class ReplayLogWriter:
         Raises:
             ValueError: If a value is given for a name the header did not declare,
                 or for a name it declared as another kind, if an image is neither a
-                colour nor a depth frame, or if a `Failure` has a type that the
+                colour nor a depth frame, or if a `FailureEvent` has a type that the
                 header does not list.
         """
         for event in events:
-            if isinstance(event, Failure) and event.failure_type not in self._failure_types:
+            if isinstance(event, FailureEvent) and event.failure_type not in self._failure_types:
                 raise ValueError(
                     f"failure type {str(event.failure_type)!r} is not listed in the header"
                 )
@@ -912,9 +912,9 @@ def _read_failure_types(payload: dict[str, Any]) -> tuple[FailureType, ...]:
 def _check_failures_listed(
     events: tuple[ManifoldEvent, ...], failure_types: tuple[FailureType, ...]
 ) -> None:
-    """Refuse a stored `Failure` whose type the header does not list, as the writer does."""
+    """Refuse a stored `FailureEvent` whose type the header does not list, as the writer does."""
     for event in events:
-        if isinstance(event, Failure) and event.failure_type not in failure_types:
+        if isinstance(event, FailureEvent) and event.failure_type not in failure_types:
             raise ValueError(
                 f"failure type {str(event.failure_type)!r} is not listed in the header"
             )
