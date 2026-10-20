@@ -5,7 +5,7 @@ A log is one episode's worth of what a rendered replay needs and no policy reads
 and text the benchmark chose to publish, and the Manifold events of each step. It is
 written to the results directory the runner already mounts, never onto the bridge
 (ADR 0003), and the runner turns it into a Rerun recording. `replay_log_path`
-returns the path, beside the rollup `write_rollup` writes.
+returns the path.
 
 The framing is the wire's: `pack_stream_frame` puts a four-byte big-endian length
 in front of a msgpack body, and arrays are encoded as the codec's `__ndarray__`
@@ -637,9 +637,8 @@ class ReplayLogWriter:
 def replay_log_path(output_dir: Path, episode_idx: int) -> Path:
     """Where episode `episode_idx`'s log goes under a benchmark's output directory.
 
-    Beside the rollup `write_rollup` writes, in `<output-dir>/results/`: that is
-    the one directory the runner scans, so a log written anywhere else is a log
-    nothing collects. The parent is created.
+    The path is in `<output-dir>/results/`, and this function creates that
+    directory.
     """
     directory = output_dir / REPLAY_LOG_DIR
     directory.mkdir(parents=True, exist_ok=True)

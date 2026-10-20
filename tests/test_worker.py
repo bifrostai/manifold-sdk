@@ -2,27 +2,19 @@
 
 from __future__ import annotations
 
-import contextlib
+import socket
 import threading
 from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
-from manifold.core.values import Observation
-from manifold.recipes import (
-    EpisodeRecord,
-    StepResult,
-    WorkerEpisode,
-    WorkerSession,
-    run_worker,
-    serving,
-    worker,
-)
-from manifold.wire import FrameChannel, FrameType, bridge
-from tests.test_serving import _fake_benchmark, _FakeSocket
+from manifold.benchmark import WorkerEpisodeRecord, WorkerSession, WorkerTask
+from manifold.benchmark import _worker as worker
+from manifold.wire import FrameChannel
 
 
 class _TaskServer:
@@ -76,283 +68,19 @@ class _TaskServer:
         }
 
 
-class _Recorder:
-    def __init__(self, task, events, fail_close):
-        self.task, self.events, self.fail_close = task, events, fail_close
-
-    def begin(self, episode_id):
-        self.events.append(("begin", episode_id))
-
-    def record(self, action, *, success, done):
-        pass
-
-    def end(self):
-        self.events.append("close")
-        if self.fail_close:
-            raise OSError("replay close failed")
-        self.task.output_dir.mkdir(parents=True)
-        (self.task.output_dir / "replay.mfr").write_bytes(b"closed")
-
-
-class _Policy:
-    def __init__(self):
-        self.sent = []
-        self.width = 0
-
-    def send(self, kind, payload):
-        from manifold.core.benchmark import Benchmark
-
-        self.sent.append(kind)
-        if kind == FrameType.HELLO:
-            # Answer in the width the benchmark declares, as a real policy would.
-            benchmark = Benchmark.model_validate(payload["benchmark"])
-            self.width = benchmark.embodiment.action.expected_length()
-
-    def recv(self):
-        from manifold.core.values import Action
-
-        if self.sent[-1] == FrameType.HELLO:
-            return {"type": FrameType.READY, "payload": {}}
-        action = Action.from_array([0.0] * self.width)
-        return {"type": FrameType.ACTION, "payload": bridge.encode_action(action)}
-
-
-def _execute(
-    monkeypatch,
-    tmp_path,
-    *,
-    ack="accepted",
-    wait=False,
-    fail_close=False,
-    fail_task=False,
-    tasks: Sequence[list[int]] = ([3], [7]),
-    **options: Any,
-):
-    events = []
-    task_server = _TaskServer(tmp_path, events, ack=ack, wait=wait, tasks=tasks)
-    policy = _Policy()
-    task_server_socket = _FakeSocket()
-    connections = []
-
-    def policy_socket(*args):
-        connections.append("policy")
-        return _FakeSocket()
-
-    monkeypatch.setattr(worker.socket, "create_connection", lambda address: task_server_socket)
-    monkeypatch.setattr(serving.socket, "socket", policy_socket)
-    monkeypatch.setattr(
-        FrameChannel,
-        "from_socket",
-        lambda sock, **kwargs: task_server if sock is task_server_socket else policy,
-    )
-
-    def reset(task):
-        events.append(("reset", task.episode_indices[0], task.task_config))
-        return Observation(instruction=f"task {task.task_id}")
-
-    def step(action):
-        if fail_task:
-            raise RuntimeError("task failed")
-        return StepResult(Observation(), success=True, done=True)
-
-    def run():
-        return run_worker(
-            _fake_benchmark(),
-            reset,
-            step,
-            server="policy:9000",
-            task_server_address="task-server:9001",
-            worker_id="worker-1",
-            episodes=[WorkerEpisode(i, str(i), {"task_id": i}) for i in [3, 7]],
-            max_steps=1,
-            recorder=lambda task: _Recorder(task, events, fail_close),
-            artifacts=lambda task: [task.output_dir / "replay.mfr"],
-            **options,
-        )
-
-    return run, task_server, policy, connections, events
-
-
-def test_worker_keeps_policy_connection_and_closes_replay_before_task_server_acceptance(
-    monkeypatch, tmp_path
-):
-    run, task_server, policy, connections, events = _execute(monkeypatch, tmp_path, wait=True)
-    result = run()
-    assert connections == ["policy"]
-    assert [r.episode_idx for r in result.records] == [3, 7]
-    assert policy.sent.count(FrameType.HELLO) == 1
-    assert policy.sent.count(FrameType.RESET) == 2
-    assert policy.sent[-1] == FrameType.BYE
-    completions = [payload for kind, payload in task_server.sent if kind == "complete"]
-    assert [p["results"][0]["task_id"] for p in completions] == ["3", "7"]
-    assert [p["artifacts"][0]["path"] for p in completions] == ["replay.mfr", "replay.mfr"]
-    assert events.index("close") < events.index("complete")
-    first_complete = events.index("complete")
-    assert events[first_complete + 1] == "claim"
-    assert task_server.sent[0][1]["episodes"][0]["episode_idx"] == 3
-
-
-def test_worker_publishes_each_claimed_task_to_the_live_view(monkeypatch, tmp_path):
-    run, _, _, _, _ = _execute(
-        monkeypatch, tmp_path, live_view_server="127.0.0.1:9002", live_view_camera="scene"
-    )
-    opened: list[tuple[str | None, str | None]] = []
-    published: list[tuple[int, int, str | None]] = []
-
-    class _Publisher:
-        def publish(self, observation, *, episode_idx, step, task, task_id):
-            published.append((episode_idx, step, task_id))
-
-    def live_view_context(benchmark, server, camera_name):
-        opened.append((server, camera_name))
-        return contextlib.nullcontext(_Publisher())
-
-    monkeypatch.setattr(serving, "_live_view_context", live_view_context)
-
-    run()
-
-    assert opened == [("127.0.0.1:9002", "scene")]
-    assert published == [(3, 0, "3"), (3, 1, "3"), (7, 0, "7"), (7, 1, "7")]
-
-
-@pytest.mark.parametrize("fail_close,fail_task", [(True, False), (False, True)])
-def test_worker_does_not_submit_or_retry_after_task_or_replay_failure(
-    monkeypatch, tmp_path, fail_close, fail_task
-):
-    run, task_server, _, _, events = _execute(
-        monkeypatch, tmp_path, fail_close=fail_close, fail_task=fail_task
-    )
-    with pytest.raises((OSError, RuntimeError)):
-        run()
-    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
-    assert events.count("close") == 1
-
-
-def test_worker_does_not_claim_without_acceptance(monkeypatch, tmp_path):
-    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path, ack="done")
-    with pytest.raises(ValueError, match="expected task server accepted"):
-        run()
-    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
-
-
-def test_worker_rejects_stale_acceptance(monkeypatch, tmp_path):
-    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path)
-    receive = task_server.recv
-
-    def stale_ack():
-        reply = receive()
-        if reply["type"] == "accepted":
-            reply["payload"]["attempt_id"] = "expired-attempt"
-        return reply
-
-    monkeypatch.setattr(task_server, "recv", stale_ack)
-    with pytest.raises(ValueError, match="different item or attempt"):
-        run()
-    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
-
-
-def test_worker_rejects_artifact_outside_attempt_directory(monkeypatch, tmp_path):
-    run, task_server, _, _, _ = _execute(monkeypatch, tmp_path)
-    outside = tmp_path / "another-attempt.mfr"
-    outside.write_bytes(b"other attempt")
-    original_end = _Recorder.end
-
-    def close_with_symlink(self):
-        original_end(self)
-        replay = self.task.output_dir / "replay.mfr"
-        replay.unlink()
-        replay.symlink_to(outside)
-
-    monkeypatch.setattr(_Recorder, "end", close_with_symlink)
-    with pytest.raises(ValueError):
-        run()
-    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
-
-
-def test_worker_refuses_a_task_with_more_than_one_episode(monkeypatch, tmp_path):
-    run, task_server, _, _, events = _execute(monkeypatch, tmp_path, tasks=[[3, 4]])
-    with pytest.raises(ValueError, match="one episode per task, got 2"):
-        run()
-    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
-    assert "close" not in events
-
-
-def test_worker_uses_length_prefixed_task_server_frames(monkeypatch, tmp_path):
-    import socket
-
-    client, server = socket.socketpair()
-    server_channel = FrameChannel.from_socket(server)
-    from_socket = FrameChannel.from_socket
-    policy = _Policy()
-    events = []
-    task_server = _TaskServer(tmp_path, events)
-    errors = []
-
-    def serve():
-        try:
-            with server:
-                while True:
-                    frame = server_channel.recv()
-                    if frame is None:
-                        return
-                    task_server.send(frame["type"], frame["payload"])
-                    reply = task_server.recv()
-                    if frame["type"] == "complete":
-                        task = frame["payload"]
-                        artifact = task["artifacts"][0]
-                        path = tmp_path / task["attempt_id"] / artifact["path"]
-                        assert path.read_bytes() == b"closed"
-                    server_channel.send(reply["type"], reply["payload"])
-                    if reply["type"] == "done":
-                        return
-        except BaseException as error:
-            errors.append(error)
-
-    monkeypatch.setattr(worker.socket, "create_connection", lambda address: client)
-    monkeypatch.setattr(serving.socket, "socket", lambda *args: _FakeSocket())
-    monkeypatch.setattr(
-        FrameChannel,
-        "from_socket",
-        lambda sock, **kwargs: from_socket(sock, **kwargs) if sock is client else policy,
-    )
-    thread = threading.Thread(target=serve, daemon=True)
-    thread.start()
-    try:
-        result = run_worker(
-            _fake_benchmark(),
-            lambda task: Observation(instruction="task"),
-            lambda action: StepResult(Observation(), success=True, done=True),
-            server="policy:9000",
-            task_server_address="task-server:9001",
-            worker_id="worker-1",
-            episodes=[WorkerEpisode(i, str(i), {"task_id": i}) for i in [3, 7]],
-            max_steps=1,
-            recorder=lambda task: _Recorder(task, events, False),
-            artifacts=lambda task: [task.output_dir / "replay.mfr"],
-        )
-    finally:
-        client.close()
-        thread.join(timeout=5)
-    assert not thread.is_alive()
-    assert errors == []
-    assert [record.task_id for record in result.records] == ["3", "7"]
-
-
 def _open_session(monkeypatch, task_server):
-    task_server_socket = _FakeSocket()
+    task_server_socket = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(worker.socket, "create_connection", lambda address: task_server_socket)
     monkeypatch.setattr(FrameChannel, "from_socket", lambda sock, **kwargs: task_server)
     return WorkerSession(
         "task-server:9001",
         worker_id="worker-1",
-        benchmark_name="fake",
-        episodes=[WorkerEpisode(i, "3", {"task_id": 3}) for i in [3, 4, 5]],
     )
 
 
 def _record(episode_idx):
     now = datetime.now(timezone.utc)
-    return EpisodeRecord(
+    return WorkerEpisodeRecord(
         episode_idx=episode_idx,
         task_name="task 3",
         success=True,
@@ -361,6 +89,7 @@ def _record(episode_idx):
         started_at=now,
         ended_at=now,
         task_id="3",
+        attributes={},
     )
 
 
@@ -416,3 +145,111 @@ def test_session_claim_returns_none_on_done(monkeypatch, tmp_path):
     task_server = _TaskServer(tmp_path, [], tasks=[])
     with _open_session(monkeypatch, task_server) as session:
         assert session.claim() is None
+
+
+def _replays(task: WorkerTask) -> dict[int, list[Path]]:
+    """A closed replay file for each episode of `task`, under its output directory."""
+    task.output_dir.mkdir(parents=True)
+    replays = {}
+    for idx in task.episode_indices:
+        replay = task.output_dir / f"episode-{idx}.mfr"
+        replay.write_bytes(b"closed")
+        replays[idx] = [replay]
+    return replays
+
+
+def _claim_and_complete(session: WorkerSession) -> None:
+    task = session.claim()
+    assert task is not None
+    session.complete(task, [_record(idx) for idx in task.episode_indices], _replays(task))
+
+
+def test_session_refuses_a_reply_other_than_accepted(monkeypatch, tmp_path):
+    task_server = _TaskServer(tmp_path, [], ack="done")
+    with (
+        _open_session(monkeypatch, task_server) as session,
+        pytest.raises(ValueError, match="expected task server accepted"),
+    ):
+        _claim_and_complete(session)
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
+
+
+def test_session_refuses_an_acceptance_of_another_attempt(monkeypatch, tmp_path):
+    task_server = _TaskServer(tmp_path, [])
+    receive = task_server.recv
+
+    def stale_ack():
+        reply = receive()
+        if reply["type"] == "accepted":
+            reply["payload"]["attempt_id"] = "expired-attempt"
+        return reply
+
+    monkeypatch.setattr(task_server, "recv", stale_ack)
+    with (
+        _open_session(monkeypatch, task_server) as session,
+        pytest.raises(ValueError, match="different item or attempt"),
+    ):
+        _claim_and_complete(session)
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim", "complete"]
+
+
+def test_session_refuses_a_replay_outside_the_attempt_directory(monkeypatch, tmp_path):
+    task_server = _TaskServer(tmp_path, [])
+    outside = tmp_path / "another-attempt.mfr"
+    outside.write_bytes(b"other attempt")
+    with _open_session(monkeypatch, task_server) as session:
+        task = session.claim()
+        assert task is not None
+        replays = _replays(task)
+        replay = replays[3][0]
+        replay.unlink()
+        replay.symlink_to(outside)
+        with pytest.raises(ValueError):
+            session.complete(task, [_record(3)], replays)
+    assert [kind for kind, _ in task_server.sent] == ["hello", "claim"]
+
+
+def test_session_uses_length_prefixed_task_server_frames(monkeypatch, tmp_path):
+    client, server = socket.socketpair()
+    server_channel = FrameChannel.from_socket(server)
+    task_server = _TaskServer(tmp_path, [])
+    errors = []
+
+    def serve():
+        try:
+            with server:
+                while True:
+                    frame = server_channel.recv()
+                    if frame is None:
+                        return
+                    task_server.send(frame["type"], frame["payload"])
+                    reply = task_server.recv()
+                    if frame["type"] == "complete":
+                        task = frame["payload"]
+                        artifact = task["artifacts"][0]
+                        path = tmp_path / task["attempt_id"] / artifact["path"]
+                        assert path.read_bytes() == b"closed"
+                    server_channel.send(reply["type"], reply["payload"])
+                    if reply["type"] == "done":
+                        return
+        except BaseException as error:
+            errors.append(error)
+
+    monkeypatch.setattr(worker.socket, "create_connection", lambda address: client)
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        with WorkerSession(
+            "task-server:9001",
+            worker_id="worker-1",
+        ) as session:
+            _claim_and_complete(session)
+            _claim_and_complete(session)
+            assert session.claim() is None
+    finally:
+        client.close()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert errors == []
+    completions = [payload for kind, payload in task_server.sent if kind == "complete"]
+    assert [p["results"][0]["episode_idx"] for p in completions] == [3, 7]
