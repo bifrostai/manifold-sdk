@@ -1,7 +1,8 @@
 """The replay log that a benchmark writes for each episode.
 
 `log.py` owns the format, the writer a benchmark uses, and a reader. `events.py`
-holds the Manifold events a step carries. Nothing here touches the bridge - a replay
+holds the Manifold events a step carries. `rerun.py` holds how the Rerun viewer
+shows a replay: its pages of charts and its events panel. Nothing here touches the bridge - a replay
 is never part of the stream the two sides exchange (ADR 0003).
 """
 
@@ -61,11 +62,23 @@ from manifold.replay.log import (
     read_replay_log,
     replay_log_path,
 )
+from manifold.replay.rerun import (
+    RERUN_ARM_ROW,
+    RERUN_GRIPPER_ROW,
+    RERUN_ROTATION_ROW,
+    RerunScalar,
+    RerunTab,
+    rerun_panel_line,
+    rerun_scalars,
+)
 
 __all__ = [
     "REPLAY_LOG_DIR",
     "REPLAY_LOG_SUFFIX",
     "REPLAY_LOG_VERSION",
+    "RERUN_ARM_ROW",
+    "RERUN_GRIPPER_ROW",
+    "RERUN_ROTATION_ROW",
     "AboveEvent",
     "BehindEvent",
     "CenteredOnEvent",
@@ -105,6 +118,8 @@ __all__ = [
     "ReplaySceneBody",
     "ReplayScenePart",
     "ReplayStep",
+    "RerunScalar",
+    "RerunTab",
     "RightOfEvent",
     "Severity",
     "StackOrder",
@@ -114,4 +129,6 @@ __all__ = [
     "UprightEvent",
     "read_replay_log",
     "replay_log_path",
+    "rerun_panel_line",
+    "rerun_scalars",
 ]
