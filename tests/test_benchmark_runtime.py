@@ -74,6 +74,7 @@ def _raw_config(service: dict[str, Any], num_envs: int = 1, max_steps: int | Non
         "extras": {},
         "env": {"num_envs": num_envs},
         "run": {"seed": 0, "max_steps": max_steps, "step_seconds": 0.05, "image_format": "jpeg"},
+        "simulator": None,
         "replay": {"cameras": ["agentview"]},
         "spec": _SPEC,
     }

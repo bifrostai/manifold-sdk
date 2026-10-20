@@ -23,6 +23,7 @@ from manifold.benchmark.config import (
     BenchmarkSingleServiceConfig,
 )
 from manifold.benchmark.hooks import BatchedServiceHooks, SingleServiceHooks
+from manifold.benchmark.simulators import make_simulator
 from manifold.lib.compat import assert_never
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ if TYPE_CHECKING:
 
     from manifold.benchmark._worker import WorkerTask
     from manifold.benchmark.config import BenchmarkConfig
-    from manifold.benchmark.simulators import Simulator
     from manifold.core.values import Action, Observation
     from manifold.replay import ManifoldEvent
 
@@ -96,8 +96,8 @@ class Service(ABC):
     ) -> None:
         self.config = config
         self.hooks = hooks
-        # Reads the replay's scene and physics, or is None for a benchmark without one.
-        self.simulator: Simulator | None = None
+        # Reads the replay's scene and physics, or is None for a config without a simulator.
+        self.simulator = make_simulator(config)
         self.num_envs = config.env.num_envs
         self.reset_together = (
             isinstance(config.service, BenchmarkBatchedServiceConfig)
