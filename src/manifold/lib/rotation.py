@@ -18,8 +18,12 @@ from collections.abc import Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from manifold.core.conventions import RotationFormat
+from manifold.core.conventions import CameraAxes, RotationFormat
 from manifold.lib.compat import assert_never
+
+# A camera's OpenGL axes and its OpenCV axes differ by a half turn about its x axis,
+# which keeps x and flips y and z. The flip is its own inverse.
+_FLIP_Y_AND_Z = np.diag([1.0, -1.0, -1.0])
 
 
 def convert(values: Sequence[float], source: RotationFormat, target: RotationFormat) -> list[float]:
@@ -172,8 +176,35 @@ def six_d_from_matrix(matrix: np.ndarray) -> list[float]:
     return matrix[:, 0].tolist() + matrix[:, 1].tolist()
 
 
+def wxyz_to_xyzw(quaternion: Sequence[float] | np.ndarray) -> np.ndarray:
+    """A scalar-first `(w, x, y, z)` quaternion as scalar-last `(x, y, z, w)`.
+
+    MuJoCo and Isaac Lab before its 1.0 release store quaternions scalar-first, and
+    `RotationFormat.QUATERNION` is scalar-last.
+    """
+    values = np.asarray(quaternion, dtype=np.float64).reshape(-1)[:4]
+    return values[[1, 2, 3, 0]]
+
+
+def xyzw_to_wxyz(quaternion: Sequence[float] | np.ndarray) -> np.ndarray:
+    """A scalar-last `(x, y, z, w)` quaternion as scalar-first `(w, x, y, z)`."""
+    values = np.asarray(quaternion, dtype=np.float64).reshape(-1)[:4]
+    return values[[3, 0, 1, 2]]
+
+
+def convert_camera_axes(rotation: np.ndarray, source: CameraAxes, target: CameraAxes) -> np.ndarray:
+    """A camera's 3x3 rotation, with its own axes changed from `source` to `target`.
+
+    The rotation is camera-to-world. MuJoCo's camera bodies use OpenGL axes, and a
+    replay log stores camera poses in OpenCV axes.
+    """
+    matrix = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    return matrix if source is target else matrix @ _FLIP_Y_AND_Z
+
+
 __all__ = [
     "convert",
+    "convert_camera_axes",
     "from_matrix",
     "from_rotation",
     "geodesic_angle",
@@ -182,4 +213,6 @@ __all__ = [
     "six_d_from_matrix",
     "to_matrix",
     "to_rotation",
+    "wxyz_to_xyzw",
+    "xyzw_to_wxyz",
 ]
