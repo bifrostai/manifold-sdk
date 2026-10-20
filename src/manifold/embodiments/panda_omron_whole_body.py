@@ -1,67 +1,68 @@
-"""Mobile Franka (PandaOmron) driven as a whole body: arm, gripper and base.
+"""Mobile Franka (PandaOmron) driven as a whole body: arm, base, torso and mode.
 
-A Franka Panda arm on an Omron holonomic base under robosuite/MuJoCo. The 12-D
-action drives the whole body:
+A Franka Panda arm on an Omron holonomic base with a torso lift, under robosuite's
+HybridMobileBase controller. An action is 12 floats, read in this order:
 
-    [ EE pos delta (3) | EE rot delta (3, axis-angle) | gripper (1)
-      | base motion (4) | control mode (1) ]
+    [ arm: EE pos delta (3) | EE rot delta (3, axis-angle) | gripper (1)
+      | base: velocity forward, side, yaw (3) | torso: lift delta (1) | mode (1) ]
 
-The leading 7 floats are exactly the FRANKA_EE_DELTA end-effector-delta action; the
-trailing 5 are 4 mobile-base DOFs plus a control-mode selector, all driven (the
-base is not pinned).
+The mode slot sets what the arm's delta is added to: its previous target when
+high, its measured pose when low. RoboCasa365's gym wrapper cuts it at 0.5.
 
-Modeled as a `UnifiedActionSpace(width=12)` with the FRANKA_EE_DELTA arm action as its
-payload rather than an extended `EEActionSpace`: the EE layout fixes the gripper as
-the last element of each step (indexed via `ee_step_layout`), so appending base DOFs
-would push it off the end. The trailing 5 dims are real action, not padding, so a
-pairing matches the identical UnifiedActionSpace directly (no `UnifiedSliceAdapter`,
-which would discard them).
-
-Proprioception is the base-relative EE pose with the 2-D parallel-jaw gripper qpos
-nested in it, mirroring FRANKA_EE_DELTA. The env reports the EE orientation as a
-scalar-last (x, y, z, w) QUATERNION natively (robocasa/robosuite's
-robot0_base_to_eef_quat), so the embodiment declares QUATERNION here — the
-rotation re-encode to whatever a policy consumes moved off the runner and onto the
-pairing pipeline per ADR-0001, decision 7. The mobile base pose is part of the RLDX state but
-has no proprioception channel; the runner ships it in the flat obs dict.
+The robot reports the base-relative EE pose with its two finger joints, the arm
+joints, the base pose in the world and the torso lift. The env reports both
+orientations as scalar-last (x, y, z, w) quaternions (robot0_base_to_eef_quat,
+robot0_base_quat); per ADR 0001, decision 7, the pairing pipeline re-encodes them
+for a policy that reads another form.
 """
 
 from __future__ import annotations
 
 from manifold.core.conventions import Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
+    BodyActionSpace,
+    BodyPart,
+    Command,
+    CompositeActionSpace,
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
     GripperObservationSpec,
+    JointObservationSpec,
+    ModeCut,
     Proprioception,
-    UnifiedActionSpace,
 )
 from manifold.core.names import EmbodimentName
 
-# robosuite's PandaGripper closes at +1 and opens at -1.
 PANDA_OMRON_WHOLE_BODY = Embodiment(
     name=EmbodimentName.PANDA_OMRON_WHOLE_BODY,
-    action=UnifiedActionSpace(
-        width=12,
-        payload=EEActionSpace(
-            rotation=RotationFormat.AXIS_ANGLE,
-            gripper=GripperFormat.SIGNED_OPEN_LOW,
-            frame=Frame.BASE,
-            delta=True,
+    action=CompositeActionSpace(
+        groups=(
+            # robosuite's PandaGripper closes at +1 and opens at -1.
+            EEActionSpace(
+                rotation=RotationFormat.AXIS_ANGLE,
+                gripper=GripperFormat.SIGNED_OPEN_LOW,
+                frame=Frame.BASE,
+                delta=True,
+            ),
+            BodyActionSpace(
+                part=BodyPart.MOBILE_BASE,
+                dof=3,
+                command=Command.VELOCITY,
+                frame=Frame.BASE,
+            ),
+            BodyActionSpace(part=BodyPart.TORSO, dof=1, command=Command.DELTA),
         ),
+        mode_slot=ModeCut.BINARY_0_5,
     ),
     proprioception=Proprioception(
-        # The base-relative EE pose, with the 2-D parallel-jaw finger qpos nested in
-        # the EE value (mirroring FRANKA_EE_DELTA). The env reports the orientation as a
-        # scalar-last (x, y, z, w) QUATERNION (robot0_base_to_eef_quat), so the
-        # embodiment declares QUATERNION here (ADR-0001, decision 7: the embodiment records the
-        # env's TRUE native form; the pairing pipeline bridges it to whatever the
-        # policy consumes). The pose is genuinely base-relative, so frame stays BASE.
         ee_pose=EEObservationSpec(
             rotation=RotationFormat.QUATERNION,
             gripper=GripperObservationSpec(dim=2),
             frame=Frame.BASE,
         ),
+        joint_pos=JointObservationSpec(dof=7),
+        base_pose=EEObservationSpec(rotation=RotationFormat.QUATERNION, frame=Frame.WORLD),
+        torso_pos=JointObservationSpec(dof=1),
     ),
 )

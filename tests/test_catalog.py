@@ -5,7 +5,7 @@ import pytest
 
 import manifold.embodiments
 from manifold.core.conventions import GripperFormat
-from manifold.core.embodiment import EEActionSpace, Embodiment, UnifiedActionSpace
+from manifold.core.embodiment import CompositeActionSpace, EEActionSpace, Embodiment
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
 from manifold.embodiments import FRANKA_EE_DELTA, PANDA_OMRON_WHOLE_BODY
@@ -84,8 +84,23 @@ def test_the_robosuite_panda_grippers_close_at_plus_one():
     # `format_action` closes at +1 and opens at -1.
     omron = PANDA_OMRON_WHOLE_BODY.action
     franka = FRANKA_EE_DELTA.action
-    assert isinstance(omron, UnifiedActionSpace) and isinstance(omron.payload, EEActionSpace)
+    assert isinstance(omron, CompositeActionSpace) and isinstance(omron.groups[0], EEActionSpace)
     assert isinstance(franka, EEActionSpace)
 
-    assert omron.payload.gripper is GripperFormat.SIGNED_OPEN_LOW
+    assert omron.groups[0].gripper is GripperFormat.SIGNED_OPEN_LOW
     assert franka.gripper is GripperFormat.SIGNED_OPEN_LOW
+
+
+def test_panda_omron_declares_its_whole_body():
+    action = PANDA_OMRON_WHOLE_BODY.action
+    proprio = PANDA_OMRON_WHOLE_BODY.proprioception
+
+    assert isinstance(action, CompositeActionSpace)
+    assert action.slices() == [
+        ("ee", 0, 7),
+        ("mobile_base", 7, 10),
+        ("torso", 10, 11),
+        ("mode_slot", 11, 12),
+    ]
+    widths = [getattr(proprio, field) for field in proprio.spec_fields()]
+    assert sum(spec.expected_length() for spec in widths if spec is not None) == 24

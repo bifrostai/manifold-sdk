@@ -12,6 +12,7 @@ from manifold.adapters.observation.camera_vertical_flip import FlipVerticalCamer
 from manifold.adapters.observation.proprio_rotation import ProprioRotationAdapter
 from manifold.core.adapter import ActionAdapter, ObservationAdapter
 from manifold.core.benchmark import Benchmark
+from manifold.core.embodiment import Proprioception
 from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
@@ -47,7 +48,8 @@ def _default_pool(
     Only cameras that both sides declare get adapters. A camera whose
     orientation differs gets its own flip and rotation, so the resolver can fix
     each camera separately. A camera whose shape differs gets a resize. The
-    proprioception rotation is added when the two `ee_pose` formats differ.
+    proprioception rotation is added when the two `ee_pose` formats differ, and the
+    base pose rotation when the two `base_pose` formats differ.
     """
     pool: list[ActionAdapter | ObservationAdapter] = []
     published = {camera.name: camera for camera in benchmark.sensors}
@@ -63,14 +65,11 @@ def _default_pool(
             resize_targets[camera.name] = camera.shape
     if resize_targets:
         pool.append(ResizeCameras(targets=resize_targets))
-    policy_ee_pose = signature.proprioception.ee_pose
-    benchmark_ee_pose = benchmark.embodiment.proprioception.ee_pose
-    if (
-        policy_ee_pose is not None
-        and benchmark_ee_pose is not None
-        and policy_ee_pose.rotation != benchmark_ee_pose.rotation
-    ):
-        pool.append(ProprioRotationAdapter(target=policy_ee_pose.rotation))
+    for name in Proprioception.pose_fields():
+        wanted = getattr(signature.proprioception, name)
+        offered = getattr(benchmark.embodiment.proprioception, name)
+        if wanted is not None and offered is not None and wanted.rotation != offered.rotation:
+            pool.append(ProprioRotationAdapter(target=wanted.rotation, channel=name))
     return pool
 
 

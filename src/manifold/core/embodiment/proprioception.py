@@ -1,10 +1,15 @@
-"""What a robot reports about its own state: end-effector pose or joint angles."""
+"""What a robot reports about its own state: end-effector pose, joints, base and torso."""
 
 from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from manifold.core.conventions import Frame, GripperFormat, RotationFormat, ee_step_layout
+from manifold.core.conventions import (
+    Frame,
+    GripperFormat,
+    RotationFormat,
+    ee_step_layout,
+)
 from manifold.core.embodiment.spec import ValueSpec
 
 
@@ -97,16 +102,49 @@ class JointObservationSpec(ValueSpec):
 class Proprioception(BaseModel):
     """What the robot reports about its own state each step.
 
-    Set `ee_pose`, `joint_pos`, or any combination. All may be left unset for a
-    robot that reports no proprioception. Gripper finger state, when reported, is
-    nested in the end-effector value (`EEObservationSpec.gripper`), mirroring the
-    action side where the gripper is a field of `EEActionSpace`.
+    Set `ee_pose`, `joint_pos`, `base_pose`, `torso_pos`, or any combination. All may
+    be left unset for a robot that reports no proprioception. `base_pose` is the pose
+    of a mobile robot's base, declared as a single-arm end-effector pose with no
+    gripper, in the frame that it is expressed in. `torso_pos` holds the joints
+    between a mobile base and its arms, such as a lift, with no gripper. Each field's
+    name is the key that its value travels under in `Observation.state`. Gripper
+    finger state, when reported, is nested in the end-effector value
+    (`EEObservationSpec.gripper`), mirroring the action side where the gripper is a
+    field of `EEActionSpace`.
     """
 
     model_config = ConfigDict(frozen=True)
 
     ee_pose: EEObservationSpec | None = None
     joint_pos: JointObservationSpec | None = None
+    base_pose: EEObservationSpec | None = None
+    torso_pos: JointObservationSpec | None = None
+
+    @classmethod
+    def spec_fields(cls) -> tuple[str, ...]:
+        """The fields, each holding one spec or None."""
+        return tuple(cls.model_fields)
+
+    @classmethod
+    def pose_fields(cls) -> tuple[str, ...]:
+        """The fields whose spec is a pose, a position then a rotation."""
+        return ("ee_pose", "base_pose")
+
+    @model_validator(mode="after")
+    def _check_base_is_one_pose(self) -> Proprioception:
+        """Refuse a base pose with a gripper or more than one arm: it is one pose."""
+        base = self.base_pose
+        if base is not None and (base.gripper is not None or base.arm_count != 1):
+            raise ValueError("base_pose is one pose: no gripper, one arm")
+        return self
+
+    @model_validator(mode="after")
+    def _check_torso_is_one_chain(self) -> Proprioception:
+        """Refuse a torso with a gripper or more than one arm: it holds joints only."""
+        torso = self.torso_pos
+        if torso is not None and (torso.gripper is not None or torso.arm_count != 1):
+            raise ValueError("torso_pos holds the torso joints only: no gripper, one chain")
+        return self
 
     def first_unmet(self, available: Proprioception) -> str | None:
         """The first component this needs that `available` does not match, or None.
@@ -116,10 +154,10 @@ class Proprioception(BaseModel):
         The `ee_pose` comparison includes its nested gripper, so a policy that
         needs gripper qpos is unmet against a benchmark whose ee_pose lacks it.
         """
-        if self.ee_pose is not None and available.ee_pose != self.ee_pose:
-            return "ee_pose"
-        if self.joint_pos is not None and available.joint_pos != self.joint_pos:
-            return "joint_pos"
+        for name in self.spec_fields():
+            needed = getattr(self, name)
+            if needed is not None and getattr(available, name) != needed:
+                return name
         return None
 
 

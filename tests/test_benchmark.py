@@ -1,6 +1,6 @@
 """Tests for `Benchmark.gripper_format`.
 
-The action space is a union (EE / joint / unified); `gripper_format` must read
+The action space is a union (EE / joint / unified / composite); `gripper_format` must read
 the gripper convention out of whichever variant is in play, and raise when the
 variant has no gripper at all.
 """

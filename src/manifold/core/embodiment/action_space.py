@@ -9,12 +9,14 @@ step. `PolicySignature` declares how many actions a model predicts in a call
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Annotated, Any, Literal
 
 from pydantic import Field, model_validator
 
 from manifold.core.conventions import Frame, GripperFormat, RotationFormat, ee_step_layout
 from manifold.core.embodiment.spec import ValueSpec
+from manifold.lib.compat import StrEnum, assert_never
 
 
 def _reject_chunk_size(data: Any) -> Any:
@@ -142,15 +144,158 @@ class UnifiedActionSpace(ValueSpec):
         return self.width
 
 
+class Command(StrEnum):
+    """What a body group's values command."""
+
+    ABSOLUTE = "absolute"
+    DELTA = "delta"
+    VELOCITY = "velocity"
+
+
+class BodyPart(StrEnum):
+    """The part of a mobile robot that a body group drives."""
+
+    TORSO = "torso"  # A torso is the joints between a base and the arms, such as a lift.
+    MOBILE_BASE = "mobile_base"  # A base is holonomic (forward, side, yaw) or differential.
+
+
+class BodyActionSpace(ValueSpec):
+    """A torso or mobile base: `dof` values of one `command`.
+
+    `frame` is the frame that a base moves in, and a torso, which moves along its own
+    joints, has none.
+    """
+
+    kind: Literal["body"] = "body"
+    part: BodyPart
+    dof: int = Field(ge=1)
+    command: Command
+    frame: Frame | None = None
+
+    _reject_chunk_size = model_validator(mode="before")(_reject_chunk_size)
+
+    @model_validator(mode="after")
+    def _check_frame_fits_part(self) -> BodyActionSpace:
+        """Require a frame for a mobile base and refuse one for a torso."""
+        if self.part is BodyPart.MOBILE_BASE and self.frame is None:
+            raise ValueError("a mobile base needs the frame that it moves in")
+        if self.part is BodyPart.TORSO and self.frame is not None:
+            raise ValueError("a torso moves along its joints and takes no frame")
+        return self
+
+    def expected_length(self) -> int:
+        """Floats in one command: one per degree of freedom."""
+        return self.dof
+
+
+class ModeCut(StrEnum):
+    """Where a mode slot's value cuts between its low and high side.
+
+    robosuite's HybridMobileBase controller reads the raw value against 0
+    (`BINARY_0`); RoboCasa365's gym wrapper snaps it at 0.5 first (`BINARY_0_5`).
+    There the mode slot sets what each arm's delta is added to: the arm's previous target on
+    the high side, its measured pose on the low side, while every part of the body
+    still acts every step. -1 is on the low side of both cuts, and 1 on the high
+    side. A `CompositeActionSpace` declares one, and `mode_is_high` reads an action
+    against it.
+    """
+
+    BINARY_0 = "binary_0"  # The value is high when it is > 0.
+    BINARY_0_5 = "binary_0.5"  # The value is high when it is >= 0.5.
+
+
+# One group of a whole-body action: an arm, a torso or a mobile base.
+ActionGroup = Annotated[
+    EEActionSpace | JointActionSpace | BodyActionSpace,
+    Field(discriminator="kind"),
+]
+
+
+class CompositeActionSpace(ValueSpec):
+    """A whole-body action: each group's values back to back, then a mode slot if any.
+
+    Arms reuse `EEActionSpace` and `JointActionSpace`, each with its own gripper and
+    `arm_count`. `BodyActionSpace` covers the rest of a mobile robot: its torso and
+    its base. The groups appear in the order that the robot reads them in.
+    """
+
+    kind: Literal["composite"] = "composite"
+    groups: tuple[ActionGroup, ...] = Field(min_length=1)
+    mode_slot: ModeCut | None = None
+
+    _reject_chunk_size = model_validator(mode="before")(_reject_chunk_size)
+
+    def expected_length(self) -> int:
+        """Floats in a single action: every group, then the mode slot if declared."""
+        width = sum(group.expected_length() for group in self.groups)
+        return width + (1 if self.mode_slot is not None else 0)
+
+    def group_kinds(self) -> list[str]:
+        """Each group's kind, or its part for a body group: `ee`, `joint`, `torso`."""
+        return [
+            group.part.value if isinstance(group, BodyActionSpace) else group.kind
+            for group in self.groups
+        ]
+
+    def group_names(self) -> list[str]:
+        """Each group's kind, numbered when a kind appears more than once."""
+        kinds = self.group_kinds()
+        return [
+            f"{kind}{kinds[:index].count(kind)}" if kinds.count(kind) > 1 else kind
+            for index, kind in enumerate(kinds)
+        ]
+
+    def mode_is_high(self, action: Sequence[float]) -> bool:
+        """True when `action`'s mode slot is on the high side of the declared cut."""
+        if self.mode_slot is None:
+            raise ValueError("this whole-body action declares no mode slot")
+        self.validate_value(action)
+        value = float(action[self.mode_index()])
+        if self.mode_slot is ModeCut.BINARY_0:
+            return value > 0.0
+        if self.mode_slot is ModeCut.BINARY_0_5:
+            return value >= 0.5
+        return assert_never(self.mode_slot)
+
+    def mode_index(self) -> int:
+        """Where the mode slot sits in an action: after the last group."""
+        if self.mode_slot is None:
+            raise ValueError("this whole-body action declares no mode slot")
+        return sum(group.expected_length() for group in self.groups)
+
+    def group_slices(self) -> list[tuple[str, int, int]]:
+        """Each group's name and [start, stop) in the action."""
+        out, start = [], 0
+        for name, group in zip(self.group_names(), self.groups, strict=True):
+            stop = start + group.expected_length()
+            out.append((name, start, stop))
+            start = stop
+        return out
+
+    def slices(self) -> list[tuple[str, int, int]]:
+        """Every slot range in the action in order: the groups, then the mode slot's."""
+        out = self.group_slices()
+        if self.mode_slot is not None:
+            mode = self.mode_index()
+            out.append(("mode_slot", mode, mode + 1))
+        return out
+
+
 ActionSpace = Annotated[
-    EEActionSpace | JointActionSpace | UnifiedActionSpace,
+    EEActionSpace | JointActionSpace | UnifiedActionSpace | CompositeActionSpace,
     Field(discriminator="kind"),
 ]
 
 
 __all__ = [
+    "ActionGroup",
     "ActionSpace",
+    "BodyActionSpace",
+    "BodyPart",
+    "Command",
+    "CompositeActionSpace",
     "EEActionSpace",
     "JointActionSpace",
+    "ModeCut",
     "UnifiedActionSpace",
 ]
