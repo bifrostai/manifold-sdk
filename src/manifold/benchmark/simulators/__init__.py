@@ -13,12 +13,65 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from manifold.core.conventions import RotationFormat
+from manifold.lib.compat import assert_never
+from manifold.lib.rotation import from_matrix, to_matrix
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     import numpy as np
 
+    from manifold.benchmark.config import BenchmarkConfig
     from manifold.replay import ReplayPose, ReplaySceneBody, RerunScalar
+
+
+# The `xyzw` quaternion of no rotation.
+_IDENTITY_XYZW = (0.0, 0.0, 0.0, 1.0)
+
+
+def orientation(rotation: np.ndarray) -> np.ndarray:
+    """Return a 3x3 rotation matrix as an `xyzw` quaternion in float32.
+
+    A matrix that is not a rotation, such as a matrix of zeros or of NaN, gives the
+    quaternion of no rotation, so the scene still draws the body or the camera.
+    """
+    try:
+        quaternion = np.asarray(
+            from_matrix(np.asarray(rotation, dtype=np.float64), RotationFormat.QUATERNION),
+            dtype=np.float32,
+        )
+    except (ValueError, np.linalg.LinAlgError):
+        return np.array(_IDENTITY_XYZW, dtype=np.float32)
+    if not np.isfinite(quaternion).all():
+        return np.array(_IDENTITY_XYZW, dtype=np.float32)
+    return quaternion
+
+
+def rotation_matrix(quaternion: np.ndarray | Sequence[float]) -> np.ndarray:
+    """Return an `xyzw` quaternion as a 3x3 rotation matrix.
+
+    A quaternion that is not a rotation, such as a quaternion of zeros or of NaN, gives
+    the identity matrix.
+    """
+    try:
+        matrix = to_matrix(
+            np.asarray(quaternion, dtype=np.float64).reshape(-1).tolist(),
+            RotationFormat.QUATERNION,
+        )
+    except ValueError:
+        return np.eye(3)
+    if not np.isfinite(matrix).all():
+        return np.eye(3)
+    return matrix
+
+
+def follow(env: Any, path: str) -> Any:
+    """The object at the attribute path `path` from `env`, such as `env.sim` for `"sim"`."""
+    found = env
+    for name in path.split("."):
+        found = getattr(found, name)
+    return found
 
 
 class Simulator(ABC):
@@ -36,12 +89,14 @@ class Simulator(ABC):
     1. Add a module with `Benchmark<Simulator>SimulatorConfig` and
        `<Simulator>Simulator`. If the replay methods read values once for each
        episode, also add `_<Simulator>EpisodeCache`.
-    2. Implement the methods and the property of this class. Add no other public
+    2. Add the config to the type of `BenchmarkConfig.simulator`, and add a branch
+       to `make_simulator`.
+    3. Implement the methods and the property of this class. Add no other public
        method, except a static method that the hooks call to set the config's
        values on an env before the env is built.
-    3. Make each other method private. If it uses only its arguments, make it a
+    4. Make each other method private. If it uses only its arguments, make it a
        static method. If it reads `self`, make it an instance method.
-    4. If a private method returns a value, name it for that value, such as
+    5. If a private method returns a value, name it for that value, such as
        `_body_name`. If it returns nothing, name it with a verb for what it does,
        such as `_log_skipped_geoms`.
     """
@@ -101,6 +156,22 @@ class Simulator(ABC):
         """
 
 
+def make_simulator(config: BenchmarkConfig) -> Simulator | None:
+    """The simulator for `config.simulator`, or None for a config without one."""
+    from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig, MujocoSimulator
+
+    simulator = config.simulator
+    if simulator is None:
+        return None
+    if isinstance(simulator, BenchmarkMujocoSimulatorConfig):
+        return MujocoSimulator(simulator)
+    return assert_never(simulator)
+
+
 __all__ = [
     "Simulator",
+    "follow",
+    "make_simulator",
+    "orientation",
+    "rotation_matrix",
 ]

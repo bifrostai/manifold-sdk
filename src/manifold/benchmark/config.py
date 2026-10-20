@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
 from manifold.core.benchmark import Benchmark
 from manifold.wire import ImageFormat
 
@@ -114,8 +115,10 @@ class BenchmarkReplayConfig(_BenchmarkConfigBase):
 class BenchmarkConfig(_BenchmarkConfigBase):
     """A benchmark's config file: its values, its Service, and its spec.
 
-    `spec` is the SDK's `Benchmark`: its name, embodiment, sensors and instruction.
-    A policy's signature is checked against it.
+    `simulator` is the simulator that the replay reads its scene and physics
+    from, or is None for a benchmark whose replay holds no scene. `spec` is the
+    SDK's `Benchmark`: its name, embodiment, sensors and instruction. A policy's
+    signature is checked against it.
 
     `extras` holds the values that only the hooks read, such as a warm-up step count
     from upstream's eval script, under upstream's names. A value that several
@@ -131,6 +134,7 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     extras: dict[str, Any]
     env: BenchmarkEnvConfig
     run: BenchmarkRunConfig
+    simulator: BenchmarkMujocoSimulatorConfig | None
     replay: BenchmarkReplayConfig
     spec: Benchmark
 

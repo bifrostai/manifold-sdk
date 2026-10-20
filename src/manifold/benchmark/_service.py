@@ -1,15 +1,16 @@
 """The shared Services that run a benchmark's lifecycle steps around its hooks.
 
-A Service starts the envs for a task, starts episodes on them, steps them with the
-policy's actions and unloads them. The Client calls it; the benchmark's hooks file
-fills in the upstream calls. Two types cover the benchmarks:
+A Service loads the envs for a task, starts episodes on them, steps them with the
+policy's actions and unloads them. The Client calls the Service, and the Service calls
+the hooks. There are two types of Service:
 
-- `single`: a simulator for each env. `on_reset` and `on_step` move one env each.
-- `batched`: a simulator that holds all envs. `on_step` moves all of them at once.
+- `single`: a simulator for each env. `on_reset` and `on_step` act on a single env.
+- `batched`: a simulator that contains all envs. `on_step` steps all of them in a
+  single call.
 
-Keys of `episodes`, `actions` and the returned dicts are env ids, from 0 to
-`num_envs - 1`. The Client resets an env only when it is not in an episode, and
-sends actions only for envs that are in one.
+The keys of `episodes`, `actions` and the returned dicts are env ids, from 0 to
+`num_envs - 1`. The Client resets an env only between episodes, and sends actions
+only for envs in an episode.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from manifold.benchmark.config import (
     BenchmarkSingleServiceConfig,
 )
 from manifold.benchmark.hooks import BatchedServiceHooks, SingleServiceHooks
+from manifold.benchmark.simulators import make_simulator
 from manifold.lib.compat import assert_never
 
 if TYPE_CHECKING:
@@ -41,12 +43,12 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# The loggers that the hooks get write to this logger, which `main` shows at INFO.
+# The hooks' loggers write to this logger. `main` shows its messages at INFO.
 _hooks_logger = logging.getLogger("manifold.benchmark.hooks")
 
 
 class _HooksLogger(logging.LoggerAdapter[logging.Logger]):
-    """A logger that the hooks get, which writes `prefix` before each message."""
+    """A logger for the hooks. It writes `prefix` before each message."""
 
     def __init__(self, prefix: str) -> None:
         super().__init__(_hooks_logger, {})
@@ -60,19 +62,19 @@ class _HooksLogger(logging.LoggerAdapter[logging.Logger]):
 
 @dataclass(frozen=True)
 class StepResult:
-    """The outcome of stepping the environment with one action.
+    """The result of a step of an env with an action.
 
-    `observation` is the next observation the runner ships back to the policy;
-    `success` marks the task solved this step; `done` marks the episode otherwise
-    finished (truncated, terminated without success). Either flag ends the
-    episode; only `success` counts toward the tally.
+    `observation` is the next observation, which the Client sends to the policy.
+    `success` is true when the step solved the task. `done` is true when the episode
+    ended for another reason, such as a truncation or a termination without success.
+    Either flag ends the episode, and the episode record stores `success`.
 
-    `events` holds what upstream reports after this step, as Manifold events: each
-    goal check as a fact whose `is_active` says whether it holds, such as
-    `OnEvent(object="bowl", reference="plate", is_active=True)`, and each message for a
-    reader as a `NoteEvent`. A replay records a fact when its `is_active` changes, and
-    any other event as it comes. A benchmark that reports nothing passes an empty
-    tuple.
+    `events` contains what upstream reports after the step, as Manifold events. Each
+    goal check is a fact, such as `OnEvent(object="bowl", reference="plate",
+    is_active=True)`. Its `is_active` states whether the fact is true. Each message for
+    a reader is a `NoteEvent`. A replay records a fact when its `is_active` changes, and
+    records other events when they arrive. A benchmark that reports nothing passes an
+    empty tuple.
     """
 
     observation: Observation
@@ -83,27 +85,28 @@ class StepResult:
 
 @dataclass(frozen=True)
 class ResetResult:
-    """The outcome of resetting the environment for one episode.
+    """The result of a reset of an env for an episode.
 
-    `observation` is the episode's first observation, which the runner sends to the
+    `observation` is the episode's first observation, which the Client sends to the
     policy. `instruction` is the episode's language instruction, or None for a
-    benchmark without one. The Client puts it on each observation of the episode, so
-    the hooks leave it out of their observations.
+    benchmark without instructions. The Client puts the instruction on each observation
+    of the episode, so the hooks leave it out of their observations.
 
-    `task_id` is the benchmark's own identifier for the episode's task. It goes onto
-    the episode record and each live view frame, and never to the policy.
+    `task_id` is the benchmark's own identifier for the episode's task. The Client
+    writes it to the episode record and to each live view frame. The policy does not
+    receive it.
 
     `attributes` labels the episode for result tables, such as
-    `{"category": "camera", "difficulty": "3"}`. They go into the replay's
-    `EpisodeStartedEvent` and onto the episode record. A benchmark without labels passes
-    an empty dict. `events` holds what upstream reports at the start of the
-    episode, as `StepResult.events` does after each step.
+    `{"category": "camera", "difficulty": "3"}`. The replay's `EpisodeStartedEvent` and
+    the episode record contain them. A benchmark without labels passes an empty dict.
+    `events` contains what upstream reports at the start of the episode, in the same
+    form as `StepResult.events`.
 
     `max_steps` is the step limit of the episode's task, for a benchmark whose tasks
-    have different limits, such as 280 steps for one suite and 520 for another. Such
-    a benchmark sets `config.run.max_steps` to null, and the Client refuses a limit
-    here while the config sets one. A benchmark whose tasks share the config's limit
-    passes None.
+    have different limits, such as 280 steps in a suite and 520 in another. Such a
+    benchmark sets `config.run.max_steps` to null. The Client raises an error if both
+    the hooks and the config set a limit. A benchmark whose tasks use the config's
+    limit passes None.
     """
 
     observation: Observation
@@ -117,7 +120,7 @@ class ResetResult:
 def _log_unsupported_versions(simulator: Simulator) -> None:
     """Log a warning for each installed package outside `simulator`'s supported versions.
 
-    A package that is not installed has no version to check, so it is skipped.
+    The function skips the packages that are not installed.
     """
     for package, supported in simulator.supported_versions.items():
         try:
@@ -135,7 +138,10 @@ def _log_unsupported_versions(simulator: Simulator) -> None:
 
 
 class Service(ABC):
-    """Runs the lifecycle steps for one benchmark: start, load, reset, step, unload and stop."""
+    """A base class that runs a benchmark's lifecycle steps around its hooks.
+
+    The steps are start, load, reset, step, unload and stop.
+    """
 
     hooks: SingleServiceHooks | BatchedServiceHooks
 
@@ -144,25 +150,27 @@ class Service(ABC):
     ) -> None:
         self.config = config
         self.hooks = hooks
-        # Reads the replay's scene and physics, or is None for a benchmark without one.
-        self.simulator: Simulator | None = None
+        # The simulator that the replay reads the scene and physics from. It is None for a
+        # config without a simulator.
+        self.simulator = make_simulator(config)
         self.num_envs = config.env.num_envs
         self.reset_together = (
             isinstance(config.service, BenchmarkBatchedServiceConfig)
             and config.service.reset_together
         )
-        # The hooks' `env_key` for the loaded env(s), or None when no env is kept.
+        # The `env_key` of the loaded envs. It is None when the Service unloads the envs
+        # after the task.
         self._env_key: Hashable | None = None
-        # The logger of the container, for `on_start` and `on_stop`, and of the last
-        # loaded task, for `env_key`, `on_load` and `on_unload`.
+        # `on_start` and `on_stop` get the container's logger. `on_load` and `on_unload`
+        # get the logger of the last task that loaded envs.
         self._container_logger = _HooksLogger("")
         self._task_logger = self._container_logger
 
     def start(self) -> None:
-        """Start the simulator, once for each container, then the hooks' `on_start`.
+        """Start the simulator, then run the hooks' `on_start`.
 
-        Before it starts the simulator, it logs a warning for each installed package
-        outside the simulator's supported versions.
+        Before the simulator starts, `start` logs a warning for each installed package
+        outside the versions that the simulator supports.
         """
         if self.simulator is not None:
             _log_unsupported_versions(self.simulator)
@@ -170,7 +178,7 @@ class Service(ABC):
         self.hooks.on_start(self.config, self._container_logger)
 
     def load(self, task: WorkerTask) -> None:
-        """Load the env(s) for `task`, or keep the loaded env(s) if `env_key` matches."""
+        """Load the envs for `task`, or reuse the loaded envs if `env_key` returns the same key."""
         self._task = task
         task_logger = _HooksLogger(f"task {task.task_id}: ")
         env_key = self.hooks.env_key(self.config, task.task_config, task_logger)
@@ -182,7 +190,7 @@ class Service(ABC):
         self._env_key = env_key
 
     def unload(self) -> None:
-        """Unload the env(s) of the task, unless the next task can keep them."""
+        """Unload the envs of the task, unless `env_key` returned a key for them."""
         if self._env_key is None:
             self._unload_envs()
 
@@ -192,7 +200,7 @@ class Service(ABC):
     ) -> dict[int, ResetResult]:
         """Start episode `episodes[env_id]` on each env id in `episodes`.
 
-        `loggers` holds the logger of each env's new episode, by env id.
+        `loggers` contains the logger of each env's new episode, by env id.
         """
 
     @abstractmethod
@@ -201,7 +209,7 @@ class Service(ABC):
     ) -> dict[int, StepResult]:
         """Step each env in `actions` with its action.
 
-        `loggers` holds the logger of each env's episode, by env id.
+        `loggers` contains the logger of each env's episode, by env id.
         """
 
     @abstractmethod
@@ -213,7 +221,7 @@ class Service(ABC):
         """Run the hooks' `on_unload` for each loaded env."""
 
     def stop(self) -> None:
-        """Unload the kept env(s), run the hooks' `on_stop`, then stop the simulator."""
+        """Unload the loaded envs, run the hooks' `on_stop`, then stop the simulator."""
         try:
             self._unload_envs()
             self._env_key = None
@@ -224,7 +232,10 @@ class Service(ABC):
 
 
 class SingleService(Service):
-    """A simulator for each env; the hooks' `on_reset` and `on_step` move one env each."""
+    """A Service with a simulator for each env.
+
+    Each call to `on_reset` or `on_step` acts on a single env.
+    """
 
     hooks: SingleServiceHooks
 
@@ -272,7 +283,10 @@ class SingleService(Service):
 
 
 class BatchedService(Service):
-    """A simulator that holds all envs; a single `on_step` call moves all of them."""
+    """A Service with a simulator that contains all envs.
+
+    A single call to `on_step` steps all envs that have actions.
+    """
 
     hooks: BatchedServiceHooks
 
@@ -325,9 +339,10 @@ class BatchedService(Service):
 
 
 def make_service(config: BenchmarkConfig, hooks: object) -> Service:
-    """Build the Service that `config.service` names, around a checked hooks module.
+    """Build the Service that `config.service` names.
 
-    `load_hooks` has already checked `hooks` against the Service type's Protocol.
+    `hooks` is a module that `load_hooks` checked against the Protocol of the Service
+    type.
     """
     service = config.service
     if isinstance(service, BenchmarkSingleServiceConfig):
