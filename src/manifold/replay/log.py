@@ -66,6 +66,8 @@ if TYPE_CHECKING:
     from pathlib import Path
     from types import TracebackType
 
+    from manifold.core.sensor import Camera
+
 # The log's own contract version, independent of the bridge protocol's. This is what
 # a writer stamps.
 REPLAY_LOG_VERSION = 5
@@ -326,6 +328,29 @@ class ReplayCameraPinhole:
     width: int
     height: int
 
+    @classmethod
+    def from_camera(cls, camera: Camera) -> ReplayCameraPinhole:
+        """The pinhole of a spec camera, from its calibration's intrinsics and its shape.
+
+        The camera is only read, so this module imports `manifold.core` for type
+        checking alone, and a reader of a log still needs nothing else.
+
+        Raises:
+            ValueError: If the camera declares no calibration.
+        """
+        if camera.calibration is None:
+            raise ValueError(f"camera {camera.name!r} declares no intrinsics")
+        intrinsics = camera.calibration.intrinsics
+        return cls(
+            name=str(camera.name),
+            fx=intrinsics.fx,
+            fy=intrinsics.fy,
+            cx=intrinsics.cx,
+            cy=intrinsics.cy,
+            width=camera.shape[1],
+            height=camera.shape[0],
+        )
+
 
 @dataclass(frozen=True, eq=False)
 class ReplayEncodedImage:
@@ -351,7 +376,8 @@ class ReplayStep:
     holds bytes a consumer could pass on in place of the decoded values.
     """
 
-    index: int
+    # A hooks file leaves the index out, and the writer numbers each step it writes.
+    index: int = 0
     poses: dict[str, ReplayPose] = field(default_factory=dict)
     # Every camera the log declares, on every step, even where the stored frame
     # omitted an unchanged one: the reader fills those forward (see
@@ -499,8 +525,8 @@ class ReplayLogWriter:
         """Write the scene frame: every body, its parts and their geometry.
 
         Raises:
-            ValueError: If two bodies share a name, since a step's poses are keyed
-                by it and one would shadow the other.
+            ValueError: If two bodies share a name. A step stores its poses by
+                body name, so one body would replace the other.
         """
         names = [body.name for body in bodies]
         duplicates = sorted({name for name in names if names.count(name) > 1})
