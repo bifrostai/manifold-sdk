@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorConfig
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
 from manifold.core.benchmark import Benchmark
 from manifold.wire import ImageFormat
@@ -134,7 +135,13 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     extras: dict[str, Any]
     env: BenchmarkEnvConfig
     run: BenchmarkRunConfig
-    simulator: BenchmarkMujocoSimulatorConfig | None
+    simulator: (
+        Annotated[
+            BenchmarkMujocoSimulatorConfig | BenchmarkIsaacSimSimulatorConfig,
+            Field(discriminator="name"),
+        ]
+        | None
+    )
     replay: BenchmarkReplayConfig
     spec: Benchmark
 

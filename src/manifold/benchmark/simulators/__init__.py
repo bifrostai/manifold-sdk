@@ -158,6 +158,10 @@ class Simulator(ABC):
 
 def make_simulator(config: BenchmarkConfig) -> Simulator | None:
     """The simulator for `config.simulator`, or None for a config without one."""
+    from manifold.benchmark.simulators.isaacsim import (
+        BenchmarkIsaacSimSimulatorConfig,
+        IsaacSimSimulator,
+    )
     from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig, MujocoSimulator
 
     simulator = config.simulator
@@ -165,6 +169,8 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         return None
     if isinstance(simulator, BenchmarkMujocoSimulatorConfig):
         return MujocoSimulator(simulator)
+    if isinstance(simulator, BenchmarkIsaacSimSimulatorConfig):
+        return IsaacSimSimulator(simulator, config)
     return assert_never(simulator)
 
 
