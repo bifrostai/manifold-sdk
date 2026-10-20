@@ -30,37 +30,6 @@ def _non_empty(value: str) -> str:
 _Name = Annotated[str, AfterValidator(_non_empty)]
 
 
-class ManifoldEventType(StrEnum):
-    """The type a stored event carries, one per event class."""
-
-    EPISODE_STARTED = "episode_started"
-    EPISODE_ENDED = "episode_ended"
-    GRASPED = "grasped"
-    GRIPPER_TOUCHING = "gripper_touching"
-    UPRIGHT = "upright"
-    OPEN = "open"
-    CLOSED = "closed"
-    TURNED_ON = "turned_on"
-    INSIDE = "inside"
-    OUTSIDE = "outside"
-    ON = "on"
-    CENTERED_ON = "centered_on"
-    ABOVE = "above"
-    LEFT_OF = "left_of"
-    RIGHT_OF = "right_of"
-    IN_FRONT_OF = "in_front_of"
-    BEHIND = "behind"
-    TOUCHING = "touching"
-    STACKED = "stacked"
-    GRIPPER_COMMANDED = "gripper_commanded"
-    GRIPPER_HIT = "gripper_hit"
-    GRIPPER_FULLY_CLOSED = "gripper_fully_closed"
-    OBJECT_DISPLACED = "object_displaced"
-    OBJECT_TIPPED = "object_tipped"
-    OBJECT_LEFT_SCENE = "object_left_scene"
-    NOTE = "note"
-
-
 class GripperAction(StrEnum):
     """Which way the policy commanded the gripper."""
 
@@ -86,172 +55,174 @@ class _Event(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-class EpisodeStarted(_Event):
+class EpisodeStartedEvent(_Event):
     """The episode began, with the instruction it was given.
 
     `attributes` names what varies between episodes of one task, such as a
     perturbation's category and difficulty.
     """
 
-    event_type: Literal[ManifoldEventType.EPISODE_STARTED] = ManifoldEventType.EPISODE_STARTED
+    event_type: Literal["episode_started"] = "episode_started"
     instruction: str
     attributes: dict[str, str] = Field(default_factory=dict)
 
 
-class EpisodeEnded(_Event):
+class EpisodeEndedEvent(_Event):
     """The episode ended, and whether the benchmark counts it a success."""
 
-    event_type: Literal[ManifoldEventType.EPISODE_ENDED] = ManifoldEventType.EPISODE_ENDED
+    event_type: Literal["episode_ended"] = "episode_ended"
     success: StrictBool
 
 
-class ObjectFact(_Event):
-    """A fact about `object` started or stopped holding, as `is_active` says.
+class FactEvent(_Event):
+    """A fact started or stopped holding, as `is_active` says.
 
-    The benchmark decides how its simulator evaluates each fact.
+    A hooks file returns each fact's current `is_active` at every step. The replay
+    writes the event only on the step where `is_active` changes. The benchmark
+    decides how its simulator evaluates each fact.
     """
 
-    object: _Name
     is_active: StrictBool
 
 
-class Grasped(ObjectFact):
+class ObjectFactEvent(FactEvent):
+    """A fact about `object` started or stopped holding."""
+
+    object: _Name
+
+
+class GraspedEvent(ObjectFactEvent):
     """The gripper holds `object`, closed on it."""
 
-    event_type: Literal[ManifoldEventType.GRASPED] = ManifoldEventType.GRASPED
+    event_type: Literal["grasped"] = "grasped"
 
 
-class GripperTouching(ObjectFact):
+class GripperTouchingEvent(ObjectFactEvent):
     """The gripper is in contact with `object`, whether or not it is closed."""
 
-    event_type: Literal[ManifoldEventType.GRIPPER_TOUCHING] = ManifoldEventType.GRIPPER_TOUCHING
+    event_type: Literal["gripper_touching"] = "gripper_touching"
 
 
-class Upright(ObjectFact):
+class UprightEvent(ObjectFactEvent):
     """`object` stands upright."""
 
-    event_type: Literal[ManifoldEventType.UPRIGHT] = ManifoldEventType.UPRIGHT
+    event_type: Literal["upright"] = "upright"
 
 
-class Open(ObjectFact):
+class OpenEvent(ObjectFactEvent):
     """`object`, such as a drawer or a door, is open."""
 
-    event_type: Literal[ManifoldEventType.OPEN] = ManifoldEventType.OPEN
+    event_type: Literal["open"] = "open"
 
 
-class Closed(ObjectFact):
+class ClosedEvent(ObjectFactEvent):
     """`object`, such as a drawer or a door, is closed."""
 
-    event_type: Literal[ManifoldEventType.CLOSED] = ManifoldEventType.CLOSED
+    event_type: Literal["closed"] = "closed"
 
 
-class TurnedOn(ObjectFact):
+class TurnedOnEvent(ObjectFactEvent):
     """`object`, such as a stove, is turned on."""
 
-    event_type: Literal[ManifoldEventType.TURNED_ON] = ManifoldEventType.TURNED_ON
+    event_type: Literal["turned_on"] = "turned_on"
 
 
-class RelationFact(_Event):
-    """A fact about `object` compared with `reference` started or stopped holding.
-
-    `is_active` says which. The benchmark decides how its simulator evaluates each fact.
-    """
+class RelationFactEvent(FactEvent):
+    """A fact about `object` compared with `reference` started or stopped holding."""
 
     object: _Name
     reference: _Name
-    is_active: StrictBool
 
 
-class Inside(RelationFact):
+class InsideEvent(RelationFactEvent):
     """`object` is inside `reference`, such as a bin."""
 
-    event_type: Literal[ManifoldEventType.INSIDE] = ManifoldEventType.INSIDE
+    event_type: Literal["inside"] = "inside"
 
 
-class Outside(RelationFact):
+class OutsideEvent(RelationFactEvent):
     """`object` is outside `reference`."""
 
-    event_type: Literal[ManifoldEventType.OUTSIDE] = ManifoldEventType.OUTSIDE
+    event_type: Literal["outside"] = "outside"
 
 
-class On(RelationFact):
+class OnEvent(RelationFactEvent):
     """`object` rests on `reference`."""
 
-    event_type: Literal[ManifoldEventType.ON] = ManifoldEventType.ON
+    event_type: Literal["on"] = "on"
 
 
-class CenteredOn(RelationFact):
+class CenteredOnEvent(RelationFactEvent):
     """`object` rests on the centre of `reference`."""
 
-    event_type: Literal[ManifoldEventType.CENTERED_ON] = ManifoldEventType.CENTERED_ON
+    event_type: Literal["centered_on"] = "centered_on"
 
 
-class Above(RelationFact):
+class AboveEvent(RelationFactEvent):
     """`object` is above `reference`."""
 
-    event_type: Literal[ManifoldEventType.ABOVE] = ManifoldEventType.ABOVE
+    event_type: Literal["above"] = "above"
 
 
-class LeftOf(RelationFact):
+class LeftOfEvent(RelationFactEvent):
     """`object` is left of `reference`."""
 
-    event_type: Literal[ManifoldEventType.LEFT_OF] = ManifoldEventType.LEFT_OF
+    event_type: Literal["left_of"] = "left_of"
 
 
-class RightOf(RelationFact):
+class RightOfEvent(RelationFactEvent):
     """`object` is right of `reference`."""
 
-    event_type: Literal[ManifoldEventType.RIGHT_OF] = ManifoldEventType.RIGHT_OF
+    event_type: Literal["right_of"] = "right_of"
 
 
-class InFrontOf(RelationFact):
+class InFrontOfEvent(RelationFactEvent):
     """`object` is in front of `reference`."""
 
-    event_type: Literal[ManifoldEventType.IN_FRONT_OF] = ManifoldEventType.IN_FRONT_OF
+    event_type: Literal["in_front_of"] = "in_front_of"
 
 
-class Behind(RelationFact):
+class BehindEvent(RelationFactEvent):
     """`object` is behind `reference`."""
 
-    event_type: Literal[ManifoldEventType.BEHIND] = ManifoldEventType.BEHIND
+    event_type: Literal["behind"] = "behind"
 
 
-class Touching(RelationFact):
+class TouchingEvent(RelationFactEvent):
     """`object` is in contact with `reference`."""
 
-    event_type: Literal[ManifoldEventType.TOUCHING] = ManifoldEventType.TOUCHING
+    event_type: Literal["touching"] = "touching"
 
 
-class Stacked(_Event):
+class StackedEvent(FactEvent):
     """`objects` are stacked on one another.
 
     With an `order`, the objects are listed from the bottom or from the top and must
     stack that way. Without one, they may stack in any order.
     """
 
-    event_type: Literal[ManifoldEventType.STACKED] = ManifoldEventType.STACKED
+    event_type: Literal["stacked"] = "stacked"
     objects: tuple[_Name, ...] = Field(min_length=2)
-    is_active: StrictBool
     order: StackOrder | None = None
 
 
-class GripperCommanded(_Event):
+class GripperCommandedEvent(_Event):
     """The policy commanded the gripper open or closed."""
 
-    event_type: Literal[ManifoldEventType.GRIPPER_COMMANDED] = ManifoldEventType.GRIPPER_COMMANDED
+    event_type: Literal["gripper_commanded"] = "gripper_commanded"
     action: GripperAction
 
 
-class ObjectOccurrence(_Event):
+class ObjectOccurrenceEvent(_Event):
     """Something happened to `object`."""
 
     object: _Name
 
 
-class GripperHit(ObjectOccurrence):
+class GripperHitEvent(ObjectOccurrenceEvent):
     """The gripper struck `object`, such as the table or an object it did not grasp."""
 
-    event_type: Literal[ManifoldEventType.GRIPPER_HIT] = ManifoldEventType.GRIPPER_HIT
+    event_type: Literal["gripper_hit"] = "gripper_hit"
 
     @field_validator("object")
     @classmethod
@@ -261,69 +232,67 @@ class GripperHit(ObjectOccurrence):
         return value
 
 
-class ObjectTipped(ObjectOccurrence):
+class ObjectTippedEvent(ObjectOccurrenceEvent):
     """`object` tipped over."""
 
-    event_type: Literal[ManifoldEventType.OBJECT_TIPPED] = ManifoldEventType.OBJECT_TIPPED
+    event_type: Literal["object_tipped"] = "object_tipped"
 
 
-class ObjectLeftScene(ObjectOccurrence):
+class ObjectLeftSceneEvent(ObjectOccurrenceEvent):
     """`object` left the workspace."""
 
-    event_type: Literal[ManifoldEventType.OBJECT_LEFT_SCENE] = ManifoldEventType.OBJECT_LEFT_SCENE
+    event_type: Literal["object_left_scene"] = "object_left_scene"
 
 
-class ObjectDisplaced(_Event):
+class ObjectDisplacedEvent(_Event):
     """`object` moved without being grasped and came to rest `distance` metres away."""
 
-    event_type: Literal[ManifoldEventType.OBJECT_DISPLACED] = ManifoldEventType.OBJECT_DISPLACED
+    event_type: Literal["object_displaced"] = "object_displaced"
     object: _Name
     distance: float = Field(gt=0)
 
 
-class GripperFullyClosed(_Event):
+class GripperFullyClosedEvent(_Event):
     """The gripper closed all the way, with nothing between its fingers."""
 
-    event_type: Literal[ManifoldEventType.GRIPPER_FULLY_CLOSED] = (
-        ManifoldEventType.GRIPPER_FULLY_CLOSED
-    )
+    event_type: Literal["gripper_fully_closed"] = "gripper_fully_closed"
 
 
-class Note(_Event):
+class NoteEvent(_Event):
     """Free text for a reader. A grader never reads a note."""
 
-    event_type: Literal[ManifoldEventType.NOTE] = ManifoldEventType.NOTE
+    event_type: Literal["note"] = "note"
     text: str
     severity: Severity = Severity.INFO
 
 
 # Every event a replay step may carry, told apart by `event_type`.
 ManifoldEvent = Annotated[
-    EpisodeStarted
-    | EpisodeEnded
-    | Grasped
-    | GripperTouching
-    | Upright
-    | Open
-    | Closed
-    | TurnedOn
-    | Inside
-    | Outside
-    | On
-    | CenteredOn
-    | Above
-    | LeftOf
-    | RightOf
-    | InFrontOf
-    | Behind
-    | Touching
-    | Stacked
-    | GripperCommanded
-    | GripperHit
-    | ObjectTipped
-    | ObjectLeftScene
-    | ObjectDisplaced
-    | GripperFullyClosed
-    | Note,
+    EpisodeStartedEvent
+    | EpisodeEndedEvent
+    | GraspedEvent
+    | GripperTouchingEvent
+    | UprightEvent
+    | OpenEvent
+    | ClosedEvent
+    | TurnedOnEvent
+    | InsideEvent
+    | OutsideEvent
+    | OnEvent
+    | CenteredOnEvent
+    | AboveEvent
+    | LeftOfEvent
+    | RightOfEvent
+    | InFrontOfEvent
+    | BehindEvent
+    | TouchingEvent
+    | StackedEvent
+    | GripperCommandedEvent
+    | GripperHitEvent
+    | ObjectTippedEvent
+    | ObjectLeftSceneEvent
+    | ObjectDisplacedEvent
+    | GripperFullyClosedEvent
+    | NoteEvent,
     Field(discriminator="event_type"),
 ]
