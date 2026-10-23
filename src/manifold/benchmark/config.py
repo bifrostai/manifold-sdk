@@ -150,15 +150,24 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     @model_validator(mode="before")
     @classmethod
     def _check_spec_keys(cls, data: Any) -> Any:
-        """Require all keys of the spec, because `Benchmark` has defaults for some keys."""
+        """Require each key of the spec whose default states a value.
+
+        A default such as `instruction=True` states a fact about the benchmark, so the
+        config lists the key. A key whose default is None, such as `action_range`,
+        declares nothing when the config leaves it out.
+        """
         spec = data.get("spec") if isinstance(data, dict) else None
         if isinstance(spec, dict):
             keys = set(Benchmark.model_fields)
-            missing, unknown = keys - set(spec), set(spec) - keys
+            required = {
+                name for name, field in Benchmark.model_fields.items() if field.default is not None
+            }
+            missing, unknown = required - set(spec), set(spec) - keys
             if missing or unknown:
                 raise ValueError(
-                    f"spec must have exactly the keys {sorted(keys)}; it lacks "
-                    f"{sorted(missing)} and has the unknown keys {sorted(unknown)}"
+                    f"spec must have the keys {sorted(required)} and may have only the keys "
+                    f"{sorted(keys)}; it lacks {sorted(missing)} and has the unknown keys "
+                    f"{sorted(unknown)}"
                 )
         return data
 
