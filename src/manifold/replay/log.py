@@ -5,7 +5,7 @@ A log is one episode's worth of what a rendered replay needs and no policy reads
 and text the benchmark chose to publish, and the Manifold events of each step. It is
 written to the results directory the runner already mounts, never onto the bridge
 (ADR 0003), and the runner turns it into a Rerun recording. `replay_log_path`
-returns the path, beside the rollup `write_rollup` writes.
+returns the path.
 
 The framing is the wire's: `pack_stream_frame` puts a four-byte big-endian length
 in front of a msgpack body, and arrays are encoded as the codec's `__ndarray__`
@@ -28,7 +28,7 @@ than in a tab of its own: a benchmark declares which of its scalars are worth
 watching while the episode plays, and nothing reading the log could derive it.
 A scalar channel may also declare the row it is plotted in, which is how a group
 puts its three position axes side by side and its gripper on a line of its own.
-Geometry is triangles only: `Mesh.box` and `Mesh.cylinder` tessellate the
+Geometry is triangles only: `ReplayMesh.box` and `ReplayMesh.cylinder` tessellate the
 primitives a tabletop scene holds beside its meshes, which keeps a single
 geometry case in every reader.
 
@@ -51,7 +51,7 @@ from PIL import Image
 from pydantic import TypeAdapter
 
 from manifold.lib.compat import StrEnum
-from manifold.replay.events import Failure, FailureType, ManifoldEvent
+from manifold.replay.events import FailureEvent, FailureType, ManifoldEvent
 from manifold.wire.bridge import MAX_FRAME_BYTES, pack_stream_frame, read_stream_frame
 from manifold.wire.codec import (
     ImageFormat,
@@ -65,6 +65,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, Sequence
     from pathlib import Path
     from types import TracebackType
+
+    from manifold.core.sensor import Camera
 
 # The log's own contract version, independent of the bridge protocol's. This is what
 # a writer stamps.
@@ -111,7 +113,7 @@ class ReplayFrameType(StrEnum):
     STEP = "step"  # one per step: a pose per body, plus the declared channels.
 
 
-class ChannelKind(StrEnum):
+class ReplayChannelKind(StrEnum):
     """What a channel's per-step value is, and so how a reader renders it."""
 
     IMAGE = "image"  # a uint8 colour frame or a float16 depth frame.
@@ -120,7 +122,7 @@ class ChannelKind(StrEnum):
 
 
 @dataclass(frozen=True)
-class Channel:
+class ReplayChannel:
     """One channel a log's steps carry, declared in the header.
 
     `group` is the tab a scalar is rendered in; a channel that declares none
@@ -136,13 +138,13 @@ class Channel:
     """
 
     name: str
-    kind: ChannelKind
+    kind: ReplayChannelKind
     group: str | None = None
     row: int | None = None
 
 
 @dataclass(frozen=True, eq=False)
-class Mesh:
+class ReplayMesh:
     """A triangle mesh in its body's frame.
 
     `vertices` is (n, 3) and `faces` is (m, 3) of indices into it. Frozen
@@ -154,7 +156,7 @@ class Mesh:
     faces: np.ndarray
 
     @classmethod
-    def box(cls, half_extents: Sequence[float]) -> Mesh:
+    def box(cls, half_extents: Sequence[float]) -> ReplayMesh:
         """The 12 triangles of an axis-aligned box, centred on its body's origin.
 
         A benchmark whose scene holds primitives tessellates them through helpers
@@ -195,7 +197,7 @@ class Mesh:
         return cls(vertices=vertices, faces=faces)
 
     @classmethod
-    def cylinder(cls, radius: float, half_length: float, *, segments: int = 16) -> Mesh:
+    def cylinder(cls, radius: float, half_length: float, *, segments: int = 16) -> ReplayMesh:
         """A z-aligned cylinder as triangles, centred on its body's origin.
 
         `segments` sets how many sides the ring is drawn with, trading vertices
@@ -223,14 +225,14 @@ class Mesh:
 
 
 @dataclass(frozen=True, eq=False)
-class ScenePart:
+class ReplayScenePart:
     """One piece of a scene body's geometry, posed in that body's frame.
 
     A body is several parts because a simulator gives it several visual geoms.
     The part's pose is fixed; the body's pose moves per step.
     """
 
-    mesh: Mesh
+    mesh: ReplayMesh
     position: np.ndarray = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
     orientation: np.ndarray = field(
         default_factory=lambda: np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
@@ -239,15 +241,15 @@ class ScenePart:
 
 
 @dataclass(frozen=True, eq=False)
-class SceneBody:
+class ReplaySceneBody:
     """One named rigid body in the scene, and the geometry that moves with it."""
 
     name: str
-    parts: tuple[ScenePart, ...]
+    parts: tuple[ReplayScenePart, ...]
 
 
 @dataclass(frozen=True, eq=False)
-class Pose:
+class ReplayPose:
     """A body's world pose: metres, and a quaternion in `xyzw` order.
 
     Also a camera's, under a step's `extrinsics`: a camera-to-world pose is the
@@ -262,7 +264,7 @@ class Pose:
 
 
 @dataclass(frozen=True, eq=False)
-class CameraPinhole:
+class ReplayCameraPinhole:
     """One camera's pinhole intrinsics, in pixels, declared in the header.
 
     Static for a run, so the header carries it rather than every step (ADR 0008:
@@ -326,9 +328,32 @@ class CameraPinhole:
     width: int
     height: int
 
+    @classmethod
+    def from_camera(cls, camera: Camera) -> ReplayCameraPinhole:
+        """The pinhole of a spec camera, from its calibration's intrinsics and its shape.
+
+        The camera is only read, so this module imports `manifold.core` for type
+        checking alone, and a reader of a log still needs nothing else.
+
+        Raises:
+            ValueError: If the camera declares no calibration.
+        """
+        if camera.calibration is None:
+            raise ValueError(f"camera {camera.name!r} declares no intrinsics")
+        intrinsics = camera.calibration.intrinsics
+        return cls(
+            name=str(camera.name),
+            fx=intrinsics.fx,
+            fy=intrinsics.fy,
+            cx=intrinsics.cx,
+            cy=intrinsics.cy,
+            width=camera.shape[1],
+            height=camera.shape[0],
+        )
+
 
 @dataclass(frozen=True, eq=False)
-class EncodedImage:
+class ReplayEncodedImage:
     """A colour frame as the compressed bytes a log stored, and their format.
 
     The bytes are the writer's own encode, handed back unaltered, so whatever
@@ -351,15 +376,16 @@ class ReplayStep:
     holds bytes a consumer could pass on in place of the decoded values.
     """
 
-    index: int
-    poses: dict[str, Pose] = field(default_factory=dict)
+    # A hooks file leaves the index out, and the writer numbers each step it writes.
+    index: int = 0
+    poses: dict[str, ReplayPose] = field(default_factory=dict)
     # Every camera the log declares, on every step, even where the stored frame
     # omitted an unchanged one: the reader fills those forward (see
     # `read_replay_log`), so a consumer reads one pose per camera per step and
     # never has to look backwards for the last one written.
-    extrinsics: dict[str, Pose] = field(default_factory=dict)
+    extrinsics: dict[str, ReplayPose] = field(default_factory=dict)
     images: dict[str, np.ndarray] = field(default_factory=dict)
-    encoded_images: dict[str, EncodedImage] = field(default_factory=dict)
+    encoded_images: dict[str, ReplayEncodedImage] = field(default_factory=dict)
     scalars: dict[str, float] = field(default_factory=dict)
     text: dict[str, str] = field(default_factory=dict)
     # What happened on this step, in the order the benchmark recorded it.
@@ -377,16 +403,16 @@ class ReplayLog:
 
     version: int
     episode_idx: int
-    channels: tuple[Channel, ...]
-    bodies: tuple[SceneBody, ...]
+    channels: tuple[ReplayChannel, ...]
+    bodies: tuple[ReplaySceneBody, ...]
     steps: tuple[ReplayStep, ...]
     overview_group: str | None
     # The cameras whose intrinsics the header declared, empty for a log whose
     # publisher had none to give. A step's `extrinsics` may include a camera absent
     # here: a pose is useful on its own, intrinsics are what a projection needs.
-    cameras: tuple[CameraPinhole, ...] = ()
+    cameras: tuple[ReplayCameraPinhole, ...] = ()
     # The failure types that the benchmark detects. For a type listed
-    # here, a step with no `Failure` of that type had none; every other
+    # here, a step with no `FailureEvent` of that type had none; every other
     # type is the grader's to work out.
     failure_types: tuple[FailureType, ...] = ()
 
@@ -410,10 +436,10 @@ class ReplayLogWriter:
         path: Path,
         *,
         episode_idx: int,
-        channels: Iterable[Channel],
+        channels: Iterable[ReplayChannel],
         image_format: ImageFormat = "jpeg",
         overview_group: str | None = None,
-        cameras: Iterable[CameraPinhole] = (),
+        cameras: Iterable[ReplayCameraPinhole] = (),
         failure_types: Iterable[FailureType] = (),
     ) -> None:
         """Open `path` for writing and emit the header.
@@ -495,12 +521,12 @@ class ReplayLogWriter:
     ) -> None:
         self.close()
 
-    def write_scene(self, bodies: Sequence[SceneBody]) -> None:
+    def write_scene(self, bodies: Sequence[ReplaySceneBody]) -> None:
         """Write the scene frame: every body, its parts and their geometry.
 
         Raises:
-            ValueError: If two bodies share a name, since a step's poses are keyed
-                by it and one would shadow the other.
+            ValueError: If two bodies share a name. A step stores its poses by
+                body name, so one body would replace the other.
         """
         names = [body.name for body in bodies]
         duplicates = sorted({name for name in names if names.count(name) > 1})
@@ -521,9 +547,9 @@ class ReplayLogWriter:
 
     def write_step(
         self,
-        poses: Mapping[str, Pose],
+        poses: Mapping[str, ReplayPose],
         *,
-        extrinsics: Mapping[str, Pose] | None = None,
+        extrinsics: Mapping[str, ReplayPose] | None = None,
         images: Mapping[str, np.ndarray] | None = None,
         scalars: Mapping[str, float] | None = None,
         text: Mapping[str, str] | None = None,
@@ -547,17 +573,17 @@ class ReplayLogWriter:
         Raises:
             ValueError: If a value is given for a name the header did not declare,
                 or for a name it declared as another kind, if an image is neither a
-                colour nor a depth frame, or if a `Failure` has a type that the
+                colour nor a depth frame, or if a `FailureEvent` has a type that the
                 header does not list.
         """
         for event in events:
-            if isinstance(event, Failure) and event.failure_type not in self._failure_types:
+            if isinstance(event, FailureEvent) and event.failure_type not in self._failure_types:
                 raise ValueError(
                     f"failure type {str(event.failure_type)!r} is not listed in the header"
                 )
-        self._check_declared(images, ChannelKind.IMAGE)
-        self._check_declared(scalars, ChannelKind.SCALAR)
-        self._check_declared(text, ChannelKind.TEXT)
+        self._check_declared(images, ReplayChannelKind.IMAGE)
+        self._check_declared(scalars, ReplayChannelKind.SCALAR)
+        self._check_declared(text, ReplayChannelKind.TEXT)
         payload: dict[str, Any] = {
             "index": self._steps,
             "poses": {name: _pack_pose(pose) for name, pose in poses.items()},
@@ -575,14 +601,14 @@ class ReplayLogWriter:
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
 
-    def _moved_extrinsics(self, extrinsics: Mapping[str, Pose]) -> dict[str, Pose]:
+    def _moved_extrinsics(self, extrinsics: Mapping[str, ReplayPose]) -> dict[str, ReplayPose]:
         """The subset whose stored form differs from the one last written.
 
         Compared at `_POSE_DTYPE`, not as given: the quantised bytes are what the
         log holds, so two poses that round to the same float32 are the same row and
         writing the second would grow the file without telling a reader anything.
         """
-        moved: dict[str, Pose] = {}
+        moved: dict[str, ReplayPose] = {}
         for name, pose in extrinsics.items():
             key = (
                 np.asarray(pose.position, dtype=_POSE_DTYPE).tobytes(),
@@ -615,7 +641,7 @@ class ReplayLogWriter:
         self._file.flush()
         self._seq += 1
 
-    def _check_declared(self, values: Mapping[str, Any] | None, kind: ChannelKind) -> None:
+    def _check_declared(self, values: Mapping[str, Any] | None, kind: ReplayChannelKind) -> None:
         for name in values or {}:
             declared = self._kinds.get(name)
             if declared is None:
@@ -627,9 +653,8 @@ class ReplayLogWriter:
 def replay_log_path(output_dir: Path, episode_idx: int) -> Path:
     """Where episode `episode_idx`'s log goes under a benchmark's output directory.
 
-    Beside the rollup `write_rollup` writes, in `<output-dir>/results/`: that is
-    the one directory the runner scans, so a log written anywhere else is a log
-    nothing collects. The parent is created.
+    The path is in `<output-dir>/results/`, and this function creates that
+    directory.
     """
     directory = output_dir / REPLAY_LOG_DIR
     directory.mkdir(parents=True, exist_ok=True)
@@ -661,9 +686,9 @@ def read_replay_log(path: Path) -> ReplayLog:
         header_payload = header.get("payload", {})
         version, episode_idx, overview_group, channels, cameras = _read_header(header_payload)
         failure_types = _read_failure_types(header_payload)
-        bodies: tuple[SceneBody, ...] = ()
+        bodies: tuple[ReplaySceneBody, ...] = ()
         steps: list[ReplayStep] = []
-        carried: dict[str, Pose] = {}
+        carried: dict[str, ReplayPose] = {}
         for frame in frames:
             kind = frame.get("type")
             payload = frame.get("payload", {})
@@ -689,7 +714,7 @@ def read_replay_log(path: Path) -> ReplayLog:
     )
 
 
-def _pack_part(part: ScenePart) -> dict[str, Any]:
+def _pack_part(part: ReplayScenePart) -> dict[str, Any]:
     return {
         "vertices": _pack_array(part.mesh.vertices, _VERTEX_DTYPE),
         "faces": _pack_array(part.mesh.faces, _FACE_DTYPE),
@@ -699,7 +724,7 @@ def _pack_part(part: ScenePart) -> dict[str, Any]:
     }
 
 
-def _pack_pose(pose: Pose) -> dict[str, Any]:
+def _pack_pose(pose: ReplayPose) -> dict[str, Any]:
     return {
         "position": _pack_array(pose.position, _POSE_DTYPE),
         "orientation": _pack_array(pose.orientation, _POSE_DTYPE),
@@ -774,7 +799,7 @@ def _depth_metres(array: np.ndarray, name: str) -> np.ndarray:
     return array
 
 
-def _check_overview_group(group: str | None, channels: tuple[Channel, ...]) -> None:
+def _check_overview_group(group: str | None, channels: tuple[ReplayChannel, ...]) -> None:
     """Check that the overview group identifies a scalar group.
 
     A typo or a removed group would omit requested plots from the overview. Check
@@ -785,7 +810,7 @@ def _check_overview_group(group: str | None, channels: tuple[Channel, ...]) -> N
     """
     if group is None:
         return
-    groups = {_group_of(c) for c in channels if c.kind is ChannelKind.SCALAR}
+    groups = {_group_of(c) for c in channels if c.kind is ReplayChannelKind.SCALAR}
     if group not in groups:
         known = ", ".join(sorted(groups)) if len(groups) > 0 else "none"
         raise ValueError(
@@ -793,7 +818,7 @@ def _check_overview_group(group: str | None, channels: tuple[Channel, ...]) -> N
         )
 
 
-def _check_rows(channels: tuple[Channel, ...]) -> None:
+def _check_rows(channels: tuple[ReplayChannel, ...]) -> None:
     """Check that each group either numbers all channel rows or leaves all unnumbered.
 
     The reader chooses the layout when every row is unnumbered. Reject a mixture
@@ -806,7 +831,7 @@ def _check_rows(channels: tuple[Channel, ...]) -> None:
     """
     numbered: dict[str, set[bool]] = {}
     for channel in channels:
-        if channel.kind is not ChannelKind.SCALAR:
+        if channel.kind is not ReplayChannelKind.SCALAR:
             continue
         if channel.row is not None and channel.row < 0:
             raise ValueError(f"channel {channel.name!r} declares a negative row {channel.row}")
@@ -816,7 +841,7 @@ def _check_rows(channels: tuple[Channel, ...]) -> None:
         raise ValueError(f"groups mix numbered and unnumbered channel rows: {', '.join(partial)}")
 
 
-def _group_of(channel: Channel) -> str:
+def _group_of(channel: ReplayChannel) -> str:
     """The group a scalar channel is plotted in, declared or fallen back to."""
     return channel.group or channel.name.split("/")[0]
 
@@ -862,7 +887,7 @@ def _iter_frames(handle: Any) -> Iterator[dict[str, Any]]:
 
 def _read_header(
     payload: dict[str, Any],
-) -> tuple[int, int, str | None, tuple[Channel, ...], tuple[CameraPinhole, ...]]:
+) -> tuple[int, int, str | None, tuple[ReplayChannel, ...], tuple[ReplayCameraPinhole, ...]]:
     version = payload.get("version")
     if version not in _READABLE_LOG_VERSIONS:
         raise ValueError(f"unsupported replay log version {version!r}")
@@ -882,12 +907,12 @@ def _read_header(
         kind = node.get("kind")
         group = node.get("group")
         row = node.get("row")
-        if not isinstance(name, str) or kind not in set(ChannelKind):
+        if not isinstance(name, str) or kind not in set(ReplayChannelKind):
             raise ValueError(f"malformed header channel {node!r}")
         channels.append(
-            Channel(
+            ReplayChannel(
                 name=name,
-                kind=ChannelKind(kind),
+                kind=ReplayChannelKind(kind),
                 group=group if isinstance(group, str) else None,
                 row=row if isinstance(row, int) else None,
             )
@@ -912,15 +937,15 @@ def _read_failure_types(payload: dict[str, Any]) -> tuple[FailureType, ...]:
 def _check_failures_listed(
     events: tuple[ManifoldEvent, ...], failure_types: tuple[FailureType, ...]
 ) -> None:
-    """Refuse a stored `Failure` whose type the header does not list, as the writer does."""
+    """Refuse a stored `FailureEvent` whose type the header does not list, as the writer does."""
     for event in events:
-        if isinstance(event, Failure) and event.failure_type not in failure_types:
+        if isinstance(event, FailureEvent) and event.failure_type not in failure_types:
             raise ValueError(
                 f"failure type {str(event.failure_type)!r} is not listed in the header"
             )
 
 
-def _read_cameras(payload: dict[str, Any]) -> tuple[CameraPinhole, ...]:
+def _read_cameras(payload: dict[str, Any]) -> tuple[ReplayCameraPinhole, ...]:
     """The header's camera intrinsics, absent for a log whose publisher gave none."""
     raw = payload.get("cameras", [])
     if not isinstance(raw, list):
@@ -936,7 +961,7 @@ def _read_cameras(payload: dict[str, Any]) -> tuple[CameraPinhole, ...]:
             raise ValueError(f"malformed header camera {node!r}")  # noqa: TRY004
         try:
             cameras.append(
-                CameraPinhole(
+                ReplayCameraPinhole(
                     name=name,
                     fx=float(node["fx"]),
                     fy=float(node["fy"]),
@@ -951,7 +976,7 @@ def _read_cameras(payload: dict[str, Any]) -> tuple[CameraPinhole, ...]:
     return tuple(cameras)
 
 
-def _read_scene(payload: dict[str, Any]) -> tuple[SceneBody, ...]:
+def _read_scene(payload: dict[str, Any]) -> tuple[ReplaySceneBody, ...]:
     raw_bodies = payload.get("bodies")
     if not isinstance(raw_bodies, list):
         raise ValueError("scene 'bodies' must be a list")  # noqa: TRY004
@@ -963,12 +988,12 @@ def _read_scene(payload: dict[str, Any]) -> tuple[SceneBody, ...]:
         if not isinstance(raw_parts, list):
             raise ValueError("a scene body's 'parts' must be a list")  # noqa: TRY004
         bodies.append(
-            SceneBody(name=node["name"], parts=tuple(_read_part(part) for part in raw_parts))
+            ReplaySceneBody(name=node["name"], parts=tuple(_read_part(part) for part in raw_parts))
         )
     return tuple(bodies)
 
 
-def _read_part(node: Any) -> ScenePart:
+def _read_part(node: Any) -> ReplayScenePart:
     if not isinstance(node, dict):
         raise ValueError("a scene part must be a dict")  # noqa: TRY004
     vertices = _decoded_array(node.get("vertices"), "part vertices")
@@ -976,15 +1001,15 @@ def _read_part(node: Any) -> ScenePart:
     color = node.get("color")
     if not isinstance(color, list) or len(color) != 4:
         raise ValueError("a scene part's 'color' must be four numbers")
-    return ScenePart(
-        mesh=Mesh(vertices=vertices, faces=faces),
+    return ReplayScenePart(
+        mesh=ReplayMesh(vertices=vertices, faces=faces),
         position=_decoded_array(node.get("position"), "part position"),
         orientation=_decoded_array(node.get("orientation"), "part orientation"),
         color=(float(color[0]), float(color[1]), float(color[2]), float(color[3])),
     )
 
 
-def _compressed_image(node: Any) -> EncodedImage | None:
+def _compressed_image(node: Any) -> ReplayEncodedImage | None:
     """The stored bytes of a colour frame that was written compressed, or None.
 
     None covers everything with no compressed bytes to hand on: a raw colour
@@ -997,9 +1022,9 @@ def _compressed_image(node: Any) -> EncodedImage | None:
         return None
     data, image_format = encoded
     if image_format == "jpeg":
-        return EncodedImage(data=data, format="jpeg")
+        return ReplayEncodedImage(data=data, format="jpeg")
     if image_format == "png":
-        return EncodedImage(data=data, format="png")
+        return ReplayEncodedImage(data=data, format="png")
     return None
 
 
@@ -1041,10 +1066,10 @@ def _read_step(payload: dict[str, Any], version: int) -> ReplayStep:
     )
 
 
-def _read_pose(node: Any) -> Pose:
+def _read_pose(node: Any) -> ReplayPose:
     if not isinstance(node, dict):
         raise ValueError("a step pose must be a dict")  # noqa: TRY004
-    return Pose(
+    return ReplayPose(
         position=_decoded_array(node.get("position"), "pose position"),
         orientation=_decoded_array(node.get("orientation"), "pose orientation"),
     )
@@ -1091,17 +1116,17 @@ __all__ = [
     "REPLAY_LOG_DIR",
     "REPLAY_LOG_SUFFIX",
     "REPLAY_LOG_VERSION",
-    "Channel",
-    "ChannelKind",
-    "EncodedImage",
-    "Mesh",
-    "Pose",
+    "ReplayChannel",
+    "ReplayChannelKind",
+    "ReplayEncodedImage",
     "ReplayFrameType",
     "ReplayLog",
     "ReplayLogWriter",
+    "ReplayMesh",
+    "ReplayPose",
+    "ReplaySceneBody",
+    "ReplayScenePart",
     "ReplayStep",
-    "SceneBody",
-    "ScenePart",
     "read_replay_log",
     "replay_log_path",
 ]

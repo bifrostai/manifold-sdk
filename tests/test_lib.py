@@ -2,9 +2,17 @@ import numpy as np
 import pytest
 from scipy.spatial.transform import Rotation
 
-from manifold.core.conventions import GripperFormat, RotationFormat
-from manifold.lib.gripper import remap
-from manifold.lib.rotation import convert, from_matrix, matrix_from_6d, to_matrix
+from manifold.core.conventions import CameraAxes, GripperFormat, RotationFormat
+from manifold.lib.gripper import is_gripper_shut, remap
+from manifold.lib.rotation import (
+    convert,
+    convert_camera_axes,
+    from_matrix,
+    matrix_from_6d,
+    to_matrix,
+    wxyz_to_xyzw,
+    xyzw_to_wxyz,
+)
 
 # The value that means "fully open" in each gripper encoding.
 _OPEN = {
@@ -83,3 +91,45 @@ def test_safe_int_rejects_bool_and_non_integral_float() -> None:
         _safe_int(True)  # a bool is an int subclass but never a real dimension
     with pytest.raises(ValueError):
         _safe_int(4.5)  # non-integral float is malformed, not truncatable
+
+
+def test_a_quaternion_reorders_between_scalar_first_and_scalar_last():
+    wxyz = [0.5, 0.1, 0.2, 0.3]
+    xyzw = wxyz_to_xyzw(wxyz)
+    np.testing.assert_array_equal(xyzw, [0.1, 0.2, 0.3, 0.5])
+    np.testing.assert_array_equal(xyzw_to_wxyz(xyzw), wxyz)
+
+
+def test_a_camera_rotation_changes_between_opengl_and_opencv_axes():
+    rotation = to_matrix([0.0, 0.0, 0.3], RotationFormat.AXIS_ANGLE)
+    opencv = convert_camera_axes(rotation, CameraAxes.OPENGL, CameraAxes.OPENCV)
+    # The camera looks down -z in OpenGL axes and down +z in OpenCV axes.
+    np.testing.assert_allclose(opencv[:, 2], -rotation[:, 2])
+    np.testing.assert_allclose(opencv[:, 0], rotation[:, 0])
+    back = convert_camera_axes(opencv, CameraAxes.OPENCV, CameraAxes.OPENGL)
+    np.testing.assert_allclose(back, rotation)
+    same = convert_camera_axes(rotation, CameraAxes.OPENCV, CameraAxes.OPENCV)
+    np.testing.assert_allclose(same, rotation)
+
+
+@pytest.mark.parametrize(
+    ("value", "shut"),
+    [
+        (1.0, True),
+        (0.51, True),
+        (0.5, None),
+        (0.3, None),
+        (-0.5, None),
+        (-0.51, False),
+        (-1.0, False),
+    ],
+)
+def test_a_continuous_gripper_has_a_middle_band_that_commands_neither(value, shut):
+    # `signed_open_low` runs from -1 open to +1 shut.
+    assert is_gripper_shut(value, GripperFormat.SIGNED_OPEN_LOW) is shut
+
+
+@pytest.mark.parametrize(("value", "shut"), [(1.0, True), (0.51, True), (0.5, False), (0.0, False)])
+def test_a_discrete_gripper_is_shut_in_the_closed_half(value, shut):
+    # `binary_open_low` runs from 0 open to 1 shut.
+    assert is_gripper_shut(value, GripperFormat.BINARY_OPEN_LOW) is shut

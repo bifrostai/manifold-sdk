@@ -1,13 +1,11 @@
-"""Drive the bridge choreography for both halves of a pairing, backend-agnostic.
+"""Serve a policy over the bridge, or run it in process against a stand-in benchmark.
 
-`wire/bridge` defines the frames; this recipe owns the conversation over them, so
-neither side hand-rolls the accept loop, HELLO/READY handshake, and per-step
-send/recv dance. `serve` is the policy side (listen, accept, gate each pairing,
-answer observations with actions); `run_benchmark` is the runner side (connect,
-advertise, wait for READY, drive episodes); `evaluate` is the zero-hop degenerate
-running the identical gate and per-step fold in-process with no server, bridge, or
-threads. The policy author supplies an endpoint (a loaded model plus a way to mint
-sessions); the runner supplies the environment as plain callables.
+`manifold.wire.bridge` defines the frames, and this module runs the policy's side
+of the conversation over them. `serve` listens, accepts each connection, checks the
+pairing and answers observations with actions. `evaluate` runs the same check and
+the same step in a single process, with no server, bridge or threads. A policy
+author supplies an endpoint, which is a loaded model and a way to open sessions.
+`manifold.benchmark` runs the benchmark's side.
 
 One served model, many runners: a `PolicyEndpoint` loads the model once and each
 connection gets its own `Session` and `PipelineState` over that shared model.
@@ -32,23 +30,19 @@ import sysconfig
 import threading
 import time
 from collections.abc import Sequence
-from contextlib import AbstractContextManager, nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from importlib.metadata import distribution
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from manifold.benchmark import WorkerEpisodeRecord
 from manifold.core.benchmark import Benchmark
 from manifold.core.check import check_compatibility
 from manifold.core.pipeline import Pipeline
-from manifold.core.sensor import Modality
 from manifold.core.state import DEFAULT_LANE, PipelineState
 from manifold.core.verify import verify
-from manifold.recipes._live_view import LiveViewPublisher
 from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipeline
-from manifold.recipes.recording import NO_RECORDER
-from manifold.recipes.sharding import shard_episode_ids
 from manifold.wire import (
     BRIDGE_PROTOCOL_VERSION,
     FrameChannel,
@@ -59,16 +53,14 @@ from manifold.wire import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Iterator
+    from collections.abc import Callable
 
-    from manifold.core.embodiment.spec import ValueSpec
+    from manifold.benchmark import ResetResult, StepResult
     from manifold.core.native_layout import NativeLayout
     from manifold.core.observation_space import ObservationSpace
     from manifold.core.policy import PolicySignature
     from manifold.core.values import Action, Observation
     from manifold.recipes.pairing import Pairing
-    from manifold.recipes.recording import EpisodeRecorder
-    from manifold.wire import ImageFormat
 
 
 def _emit(message: str) -> None:
@@ -80,31 +72,6 @@ def _emit(message: str) -> None:
     with their own sink pass `on_event`.
     """
     print(message, flush=True)
-
-
-def _parse_server(server: str) -> tuple[str, int]:
-    """Split a ``host:port`` string into its parts (port required).
-
-    Splits on the LAST colon so an IPv6 host (or a host carrying a colon) is handled;
-    both halves must be non-empty. Raises ``ValueError`` — a catchable misuse,
-    consistent with the rest of this module, so a CLI wrapper translates it to its own
-    exit code rather than a library caller getting an uncatchable `SystemExit`.
-    """
-    host, _, port = server.rpartition(":")
-    if not host or not port:
-        raise ValueError(f"server must be host:port, got {server!r}")
-    return host, int(port)
-
-
-def _validated_episode_ids(episode_ids: Iterable[int]) -> Iterator[int]:
-    seen: set[int] = set()
-    for episode_id in episode_ids:
-        if episode_id < 0:
-            raise ValueError("episode ids must be >= 0")
-        if episode_id in seen:
-            raise ValueError("episode ids must be distinct")
-        seen.add(episode_id)
-        yield episode_id
 
 
 def _run_episode_in_process(
@@ -119,43 +86,35 @@ def _run_episode_in_process(
     *,
     episode_idx: int,
     benchmark_name: str,
-    recorder: EpisodeRecorder = NO_RECORDER,
-) -> EpisodeRecord:
-    """Drive one in-process episode, returning the record of what it did.
+) -> WorkerEpisodeRecord:
+    """Run one episode in process, and return its record.
 
-    The in-process twin of `_run_episode`: it resets the session and the lane's
-    `PipelineState`, then loops `reset/step` against the shared `_infer_step` fold
-    — the same observation->infer->action kernel `_serve_session` runs per frame,
-    just without the wire in between. `recorder` is driven exactly as it is there.
+    It resets the session and the lane's `PipelineState`, then calls `reset` and
+    `step` around `_infer_step`. `_serve_session` calls `_infer_step` for each frame
+    in the same way, over the bridge.
     """
     state.reset_lane(DEFAULT_LANE)
     session.reset()
     started_at = datetime.now(timezone.utc)
     reset_result = reset()
-    observation, task_id = reset_result.observation, reset_result.task_id
-    task_name = observation.instruction or benchmark_name
+    instruction, task_id = reset_result.instruction, reset_result.task_id
+    observation = replace(reset_result.observation, instruction=instruction)
+    task_name = instruction or benchmark_name
     steps = 0
     success = False
     initialization_sec = 0.0
-    try:
-        recorder.begin(episode_idx)
-        for _ in range(max_steps):
-            action = _infer_step(
-                session, observation, pipeline, observation_source, signature, state
-            )
-            if steps == 0:
-                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-            result = step(action)
-            steps += 1
-            observation = result.observation
-            ended = result.success or result.done or steps == max_steps
-            recorder.record(action, success=result.success, done=ended)
-            if result.success or result.done:
-                success = result.success
-                break
-    finally:
-        recorder.end()
-    return EpisodeRecord(
+    limit = reset_result.max_steps if reset_result.max_steps is not None else max_steps
+    for _ in range(limit):
+        action = _infer_step(session, observation, pipeline, observation_source, signature, state)
+        if steps == 0:
+            initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+        result = step(action)
+        steps += 1
+        observation = replace(result.observation, instruction=instruction)
+        if result.success or result.done:
+            success = result.success
+            break
+    return WorkerEpisodeRecord(
         episode_idx=episode_idx,
         task_name=task_name,
         success=success,
@@ -164,6 +123,7 @@ def _run_episode_in_process(
         started_at=started_at,
         ended_at=datetime.now(timezone.utc),
         task_id=task_id,
+        attributes=reset_result.attributes,
     )
 
 
@@ -430,105 +390,9 @@ def _resolve_pipeline(
     return pipeline(benchmark)
 
 
-def _run_episode(
-    channel: Transport,
-    reset: Callable[[], ResetResult],
-    step: Callable[[Action], StepResult],
-    max_steps: int,
-    image_format: ImageFormat,
-    *,
-    episode_idx: int,
-    benchmark_name: str,
-    action_space: ValueSpec,
-    recorder: EpisodeRecorder = NO_RECORDER,
-    live_view: LiveViewPublisher | None,
-) -> EpisodeRecord:
-    """Drive one episode over the channel, returning the record of what it did.
-
-    The clock brackets the whole rollout, reset included, since an episode begins
-    when the environment is reset.
-
-    `recorder` is driven around the same loop: begun once the reset is through, told
-    of each step, and ended however the episode leaves - the budget running out, the
-    driver reporting done, or `step` raising.
-    """
-    channel.send(FrameType.RESET, {})
-    started_at = datetime.now(timezone.utc)
-    reset_result = reset()
-    observation, task_id = reset_result.observation, reset_result.task_id
-    task_name = observation.instruction or benchmark_name
-    if live_view is not None:
-        live_view.publish(
-            observation,
-            episode_idx=episode_idx,
-            step=0,
-            task=task_name,
-            task_id=task_id,
-        )
-    steps = 0
-    success = False
-    initialization_sec = 0.0
-    try:
-        recorder.begin(episode_idx)
-        for _ in range(max_steps):
-            channel.send(
-                FrameType.OBSERVATION,
-                bridge.encode_observation(observation, image_format=image_format),
-            )
-            reply = channel.recv()
-            if reply is None or reply.get("type") != FrameType.ACTION:
-                raise PairingRejected(
-                    "policy closed the connection or sent a reply other than an action; "
-                    "check the policy logs for the error"
-                )
-            action = bridge.decode_action(reply["payload"])
-            # The policy checked this pairing against the benchmark as the policy
-            # parsed it. A policy on an older SDK may have dropped a field, misread the
-            # width, and replied in that wrong width. Check the action against the
-            # benchmark's own spec before the environment runs it.
-            try:
-                action_space.validate_value(action.values)
-            except (TypeError, ValueError) as exc:
-                raise PairingRejected(
-                    f"policy returned an action that the benchmark cannot take: {exc}"
-                ) from exc
-            if steps == 0:
-                initialization_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
-            result = step(action)
-            steps += 1
-            observation = result.observation
-            if live_view is not None:
-                live_view.publish(
-                    observation,
-                    episode_idx=episode_idx,
-                    step=steps,
-                    task=task_name,
-                    task_id=task_id,
-                )
-            # The budget is the third way an episode ends, and the only one a
-            # recorder cannot see for itself.
-            ended = result.success or result.done or steps == max_steps
-            recorder.record(action, success=result.success, done=ended)
-            if result.success or result.done:
-                success = result.success
-                break
-    finally:
-        recorder.end()
-    return EpisodeRecord(
-        episode_idx=episode_idx,
-        task_name=task_name,
-        success=success,
-        steps=steps,
-        initialization_sec=initialization_sec,
-        started_at=started_at,
-        ended_at=datetime.now(timezone.utc),
-        task_id=task_id,
-    )
-
-
 @runtime_checkable
 class Transport(Protocol):
-    """The minimal frame surface `serve`/`run_benchmark` need from a connection.
+    """The minimal frame surface that `serve` needs from a connection.
 
     Naming this surface — rather than typing against the concrete `FrameChannel`
     (which satisfies it structurally) — marks the seam where a future shm or iroh
@@ -689,74 +553,6 @@ class ActionQueue:
         """
 
 
-class PairingRejected(RuntimeError):
-    """The policy did not confirm the pairing, or the bridge broke mid-run.
-
-    Raised on the runner side when the policy closes without READY (it found the
-    pairing incompatible), or when a frame arrives out of the expected order.
-    This is a library function, so a rejection is a recoverable exception the
-    caller may catch — not a process exit.
-    """
-
-
-@dataclass(frozen=True)
-class StepResult:
-    """The outcome of stepping the environment with one action.
-
-    `observation` is the next observation the runner ships back to the policy;
-    `success` marks the task solved this step; `done` marks the episode otherwise
-    finished (truncated, terminated without success). Either flag ends the
-    episode; only `success` counts toward the tally.
-    """
-
-    observation: Observation
-    success: bool
-    done: bool
-
-
-@dataclass(frozen=True)
-class ResetResult:
-    """The outcome of resetting the environment for one episode.
-
-    `observation` is the episode's first observation, which the runner sends to the
-    policy. `task_id` is the benchmark's own identifier for the episode's task. It
-    goes onto the episode record and each live view frame, and never to the policy.
-    """
-
-    observation: Observation
-    task_id: str
-
-
-@dataclass(frozen=True)
-class EpisodeRecord:
-    """One finished episode, as the benchmark observed it.
-
-    `started_at` and `ended_at` bracket the rollout, so `elapsed_sec` derives from
-    them rather than being measured separately and free to disagree. `task_name` is
-    the reset observation's instruction where the benchmark publishes one, and the
-    benchmark's own name otherwise. `episode_idx` is the global episode id, which a
-    sharded run partitions disjointly, so two shards never report the same one.
-
-    `task_id` is the benchmark's own identifier for the task, such as a class
-    name. Two tasks in a suite may share an instruction, and `task_id` separates
-    them. It comes from the benchmark's `ResetResult`.
-    """
-
-    episode_idx: int
-    task_name: str
-    success: bool
-    steps: int
-    initialization_sec: float
-    started_at: datetime
-    ended_at: datetime
-    task_id: str
-
-    @property
-    def elapsed_sec(self) -> float:
-        """The episode's wall-clock duration, in seconds."""
-        return (self.ended_at - self.started_at).total_seconds()
-
-
 @dataclass(frozen=True)
 class BenchmarkResult:
     """A finished run: one record per episode it drove.
@@ -765,7 +561,7 @@ class BenchmarkResult:
     from the episodes it counts.
     """
 
-    records: tuple[EpisodeRecord, ...] = ()
+    records: tuple[WorkerEpisodeRecord, ...] = ()
 
     @property
     def episodes(self) -> int:
@@ -783,47 +579,6 @@ class BenchmarkResult:
         if self.episodes == 0:
             return 0.0
         return self.successes / self.episodes
-
-    def format_shard(self, shard_index: int, num_shards: int) -> str:
-        """The one-line per-shard tally a runner prints at the end of a sharded run.
-
-        Returns the string rather than printing it, so the CLI layer owns stdout;
-        the SDK formats its own result type without reaching for `print`.
-        """
-        return (
-            f"[bench shard {shard_index}/{num_shards}] "
-            f"{self.successes}/{self.episodes} succeeded ({self.success_rate:.1%})"
-        )
-
-
-def write_rollup(result: BenchmarkResult, output_dir: Path, *, benchmark_name: str) -> Path:
-    """Write the run's records to ``<output-dir>/results/<benchmark>.json``, and return the path.
-
-    This is the file a runner scans a benchmark worker's output directory for: a
-    flat document keyed ``records``, one entry per episode, instants in ISO 8601.
-    The runner derives ``elapsed_sec`` from the two instants, so the rollup does
-    not carry a duration free to disagree with them.
-    """
-    records = [
-        {
-            "episode_idx": record.episode_idx,
-            "task_name": record.task_name,
-            "success": record.success,
-            "steps": record.steps,
-            "initialization_sec": record.initialization_sec,
-            "started_at": record.started_at.isoformat(),
-            "ended_at": record.ended_at.isoformat(),
-            "task_id": record.task_id,
-        }
-        for record in result.records
-    ]
-    results_dir = output_dir / "results"
-    results_dir.mkdir(parents=True, exist_ok=True)
-    path = results_dir / f"{benchmark_name}.json"
-    temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps({"records": records}))
-    temporary.replace(path)
-    return path
 
 
 def serve(
@@ -887,287 +642,6 @@ def serve(
         worker.join(timeout=max(0.0, shutdown_deadline - time.monotonic()))
 
 
-def run_benchmark(
-    benchmark: Benchmark,
-    reset: Callable[[], ResetResult],
-    step: Callable[[Action], StepResult],
-    *,
-    episodes: int,
-    max_steps: int,
-    image_format: ImageFormat = "raw",
-    host: str = "127.0.0.1",
-    port: int,
-    on_event: Callable[[str], None] = _emit,
-    recorder: EpisodeRecorder = NO_RECORDER,
-    on_episode: Callable[[EpisodeRecord], None] | None = None,
-    live_view_server: str | None = None,
-    live_view_camera: str | None = None,
-) -> BenchmarkResult:
-    """Run a benchmark against a remote policy over the bridge, in native form.
-
-    Connects, advertises the benchmark in HELLO, and blocks on READY before opening
-    any episode — so the policy-side gate fences off every rollout. The runner is a
-    dumb native-form driver: it never adapts an observation or action, because the
-    policy side owns all conversion (ADR-0001). This is one runner shard; several
-    against the same served `PolicyEndpoint` run concurrently, each on its own session.
-    `image_format` is the sensor encoding for frames ("raw", "jpeg", "png"); "raw"
-    does not need an extra dependency. `recorder` is driven within each episode;
-    see `recipes.recording`. `on_episode` receives its finished record before the
-    next episode begins. When `live_view_server` is set, `live_view_camera` selects
-    the colour camera used for the dedicated latest-value channel. Omitting
-    `live_view_server` disables live-view publication. The SDK ignores
-    `live_view_camera` in that case.
-
-    Returns:
-        A record for each episode run, and the tally over them.
-
-    Raises:
-        PairingRejected: If the policy closes without READY, or a frame arrives out
-            of the expected order.
-    """
-    return _run_connected(
-        benchmark,
-        lambda _episode_id: reset(),
-        step,
-        episode_ids=range(episodes),
-        max_steps=max_steps,
-        image_format=image_format,
-        host=host,
-        port=port,
-        on_event=on_event,
-        recorder=recorder,
-        on_episode=on_episode,
-        live_view_server=live_view_server,
-        live_view_camera=live_view_camera,
-    )
-
-
-def _run_connected(
-    benchmark: Benchmark,
-    reset_episode: Callable[[int], ResetResult],
-    step: Callable[[Action], StepResult],
-    *,
-    episode_ids: Iterable[int],
-    max_steps: int,
-    image_format: ImageFormat,
-    host: str,
-    port: int,
-    on_event: Callable[[str], None],
-    recorder: EpisodeRecorder,
-    on_episode: Callable[[EpisodeRecord], None] | None,
-    live_view_server: str | None,
-    live_view_camera: str | None,
-) -> BenchmarkResult:
-    """Hold one connection open and drive the named episodes down it, in order.
-
-    The shared body of `run_benchmark` and `run_episodes`: they differ only in where
-    the ids come from, and each episode is stamped with the id it ran rather than
-    with its position here, so two shards of one run never report the same
-    `episode_idx`. The progress line counts position, since what an operator watching
-    one shard wants is how far through its own list it is.
-    """
-    emit = on_event
-    total = len(episode_ids) if isinstance(episode_ids, Sequence) else None
-    with (
-        _live_view_context(benchmark, live_view_server, live_view_camera) as live_view,
-        socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock,
-    ):
-        sock.connect((host, port))
-        channel = FrameChannel.from_socket(sock)
-        channel.send(
-            FrameType.HELLO,
-            HelloPayload(
-                protocol_version=BRIDGE_PROTOCOL_VERSION,
-                benchmark=benchmark.model_dump(mode="json"),
-            ).model_dump(),
-        )
-        reply = channel.recv()
-        if reply is None or reply.get("type") != FrameType.READY:
-            raise PairingRejected("policy rejected the pairing (no READY)")
-        emit("policy confirmed the pairing (ready)")
-
-        records: list[EpisodeRecord] = []
-        for position, episode_id in enumerate(episode_ids):
-            record = _run_episode(
-                channel,
-                lambda episode_id=episode_id: reset_episode(episode_id),
-                step,
-                max_steps,
-                image_format,
-                episode_idx=episode_id,
-                benchmark_name=benchmark.name,
-                action_space=benchmark.embodiment.action,
-                recorder=recorder,
-                live_view=live_view,
-            )
-            records.append(record)
-            if on_episode is not None:
-                on_episode(record)
-            outcome = "success" if record.success else "failure"
-            count = str(position + 1) if total is None else f"{position + 1}/{total}"
-            emit(f"episode {count}: {outcome}")
-        channel.send(FrameType.BYE, {})
-        result = BenchmarkResult(records=tuple(records))
-        emit(f"done — {result.successes}/{result.episodes} succeeded")
-        return result
-
-
-def _live_view_context(
-    benchmark: Benchmark,
-    server: str | None,
-    camera_name: str | None,
-) -> AbstractContextManager[LiveViewPublisher | None]:
-    """A context manager yielding a configured live-view publisher or `None`."""
-    if server is None:
-        return nullcontext(None)
-    if camera_name is None:
-        raise ValueError("live_view_camera is required when live_view_server is set")
-
-    camera = benchmark.observation_space.camera(camera_name)
-    if camera is None:
-        raise ValueError(f"benchmark observation space does not include camera {camera_name!r}")
-    if camera.modality is not Modality.RGB:
-        raise ValueError(f"live-view camera {camera_name!r} must be RGB")
-    host, port = _parse_server(server)
-    return LiveViewPublisher(host, port, camera)
-
-
-def run_episodes(
-    benchmark: Benchmark,
-    reset_episode: Callable[[int], ResetResult],
-    step: Callable[[Action], StepResult],
-    *,
-    server: str,
-    episode_ids: Iterable[int],
-    max_steps: int,
-    image_format: ImageFormat = "raw",
-    on_event: Callable[[str], None] = _emit,
-    recorder: EpisodeRecorder = NO_RECORDER,
-    on_episode: Callable[[EpisodeRecord], None] | None = None,
-    live_view_server: str | None = None,
-    live_view_camera: str | None = None,
-) -> BenchmarkResult:
-    """Run the named global episodes of a benchmark against a remote policy.
-
-    The dispatch contract is a list of episodes: the caller passes the ids to run, and
-    this drives exactly those, in the given order. A stride shard is one such list,
-    and the set an interrupted attempt never reached is another. This owns the
-    run-mechanics around one connection: it parses the server string and hands the
-    ids down, so each episode is seeded by the id it runs and each record is stamped
-    with it. `live_view_server` and `live_view_camera` configure the optional
-    latest-value channel as they do for `run_benchmark`.
-
-    `reset_episode` takes the GLOBAL episode id it begins (to seed the env / pick a
-    grid cell) — the only shape difference from `run_benchmark`'s no-argument
-    `reset`, since the caller chooses WHICH episode each reset runs. `server` is the
-    policy as a ``host:port`` string. `on_episode` receives each finished record
-    before the next episode begins.
-
-    An iterable may supply IDs lazily. Each ID is requested after the previous
-    episode's recorder and callback finish, using the same policy connection.
-
-    The ids must be distinct: `episode_idx` identifies an episode within a run, so a
-    repeat would report one index twice. An empty list runs nothing, which is the
-    result when there is nothing outstanding.
-
-    Returns:
-        A record for each episode run, stamped with its global id, and the tally.
-
-    Raises:
-        ValueError: If `server` is not ``host:port``, or `episode_ids` holds a
-            negative or a repeated id.
-        PairingRejected: Propagated from `run_benchmark`.
-    """
-    host, port = _parse_server(server)
-    ids = _validated_episode_ids(episode_ids)
-    validated: Iterable[int] = list(ids) if isinstance(episode_ids, Sequence) else ids
-    return _run_connected(
-        benchmark,
-        reset_episode,
-        step,
-        episode_ids=validated,
-        max_steps=max_steps,
-        image_format=image_format,
-        host=host,
-        port=port,
-        on_event=on_event,
-        recorder=recorder,
-        on_episode=on_episode,
-        live_view_server=live_view_server,
-        live_view_camera=live_view_camera,
-    )
-
-
-def run_sharded_benchmark(
-    benchmark: Benchmark,
-    reset_episode: Callable[[int], ResetResult],
-    step: Callable[[Action], StepResult],
-    *,
-    server: str,
-    total_episodes: int,
-    num_shards: int = 1,
-    shard_index: int = 0,
-    max_steps: int,
-    image_format: ImageFormat = "raw",
-    on_event: Callable[[str], None] = _emit,
-    recorder: EpisodeRecorder = NO_RECORDER,
-    output_dir: Path | None = None,
-    live_view_server: str | None = None,
-    live_view_camera: str | None = None,
-) -> BenchmarkResult:
-    """Run one shard of a benchmark against a remote policy, owning the run-mechanics.
-
-    The stride-shard spelling of `run_episodes`: it partitions the global episode set
-    into this shard's ids (`shard_episode_ids`), dispatches them, and emits the
-    per-shard tally.
-
-    `reset_episode` takes the GLOBAL episode id it begins, as `run_episodes` does.
-    `total_episodes` is the global count partitioned disjointly across shards; this
-    shard runs `len(shard_ids)`. `server` is the policy as a ``host:port`` string;
-    `on_event` also receives the final per-shard tally line. `recorder` is driven per
-    episode, and is given the global id each one begins. When `output_dir` is set,
-    the rollup is updated after each episode. `live_view_server` and
-    `live_view_camera` configure the optional latest-value channel as they do for
-    `run_benchmark`.
-
-    Returns:
-        A record for each episode this shard ran, and the tally over them.
-
-    Raises:
-        ValueError: If `server` is not ``host:port``, or the shard flags are invalid.
-        PairingRejected: Propagated from `run_benchmark`.
-    """
-    shard_ids = shard_episode_ids(total_episodes, num_shards, shard_index)
-    records: list[EpisodeRecord] = []
-
-    def write_episode(record: EpisodeRecord) -> None:
-        if output_dir is None:
-            return
-        records.append(record)
-        write_rollup(
-            BenchmarkResult(records=tuple(records)),
-            output_dir,
-            benchmark_name=benchmark.name,
-        )
-
-    result = run_episodes(
-        benchmark,
-        reset_episode,
-        step,
-        server=server,
-        episode_ids=shard_ids,
-        max_steps=max_steps,
-        image_format=image_format,
-        on_event=on_event,
-        recorder=recorder,
-        on_episode=write_episode,
-        live_view_server=live_view_server,
-        live_view_camera=live_view_camera,
-    )
-    on_event(result.format_shard(shard_index, num_shards))
-    return result
-
-
 def evaluate(
     endpoint: PolicyEndpoint,
     benchmark: Benchmark,
@@ -1178,43 +652,39 @@ def evaluate(
     episodes: int,
     max_steps: int,
     on_event: Callable[[str], None] = _emit,
-    recorder: EpisodeRecorder = NO_RECORDER,
 ) -> BenchmarkResult:
-    """Run a benchmark against a policy *in process*: no server, no bridge, no threads.
+    """Run a policy against a stand-in benchmark in process, with no server or bridge.
 
-    The zero-hop case of the connector algebra `serve`/`run_benchmark` implement: the
-    same gate and the same per-step fold, but the observation and action never leave
-    the process. Use it to test a pairing locally before running the served, sharded
-    path.
+    It runs the same pairing check and the same step as `serve`, but the observation
+    and the action stay in the process. A policy author runs it to test a pairing
+    before serving the policy.
 
     It mints exactly one `session` (a single in-process lane), resets the session and
     that lane's `PipelineState` at each episode boundary, and `close`s the session in
     a `finally` (mirroring `serve`'s teardown) so even the in-process path retires
-    per-session scratch deterministically. `reset`/`step` are the same callables
-    `run_benchmark` takes, so a caller swaps recipes without rewriting its environment.
-    `pipeline` bridges exactly as `serve` resolves it (None / callable / `Pipeline`).
-    `recorder` is driven per episode, as it is on the served path.
+    per-session scratch deterministically. `reset` and `step` return the
+    `ResetResult` and `StepResult` that a benchmark's hooks return. `pipeline`
+    bridges exactly as `serve` resolves it (None / callable / `Pipeline`).
 
     Returns:
         A record for each episode run, and the tally over them.
 
     Raises:
-        PairingRejected: If the policy-side gate rejects the pairing. In process there
-            is no connection to close, so the rejection surfaces as this exception
-            (the served path signals it by closing without READY).
+        ValueError: If the policy's pairing check rejects the pairing. `serve` closes
+            the connection without READY in the same case.
     """
     emit = on_event
     resolved = _resolve_pipeline(pipeline, benchmark)
     signature = endpoint.signature
     if not _gate(signature, benchmark, resolved, emit):
-        raise PairingRejected("policy rejected the pairing (incompatible)")
+        raise ValueError("policy rejected the pairing (incompatible)")
     emit("policy confirmed the pairing (ready)")
 
     observation_source = benchmark.observation_space
     state = PipelineState()
     session = endpoint.session()
     try:
-        records: list[EpisodeRecord] = []
+        records: list[WorkerEpisodeRecord] = []
         for episode in range(episodes):
             record = _run_episode_in_process(
                 session,
@@ -1227,7 +697,6 @@ def evaluate(
                 max_steps,
                 episode_idx=episode,
                 benchmark_name=benchmark.name,
-                recorder=recorder,
             )
             records.append(record)
             outcome = "success" if record.success else "failure"
@@ -1282,19 +751,11 @@ def launch_server(
 __all__ = [
     "ActionQueue",
     "BenchmarkResult",
-    "EpisodeRecord",
-    "PairingRejected",
     "PolicyEndpoint",
     "PolicyProfile",
-    "ResetResult",
     "Session",
-    "StepResult",
     "Transport",
     "evaluate",
     "launch_server",
-    "run_benchmark",
-    "run_episodes",
-    "run_sharded_benchmark",
     "serve",
-    "write_rollup",
 ]

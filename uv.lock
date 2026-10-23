@@ -69,6 +69,7 @@ dependencies = [
     { name = "msgpack" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version != '3.11.*'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "packaging" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -86,6 +87,7 @@ dev = [
 requires-dist = [
     { name = "msgpack", specifier = ">=1.0" },
     { name = "numpy", specifier = ">=1.24" },
+    { name = "packaging", specifier = ">=23" },
     { name = "pillow", specifier = ">=10" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "scipy", specifier = ">=1.11" },

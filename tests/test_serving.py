@@ -8,20 +8,17 @@ logic against a fake endpoint (no model, no torch).
 
 from __future__ import annotations
 
-import io
 import socket
 import threading
 from contextlib import suppress
-from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, cast
 
-import numpy as np
 import pytest
-from PIL import Image
 
-from manifold.recipes import ActionQueue, ResetResult, StepResult
+from manifold.benchmark import ResetResult, StepResult
+from manifold.recipes import ActionQueue
 from manifold.recipes.serving import PolicyEndpoint
 from manifold.sensors import CameraName
 
@@ -85,44 +82,6 @@ def test_infer_is_the_unused_no_packing_path():
 def test_close_is_a_noop_for_the_stateless_base():
     q = _CountingQueue(execution_steps=2)
     assert q.close() is None
-
-
-def _records(episodes: int, *, successes: int):
-    """`episodes` records, of which the first `successes` succeeded."""
-    from manifold.recipes import EpisodeRecord
-
-    moment = datetime(2026, 1, 1, tzinfo=timezone.utc)
-    return tuple(
-        EpisodeRecord(
-            episode_idx=idx,
-            task_name="task",
-            success=idx < successes,
-            steps=1,
-            initialization_sec=0.0,
-            started_at=moment,
-            ended_at=moment,
-            task_id="task",
-        )
-        for idx in range(episodes)
-    )
-
-
-# --- BenchmarkResult.format_shard -------------------------------------------------
-
-
-def test_format_shard_renders_the_per_shard_tally():
-    from manifold.recipes import BenchmarkResult
-
-    assert (
-        BenchmarkResult(records=_records(4, successes=3)).format_shard(0, 2)
-        == "[bench shard 0/2] 3/4 succeeded (75.0%)"
-    )
-
-
-def test_format_shard_handles_an_empty_run():
-    from manifold.recipes import BenchmarkResult
-
-    assert BenchmarkResult().format_shard(1, 1) == "[bench shard 1/1] 0/0 succeeded (0.0%)"
 
 
 # --- launch_server ----------------------------------------------------------------
@@ -547,840 +506,53 @@ def test_serve_sends_its_protocol_version_in_ready():
     assert reply["payload"] == {"protocol_version": BRIDGE_PROTOCOL_VERSION}
 
 
-# --- run_episodes and run_sharded_benchmark ---------------------------------------
+# --- evaluate's episode records --------------------------------------------------
 #
-# The dispatch wrappers own the run-mechanics (server parse, the ids, the stamping) so
-# a runner doesn't. These drive the real loop over the scripted transport further
-# down, since the ids reach the records through it.
+# `evaluate` measures each episode, so these run it with a policy that answers every
+# observation with a zero action, and check the records that it returns.
 
 
-def _step(_action) -> StepResult:
-    return cast(StepResult, None)  # opaque: the id validation refuses before any step
-
-
-def test_run_episodes_drives_the_ids_it_is_given_in_order(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import run_episodes
-
-    sock = _install_fake_transport(monkeypatch)
-    seeded: list[int] = []
-
-    def reset_episode(episode_id: int) -> ResetResult:
-        seeded.append(episode_id)
-        return ResetResult(Observation(), task_id="task")
-
-    events: list[str] = []
-    result = run_episodes(
-        _fake_benchmark(),
-        reset_episode,
-        _one_step_episodes(succeeding=1),
-        server="host.example:9000",
-        episode_ids=[7, 2, 5],  # arbitrary: not a stride, and not sorted
-        max_steps=50,
-        on_event=events.append,
-    )
-
-    assert sock.address == ("host.example", 9000)
-    assert seeded == [7, 2, 5]
-    assert [r.episode_idx for r in result.records] == [7, 2, 5]
-    # The shard tally belongs to the shard wrapper; a bare id list has no shard to
-    # name, so this emits only what one connection's run does.
-    assert not any(event.startswith("[bench shard") for event in events)
-
-
-@pytest.mark.parametrize(
-    ("orientation_value", "channel_order_value"),
-    [
-        ("upright", "rgb"),
-        ("flipped_vertical", "rgb"),
-        ("flipped_horizontal", "rgb"),
-        ("rotated_180", "rgb"),
-        ("upright", "bgr"),
-    ],
-)
-def test_run_episodes_publishes_the_selected_camera_on_the_live_view_channel(
-    monkeypatch, orientation_value, channel_order_value
-):
+def _evaluate(*, step, episodes, max_steps, instruction=None):
+    """Run `evaluate` against a policy that answers each observation with zeros."""
+    from manifold.core import PolicySignature
     from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
-    from manifold.core.values import Observation
+    from manifold.core.values import Action, Observation
     from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes, serving
-    from manifold.wire import FrameChannel
+    from manifold.recipes import evaluate
 
-    # arrange
-    live_client, live_server = socket.socketpair()
-    received: list[dict] = []
-    received_frame = threading.Event()
-
-    def receive_live_view() -> None:
-        with live_server:
-            channel = FrameChannel.from_socket(live_server)
-            channel.send("watch", {"watched": True})
-            frame = channel.recv()
-            assert frame is not None
-            received.append(frame["payload"])
-            received_frame.set()
-            channel.send("ack", {"sequence": frame["payload"]["sequence"]})
-
-    receiver = threading.Thread(target=receive_live_view)
-    receiver.start()
-    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
-    policy_socket = _FakeSocket()
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: policy_socket)
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
+    width = FRANKA_EE_DELTA.action.expected_length()
+    session = SimpleNamespace(
+        reset=lambda: None,
+        infer=lambda _observation: Action.from_array([0.0] * width),
+        close=lambda: None,
     )
-    displayed_source = np.zeros((360, 640, 3), dtype=np.uint8)
-    displayed_source[:180, :320, 0] = 255
-    displayed_source[:180, 320:, 1] = 255
-    displayed_source[180:, :320, 2] = 255
-    orientation = CameraOrientation(orientation_value)
-    channel_order = ChannelOrder(channel_order_value)
-    source = displayed_source
-    if orientation in (CameraOrientation.FLIPPED_VERTICAL, CameraOrientation.ROTATED_180):
-        source = source[::-1, :, :]
-    if orientation in (CameraOrientation.FLIPPED_HORIZONTAL, CameraOrientation.ROTATED_180):
-        source = source[:, ::-1, :]
-    if channel_order is ChannelOrder.BGR:
-        source = source[:, :, ::-1]
-    source = np.ascontiguousarray(source)
+    endpoint = SimpleNamespace(
+        signature=PolicySignature(action_space=FRANKA_EE_DELTA.action, instruction=False),
+        session=lambda: session,
+    )
     benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[
-            Camera(
-                name=CameraName.AGENTVIEW,
-                shape=source.shape,
-                orientation=orientation,
-                channel_order=channel_order,
-            )
-        ],
-        instruction=True,
+        name="bench-1", embodiment=FRANKA_EE_DELTA, instruction=instruction is not None
     )
-
-    def step(_action) -> StepResult:
-        assert received_frame.wait(timeout=2.0)
-        return StepResult(
-            observation=Observation(sensors={CameraName.AGENTVIEW: source}), success=True, done=True
-        )
-
-    # act
-    result = run_episodes(
+    return evaluate(
+        cast(Any, endpoint),
         benchmark,
-        lambda _episode: ResetResult(
-            Observation(sensors={CameraName.AGENTVIEW: source}, instruction="pick"),
-            task_id="PickTask",
+        lambda: ResetResult(
+            Observation(),
+            instruction=instruction,
+            task_id="task",
+            attributes={},
+            events=(),
+            max_steps=None,
         ),
-        step,
-        server="policy:9000",
-        episode_ids=[7],
-        max_steps=1,
-        live_view_server="127.0.0.1:9001",
-        live_view_camera=CameraName.AGENTVIEW,
-    )
-    receiver.join(timeout=2.0)
-
-    # assert
-    assert result.successes == 1
-    assert not receiver.is_alive()
-    assert len(received) == 1
-    payload = received[0]
-    assert payload["episode_idx"] == 7
-    assert payload["step"] == 0
-    assert payload["task"] == "pick"
-    assert payload["task_id"] == "PickTask"
-    assert (payload["width"], payload["height"]) == (455, 256)
-    displayed = np.asarray(Image.open(io.BytesIO(payload["jpeg"])))
-    assert displayed.shape == (256, 455, 3)
-    assert int(np.argmax(displayed[32, 32])) == 0
-    assert int(np.argmax(displayed[32, -32])) == 1
-    assert int(np.argmax(displayed[-32, 32])) == 2
-
-
-def test_run_episodes_does_not_repeat_a_live_frame_after_reconnecting(monkeypatch):
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes, serving
-    from manifold.wire import FrameChannel
-
-    # arrange
-    first_client, first_server = socket.socketpair()
-    second_client, second_server = socket.socketpair()
-    clients = iter((first_client, second_client))
-    frames: list[dict] = []
-    publish_next = threading.Event()
-    received_second = threading.Event()
-    second_connected = threading.Event()
-
-    def receive_live_view() -> None:
-        with first_server:
-            first_channel = FrameChannel.from_socket(first_server)
-            first_channel.send("watch", {"watched": True})
-            first = first_channel.recv()
-            assert first is not None
-            frames.append(first["payload"])
-
-        with second_server:
-            second_channel = FrameChannel.from_socket(second_server)
-            second_channel.send("watch", {"watched": True})
-            assert second_connected.wait(timeout=2.0)
-            second_server.settimeout(0.2)
-            with pytest.raises(TimeoutError):
-                second_channel.recv()
-            publish_next.set()
-            second_server.settimeout(None)
-            second = second_channel.recv()
-            assert second is not None
-            frames.append(second["payload"])
-            second_channel.send("ack", {"sequence": second["payload"]["sequence"]})
-            received_second.set()
-
-    receiver = threading.Thread(target=receive_live_view)
-    receiver.start()
-
-    def connect(*_args, **_kwargs):
-        client = next(clients)
-        if client is second_client:
-            second_connected.set()
-        return client
-
-    monkeypatch.setattr(socket, "create_connection", connect)
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
-    )
-    image = np.zeros((256, 256, 3), dtype=np.uint8)
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
-    )
-
-    steps = 0
-
-    def step(_action) -> StepResult:
-        nonlocal steps
-        steps += 1
-        if steps == 1:
-            assert publish_next.wait(timeout=2.0)
-            return StepResult(
-                observation=Observation(sensors={CameraName.AGENTVIEW: image}),
-                success=False,
-                done=False,
-            )
-        assert received_second.wait(timeout=2.0)
-        return StepResult(
-            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
-            success=True,
-            done=True,
-        )
-
-    # act
-    result = run_episodes(
-        benchmark,
-        lambda _episode: ResetResult(
-            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
-        ),
-        step,
-        server="policy:9000",
-        episode_ids=[0],
-        max_steps=2,
-        live_view_server="127.0.0.1:9001",
-        live_view_camera=CameraName.AGENTVIEW,
-    )
-    receiver.join(timeout=2.0)
-
-    # assert
-    assert result.successes == 1
-    assert not receiver.is_alive()
-    assert [frame["sequence"] for frame in frames] == [1, 2]
-
-
-def test_run_episodes_retries_a_live_frame_when_sending_fails(monkeypatch):
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import _live_view, run_episodes, serving
-    from manifold.wire import FrameChannel
-
-    first_client, first_server = socket.socketpair()
-    second_client, second_server = socket.socketpair()
-    clients = iter((first_client, second_client))
-    failed_send = threading.Event()
-    received_frame = threading.Event()
-    received: list[dict] = []
-
-    class FailFirstFrame:
-        def __init__(self, channel: FrameChannel) -> None:
-            self._channel = channel
-
-        def send(self, frame_type: str, payload: dict) -> None:
-            if frame_type == "frame" and not failed_send.is_set():
-                failed_send.set()
-                raise OSError("send failed")
-            self._channel.send(frame_type, payload)
-
-        def recv(self):
-            return self._channel.recv()
-
-    def publisher_channel(sock, *, max_frame_bytes):
-        channel = FrameChannel.from_socket(sock, max_frame_bytes=max_frame_bytes)
-        return FailFirstFrame(channel)
-
-    def receive_live_view() -> None:
-        with first_server:
-            channel = FrameChannel.from_socket(first_server)
-            channel.send("watch", {"watched": True})
-            assert failed_send.wait(timeout=2.0)
-            assert first_server.recv(1) == b""
-
-        with second_server:
-            channel = FrameChannel.from_socket(second_server)
-            channel.send("watch", {"watched": True})
-            frame = channel.recv()
-            assert frame is not None
-            received.append(frame["payload"])
-            channel.send("ack", {"sequence": frame["payload"]["sequence"]})
-            received_frame.set()
-
-    receiver = threading.Thread(target=receive_live_view)
-    receiver.start()
-    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: next(clients))
-    monkeypatch.setattr(
-        _live_view,
-        "FrameChannel",
-        SimpleNamespace(from_socket=publisher_channel),
-    )
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
-    )
-    image = np.zeros((256, 256, 3), dtype=np.uint8)
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
-    )
-
-    def step(_action) -> StepResult:
-        assert received_frame.wait(timeout=2.0)
-        return StepResult(
-            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
-            success=True,
-            done=True,
-        )
-
-    run_episodes(
-        benchmark,
-        lambda _episode: ResetResult(
-            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
-        ),
-        step,
-        server="policy:9000",
-        episode_ids=[0],
-        max_steps=1,
-        live_view_server="127.0.0.1:9001",
-        live_view_camera=CameraName.AGENTVIEW,
-    )
-    receiver.join(timeout=2.0)
-
-    assert not receiver.is_alive()
-    assert [frame["sequence"] for frame in received] == [1]
-
-
-def test_run_episodes_rejects_a_boolean_live_view_acknowledgement(monkeypatch):
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes, serving
-    from manifold.wire import FrameChannel
-
-    live_client, live_server = socket.socketpair()
-    acknowledgement_rejected = threading.Event()
-
-    def receive_live_view() -> None:
-        with live_server:
-            channel = FrameChannel.from_socket(live_server)
-            channel.send("watch", {"watched": True})
-            frame = channel.recv()
-            assert frame is not None
-            assert frame["payload"]["sequence"] == 1
-            channel.send("ack", {"sequence": True})
-            assert live_server.recv(1) == b""
-            acknowledgement_rejected.set()
-
-    receiver = threading.Thread(target=receive_live_view)
-    receiver.start()
-    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
-    )
-    image = np.zeros((256, 256, 3), dtype=np.uint8)
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
-    )
-
-    def step(_action) -> StepResult:
-        assert acknowledgement_rejected.wait(timeout=2.0)
-        return StepResult(
-            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
-            success=True,
-            done=True,
-        )
-
-    run_episodes(
-        benchmark,
-        lambda _episode: ResetResult(
-            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
-        ),
-        step,
-        server="policy:9000",
-        episode_ids=[0],
-        max_steps=1,
-        live_view_server="127.0.0.1:9001",
-        live_view_camera=CameraName.AGENTVIEW,
-    )
-    receiver.join(timeout=2.0)
-
-    assert not receiver.is_alive()
-
-
-def test_run_episodes_requires_a_camera_when_the_live_view_server_is_set():
-    from manifold.recipes import run_episodes
-
-    # act
-    # assert
-    with pytest.raises(ValueError, match="camera is required"):
-        run_episodes(
-            _fake_benchmark(),
-            lambda _episode: cast(ResetResult, None),
-            _step,
-            server="policy:9000",
-            episode_ids=[],
-            max_steps=1,
-            live_view_server="127.0.0.1:9001",
-        )
-
-
-def test_run_episodes_rejects_a_depth_live_view_camera():
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera, Modality
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes
-
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[
-            Camera(
-                name=CameraName.AGENTVIEW_DEPTH,
-                shape=(256, 256, 1),
-                dtype="float32",
-                modality=Modality.DEPTH,
-            )
-        ],
-    )
-
-    with pytest.raises(ValueError, match="must be RGB"):
-        run_episodes(
-            benchmark,
-            lambda _episode: ResetResult(Observation(), task_id="task"),
-            _step,
-            server="policy:9000",
-            episode_ids=[],
-            max_steps=1,
-            live_view_server="127.0.0.1:9001",
-            live_view_camera=CameraName.AGENTVIEW_DEPTH,
-        )
-
-
-def test_run_episodes_validates_a_live_view_before_copying(monkeypatch):
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes, serving
-
-    live_client, live_server = socket.socketpair()
-    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
-    )
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name=CameraName.AGENTVIEW, shape=(256, 256, 3))],
-    )
-
-    with live_server, pytest.raises(ValueError, match="shape mismatch"):
-        run_episodes(
-            benchmark,
-            lambda _episode: ResetResult(
-                Observation(
-                    sensors={CameraName.AGENTVIEW: np.zeros((1000, 1000, 3), dtype=np.uint8)}
-                ),
-                task_id="task",
-            ),
-            _step,
-            server="policy:9000",
-            episode_ids=[0],
-            max_steps=1,
-            live_view_server="127.0.0.1:9001",
-            live_view_camera=CameraName.AGENTVIEW,
-        )
-
-
-def test_run_episodes_closes_a_live_view_socket_during_a_partial_control_frame(
-    monkeypatch,
-):
-    from manifold.core.benchmark import Benchmark
-    from manifold.core.sensor import Camera
-    from manifold.core.values import Observation
-    from manifold.embodiments import FRANKA_EE_DELTA
-    from manifold.recipes import run_episodes, serving
-
-    live_client, live_server = socket.socketpair()
-    partial_sent = threading.Event()
-
-    def receive_live_view() -> None:
-        with live_server:
-            live_server.sendall(b"\x00")
-            partial_sent.set()
-            with suppress(ConnectionResetError):
-                assert live_server.recv(1) == b""
-
-    receiver = threading.Thread(target=receive_live_view)
-    receiver.start()
-    monkeypatch.setattr(socket, "create_connection", lambda *_a, **_k: live_client)
-    monkeypatch.setattr(serving.socket, "socket", lambda *_a, **_k: _FakeSocket())
-    monkeypatch.setattr(
-        serving,
-        "FrameChannel",
-        SimpleNamespace(from_socket=lambda _sock: _ScriptedTransport()),
-    )
-    image = np.zeros((256, 256, 3), dtype=np.uint8)
-    benchmark = Benchmark(
-        name="bench-1",
-        embodiment=FRANKA_EE_DELTA,
-        sensors=[Camera(name=CameraName.AGENTVIEW, shape=image.shape)],
-    )
-
-    def step(_action) -> StepResult:
-        assert partial_sent.wait(timeout=2.0)
-        return StepResult(
-            observation=Observation(sensors={CameraName.AGENTVIEW: image}),
-            success=True,
-            done=True,
-        )
-
-    run_episodes(
-        benchmark,
-        lambda _episode: ResetResult(
-            Observation(sensors={CameraName.AGENTVIEW: image}), task_id="task"
-        ),
-        step,
-        server="policy:9000",
-        episode_ids=[0],
-        max_steps=1,
-        live_view_server="127.0.0.1:9001",
-        live_view_camera=CameraName.AGENTVIEW,
-    )
-    receiver.join(timeout=1.0)
-
-    assert not receiver.is_alive()
-
-
-def test_run_episodes_rejects_ids_that_cannot_identify_an_episode():
-    from manifold.core.benchmark import Benchmark
-    from manifold.recipes import run_episodes
-
-    def dispatch(episode_ids: list[int]) -> None:
-        run_episodes(
-            cast(Benchmark, object()),
-            lambda _id: cast(ResetResult, object()),
-            _step,
-            server="h:1",
-            episode_ids=episode_ids,
-            max_steps=1,
-        )
-
-    with pytest.raises(ValueError):
-        dispatch([0, 1, 0])  # a repeat would report one episode_idx twice
-    with pytest.raises(ValueError):
-        dispatch([-1])
-
-
-def test_run_sharded_benchmark_parses_server_seeds_ids_and_emits_the_tally(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import run_sharded_benchmark
-
-    sock = _install_fake_transport(monkeypatch)
-    seeded: list[int] = []
-
-    def reset_episode(episode_id: int) -> ResetResult:
-        seeded.append(episode_id)
-        return ResetResult(Observation(), task_id="task")
-
-    events: list[str] = []
-    result = run_sharded_benchmark(
-        _fake_benchmark(),
-        reset_episode,
-        _one_step_episodes(succeeding=2),
-        server="host.example:9000",
-        total_episodes=10,
-        num_shards=2,
-        shard_index=1,
-        max_steps=50,
-        on_event=events.append,
-    )
-
-    assert sock.address == ("host.example", 9000)
-    assert seeded == [1, 3, 5, 7, 9]  # this shard's disjoint global ids, in order
-    assert result.successes == 2
-    assert events[-1] == "[bench shard 1/2] 2/5 succeeded (40.0%)"
-    # Each record carries the id its episode ran, not this shard's position in its own
-    # list: numbering by position would have every shard report episode 0.
-    assert [r.episode_idx for r in result.records] == [1, 3, 5, 7, 9]
-
-
-def test_run_sharded_benchmark_single_shard_runs_every_global_episode(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import run_sharded_benchmark
-
-    _install_fake_transport(monkeypatch)
-    seeded: list[int] = []
-
-    def reset_episode(episode_id: int) -> ResetResult:
-        seeded.append(episode_id)
-        return ResetResult(Observation(), task_id="task")
-
-    run_sharded_benchmark(
-        _fake_benchmark(),
-        reset_episode,
-        _one_step_episodes(succeeding=0),
-        server="h:1",
-        total_episodes=3,
-        max_steps=1,
-    )
-
-    assert seeded == [0, 1, 2]  # unsharded -> the whole global set, in order
-
-
-def test_run_sharded_benchmark_updates_the_rollup_after_each_episode(monkeypatch, tmp_path):
-    from manifold.core.values import Observation
-    from manifold.recipes import run_sharded_benchmark, serving
-
-    _install_fake_transport(monkeypatch)
-    writes: list[list[int]] = []
-
-    def capture(result, output_dir, *, benchmark_name):
-        assert output_dir == tmp_path
-        assert benchmark_name == "bench-1"
-        writes.append([record.episode_idx for record in result.records])
-        return tmp_path / "results" / "bench-1.json"
-
-    monkeypatch.setattr(serving, "write_rollup", capture)
-
-    run_sharded_benchmark(
-        _fake_benchmark(),
-        lambda _id: ResetResult(Observation(), task_id="task"),
-        _one_step_episodes(succeeding=1),
-        server="h:1",
-        total_episodes=6,
-        num_shards=2,
-        shard_index=1,
-        max_steps=1,
-        output_dir=tmp_path,
-    )
-
-    assert writes == [[1], [1, 3], [1, 3, 5]]
-
-
-def test_run_sharded_benchmark_writes_each_resets_task_id(monkeypatch, tmp_path):
-    import json
-
-    from manifold.core.values import Observation
-    from manifold.recipes import run_sharded_benchmark
-
-    _install_fake_transport(monkeypatch)
-
-    run_sharded_benchmark(
-        _fake_benchmark(),
-        lambda episode_id: ResetResult(Observation(), task_id=f"Task{episode_id}"),
-        _one_step_episodes(succeeding=1),
-        server="h:1",
-        total_episodes=4,
-        num_shards=2,
-        shard_index=0,
-        max_steps=1,
-        output_dir=tmp_path,
-    )
-
-    written = json.loads((tmp_path / "results" / "bench-1.json").read_text())
-    assert [record["task_id"] for record in written["records"]] == ["Task0", "Task2"]
-
-
-def test_run_sharded_benchmark_rejects_a_malformed_server():
-    from manifold.core.benchmark import Benchmark
-    from manifold.recipes import run_sharded_benchmark
-
-    with pytest.raises(ValueError):  # parsed before any connection is attempted
-        run_sharded_benchmark(
-            cast(Benchmark, object()),
-            lambda _id: cast(ResetResult, object()),
-            _step,
-            server="no-port",
-            total_episodes=1,
-            max_steps=1,
-        )
-
-
-def test_shard_episode_ids_rejects_bad_flags_as_a_catchable_valueerror():
-    from manifold.recipes import shard_episode_ids
-
-    with pytest.raises(ValueError):
-        shard_episode_ids(10, 0, 0)  # num_shards < 1
-    with pytest.raises(ValueError):
-        shard_episode_ids(10, 2, 2)  # shard_index out of [0, num_shards)
-
-
-# --- run_benchmark's episode records ----------------------------------------------
-#
-# The run loop is what measures an episode, so these drive it over a fake transport
-# (no socket, no policy) and assert on the records it produces.
-
-
-class _ScriptedTransport:
-    """Answers the handshake with READY, then every observation with one action."""
-
-    def __init__(self) -> None:
-        self.sent: list[str] = []
-        self.width = 0
-
-    def send(self, frame_type, payload) -> None:
-        from manifold.core.benchmark import Benchmark
-
-        self.sent.append(str(frame_type))
-        if self.sent[-1] == "hello":
-            # Answer in the width the benchmark declares, as a real policy would.
-            benchmark = Benchmark.model_validate(payload["benchmark"])
-            self.width = benchmark.embodiment.action.expected_length()
-
-    def recv(self):
-        from manifold.core.values import Action
-        from manifold.wire import FrameType, bridge
-
-        if self.sent[-1] == "hello":
-            return {"type": FrameType.READY, "payload": {}}
-        return {
-            "type": FrameType.ACTION,
-            "payload": bridge.encode_action(Action.from_array([0.0] * self.width)),
-        }
-
-
-def _run_over_fake_transport(monkeypatch, *, step, episodes, max_steps, instruction=None, **kw):
-    """Drive `run_benchmark` against a scripted transport, returning its result."""
-    from manifold.core.values import Observation
-    from manifold.recipes import run_benchmark
-
-    _install_fake_transport(monkeypatch)
-    return run_benchmark(
-        _fake_benchmark(instruction=instruction),
-        lambda: ResetResult(Observation(instruction=instruction), task_id="task"),
         step,
         episodes=episodes,
         max_steps=max_steps,
-        port=9000,
         on_event=lambda _m: None,
-        **kw,
     )
 
 
-def _install_fake_transport(monkeypatch) -> _FakeSocket:
-    """Answer the dial-out with a scripted transport; return the socket it dialled on.
-
-    Every run path in this module ends at one connection, so patching here drives the
-    real episode loop - the numbering, the tally and the recorder included - with no
-    socket and no policy behind it.
-    """
-    from manifold.recipes import serving
-
-    sock = _FakeSocket()
-    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: sock)
-    monkeypatch.setattr(
-        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _ScriptedTransport())
-    )
-    return sock
-
-
-def _fake_benchmark(*, instruction: str | None = None):
-    """The benchmark advertised in HELLO; only its name and instruction flag are read."""
-    from manifold.core.benchmark import Benchmark
-    from manifold.embodiments import FRANKA_EE_DELTA
-
-    return Benchmark(
-        name="bench-1", embodiment=FRANKA_EE_DELTA, instruction=instruction is not None
-    )
-
-
-def _one_step_episodes(*, succeeding: int):
-    """A step ending every episode on its first, of which the first `succeeding` succeed."""
+def test_evaluate_records_every_episode_with_its_own_step_count():
     from manifold.core.values import Observation
-    from manifold.recipes import StepResult
-
-    taken = {"steps": 0}
-
-    def step(_action) -> StepResult:
-        taken["steps"] += 1
-        return StepResult(
-            observation=Observation(), success=taken["steps"] <= succeeding, done=True
-        )
-
-    return step
-
-
-class _FakeSocket:
-    """A context-manager stand-in for the socket a run dials out on."""
-
-    def __init__(self) -> None:
-        self.address: tuple[str, int] | None = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc) -> None:
-        return None
-
-    def connect(self, address) -> None:
-        self.address = address
-
-    def close(self) -> None:
-        return None
-
-
-def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import StepResult
 
     # Succeed on the third step of every episode.
     taken = {"steps": 0}
@@ -1388,9 +560,9 @@ def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch
     def step(_action) -> StepResult:
         taken["steps"] += 1
         done = taken["steps"] % 3 == 0
-        return StepResult(observation=Observation(), success=done, done=done)
+        return StepResult(observation=Observation(), success=done, done=done, events=())
 
-    result = _run_over_fake_transport(monkeypatch, step=step, episodes=2, max_steps=10)
+    result = _evaluate(step=step, episodes=2, max_steps=10)
 
     assert [r.episode_idx for r in result.records] == [0, 1]
     assert [r.steps for r in result.records] == [3, 3]
@@ -1398,28 +570,26 @@ def test_run_benchmark_records_every_episode_with_its_own_step_count(monkeypatch
     assert (result.episodes, result.successes) == (2, 2)
 
 
-def test_run_benchmark_records_an_episode_that_exhausts_its_steps_as_a_failure(monkeypatch):
+def test_evaluate_records_an_episode_that_exhausts_its_steps_as_a_failure():
     from manifold.core.values import Observation
-    from manifold.recipes import StepResult
 
     def step(_action) -> StepResult:
-        return StepResult(observation=Observation(), success=False, done=False)
+        return StepResult(observation=Observation(), success=False, done=False, events=())
 
-    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=4)
+    result = _evaluate(step=step, episodes=1, max_steps=4)
 
     record = result.records[0]
     assert (record.success, record.steps) == (False, 4)
     assert result.success_rate == 0.0
 
 
-def test_an_episode_record_brackets_the_rollout_and_derives_its_duration(monkeypatch):
+def test_an_episode_record_brackets_the_rollout_and_derives_its_duration():
     from manifold.core.values import Observation
-    from manifold.recipes import StepResult
 
     def step(_action) -> StepResult:
-        return StepResult(observation=Observation(), success=True, done=True)
+        return StepResult(observation=Observation(), success=True, done=True, events=())
 
-    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2)
+    result = _evaluate(step=step, episodes=1, max_steps=2)
 
     record = result.records[0]
     assert record.started_at <= record.ended_at
@@ -1428,241 +598,26 @@ def test_an_episode_record_brackets_the_rollout_and_derives_its_duration(monkeyp
     assert 0.0 <= record.initialization_sec <= record.elapsed_sec
 
 
-def test_an_episode_takes_its_task_name_from_the_instruction_it_was_reset_with(monkeypatch):
+def test_an_episode_takes_its_task_name_from_the_instruction_it_was_reset_with():
     from manifold.core.values import Observation
-    from manifold.recipes import StepResult
 
     def step(_action) -> StepResult:
-        return StepResult(observation=Observation(), success=True, done=True)
+        return StepResult(observation=Observation(), success=True, done=True, events=())
 
-    result = _run_over_fake_transport(
-        monkeypatch, step=step, episodes=1, max_steps=2, instruction="pick up the mug"
-    )
+    result = _evaluate(step=step, episodes=1, max_steps=2, instruction="pick up the mug")
 
     assert result.records[0].task_name == "pick up the mug"
 
 
-def test_an_episode_falls_back_to_the_benchmark_name_when_no_instruction_is_published(
-    monkeypatch,
-):
+def test_an_episode_falls_back_to_the_benchmark_name_when_no_instruction_is_published():
     from manifold.core.values import Observation
-    from manifold.recipes import StepResult
 
     def step(_action) -> StepResult:
-        return StepResult(observation=Observation(), success=True, done=True)
+        return StepResult(observation=Observation(), success=True, done=True, events=())
 
-    result = _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2)
+    result = _evaluate(step=step, episodes=1, max_steps=2)
 
     assert result.records[0].task_name == "bench-1"
-
-
-# --- the episode recorder ----------------------------------------------------------
-#
-# The loop owns the episode lifecycle, so these assert on what it tells a recorder:
-# which id began, which step was the last, and that an episode is ended once whatever
-# happened inside it.
-
-
-class _FakeRecorder:
-    """Notes every lifecycle call the loop makes, in order."""
-
-    def __init__(self) -> None:
-        self.begun: list[int] = []
-        self.steps: list[tuple[bool, bool]] = []
-        self.ended = 0
-
-    def begin(self, episode_id: int) -> None:
-        self.begun.append(episode_id)
-
-    def record(self, action, *, success: bool, done: bool) -> None:
-        self.steps.append((success, done))
-
-    def end(self) -> None:
-        self.ended += 1
-
-
-def test_a_recorder_is_begun_with_the_global_episode_id_of_each_episode(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import run_sharded_benchmark
-
-    _install_fake_transport(monkeypatch)
-    recorder = _FakeRecorder()
-
-    run_sharded_benchmark(
-        _fake_benchmark(),
-        lambda _id: ResetResult(Observation(), task_id="task"),
-        _one_step_episodes(succeeding=0),
-        server="h:1",
-        total_episodes=10,
-        num_shards=2,
-        shard_index=1,
-        max_steps=4,
-        recorder=recorder,
-    )
-
-    # A shard writing a file per episode collides with its sibling unless it is told
-    # the global id rather than its own position.
-    assert recorder.begun == [1, 3, 5, 7, 9]
-    assert recorder.ended == 5
-
-
-def test_a_recorder_is_told_the_last_step_when_the_step_budget_runs_out(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import StepResult
-
-    def step(_action) -> StepResult:
-        return StepResult(observation=Observation(), success=False, done=False)
-
-    recorder = _FakeRecorder()
-    _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=3, recorder=recorder)
-
-    # The driver never reports done, so the budget is what ends this episode - and the
-    # recorder is told, which it could not work out for itself.
-    assert recorder.steps == [(False, False), (False, False), (False, True)]
-    assert recorder.ended == 1
-
-
-def test_a_recorder_is_told_the_last_step_when_the_driver_reports_done(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import StepResult
-
-    taken = {"steps": 0}
-
-    def step(_action) -> StepResult:
-        taken["steps"] += 1
-        finished = taken["steps"] == 2
-        return StepResult(observation=Observation(), success=finished, done=finished)
-
-    recorder = _FakeRecorder()
-    _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=9, recorder=recorder)
-
-    assert recorder.steps == [(False, False), (True, True)]
-
-
-def test_a_recorder_is_ended_when_a_step_raises(monkeypatch):
-    def step(_action) -> StepResult:
-        raise RuntimeError("the sim fell over")
-
-    recorder = _FakeRecorder()
-    with pytest.raises(RuntimeError):
-        _run_over_fake_transport(monkeypatch, step=step, episodes=1, max_steps=2, recorder=recorder)
-
-    # Whatever the recorder opened is closed, which is why the benchmark no longer
-    # needs a `finally` of its own.
-    assert (recorder.begun, recorder.ended) == ([0], 1)
-
-
-def test_a_recorder_is_ended_when_its_own_begin_raises(monkeypatch):
-    from manifold.core.values import Observation
-    from manifold.recipes import StepResult
-
-    class _FailingRecorder(_FakeRecorder):
-        def begin(self, episode_id: int) -> None:
-            super().begin(episode_id)
-            raise RuntimeError("the log would not open")
-
-    recorder = _FailingRecorder()
-    with pytest.raises(RuntimeError):
-        _run_over_fake_transport(
-            monkeypatch,
-            step=lambda _a: StepResult(observation=Observation(), success=True, done=True),
-            episodes=1,
-            max_steps=2,
-            recorder=recorder,
-        )
-
-    # `begin` is where a recorder opens things, so a `begin` that raises part-way is
-    # the path with most to release - it has to be inside the `finally`, not before it.
-    assert recorder.ended == 1
-
-
-# --- write_rollup ------------------------------------------------------------------
-
-
-def test_write_rollup_leaves_the_records_where_a_runner_scans(tmp_path):
-    import json
-
-    from manifold.recipes import BenchmarkResult, EpisodeRecord, write_rollup
-
-    record = EpisodeRecord(
-        episode_idx=3,
-        task_name="pick up the mug",
-        success=True,
-        steps=12,
-        initialization_sec=3.0,
-        started_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-        ended_at=datetime(2026, 1, 1, 12, 0, 30, tzinfo=timezone.utc),
-        task_id="PickUpTheMugTask",
-    )
-
-    path = write_rollup(BenchmarkResult(records=(record,)), tmp_path, benchmark_name="libero")
-
-    assert path == tmp_path / "results" / "libero.json"
-    assert json.loads(path.read_text()) == {
-        "records": [
-            {
-                "episode_idx": 3,
-                "task_name": "pick up the mug",
-                "success": True,
-                "steps": 12,
-                "initialization_sec": 3.0,
-                "started_at": "2026-01-01T12:00:00+00:00",
-                "ended_at": "2026-01-01T12:00:30+00:00",
-                "task_id": "PickUpTheMugTask",
-            }
-        ]
-    }
-
-
-def test_write_rollup_round_trips_its_instants_with_their_timezone(tmp_path):
-    import json
-
-    from manifold.recipes import BenchmarkResult, write_rollup
-
-    path = write_rollup(
-        BenchmarkResult(records=_records(2, successes=1)), tmp_path, benchmark_name="bench"
-    )
-
-    (first, second) = json.loads(path.read_text())["records"]
-    assert [first["episode_idx"], second["episode_idx"]] == [0, 1]
-    assert datetime.fromisoformat(first["started_at"]).tzinfo is not None
-    assert not (tmp_path / "results" / "bench.json.tmp").exists()
-
-
-def test_run_benchmark_refuses_an_action_the_benchmark_cannot_take(monkeypatch) -> None:
-    # A policy on an older SDK can drop `arm_count`, misread the benchmark's width and
-    # answer in the width it believes. Every action is held to the benchmark's own
-    # spec first, so the environment is never driven with one it cannot take.
-    from manifold.core.values import Action, Observation
-    from manifold.recipes import PairingRejected, run_benchmark, serving
-    from manifold.wire import FrameType, bridge
-
-    class _OneFloatShort(_ScriptedTransport):
-        def recv(self):
-            reply = super().recv()
-            if reply["type"] != FrameType.ACTION:
-                return reply
-            short = Action.from_array([0.0] * (self.width - 1))
-            return {**reply, "payload": bridge.encode_action(short)}
-
-    monkeypatch.setattr(serving.socket, "socket", lambda *a, **k: _FakeSocket())
-    monkeypatch.setattr(
-        serving.FrameChannel, "from_socket", staticmethod(lambda _sock: _OneFloatShort())
-    )
-
-    def never_step(_action: Action) -> StepResult:
-        raise AssertionError("the environment was driven with an action it cannot take")
-
-    with pytest.raises(PairingRejected, match="cannot take"):
-        run_benchmark(
-            _fake_benchmark(),
-            lambda: ResetResult(Observation(), task_id="task"),
-            never_step,
-            episodes=1,
-            max_steps=5,
-            port=9000,
-            on_event=lambda _m: None,
-        )
 
 
 def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> None:

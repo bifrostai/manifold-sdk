@@ -18,8 +18,15 @@ from collections.abc import Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from manifold.core.conventions import RotationFormat
+from manifold.core.conventions import CameraAxes, RotationFormat
 from manifold.lib.compat import assert_never
+
+# A camera's OpenGL axes and its OpenCV axes differ by a half turn about its x axis,
+# which keeps x and flips y and z. The flip is its own inverse.
+_FLIP_Y_AND_Z = np.diag([1.0, -1.0, -1.0])
+
+# The `xyzw` quaternion of no rotation.
+_IDENTITY_XYZW = (0.0, 0.0, 0.0, 1.0)
 
 
 def convert(values: Sequence[float], source: RotationFormat, target: RotationFormat) -> list[float]:
@@ -172,8 +179,71 @@ def six_d_from_matrix(matrix: np.ndarray) -> list[float]:
     return matrix[:, 0].tolist() + matrix[:, 1].tolist()
 
 
+def wxyz_to_xyzw(quaternion: Sequence[float] | np.ndarray) -> np.ndarray:
+    """A scalar-first `(w, x, y, z)` quaternion as scalar-last `(x, y, z, w)`.
+
+    MuJoCo and Isaac Lab before its 1.0 release store quaternions scalar-first, and
+    `RotationFormat.QUATERNION` is scalar-last.
+    """
+    values = np.asarray(quaternion, dtype=np.float64).reshape(-1)[:4]
+    return values[[1, 2, 3, 0]]
+
+
+def xyzw_to_wxyz(quaternion: Sequence[float] | np.ndarray) -> np.ndarray:
+    """A scalar-last `(x, y, z, w)` quaternion as scalar-first `(w, x, y, z)`."""
+    values = np.asarray(quaternion, dtype=np.float64).reshape(-1)[:4]
+    return values[[3, 0, 1, 2]]
+
+
+def xyzw_from_rotation_matrix(rotation: np.ndarray) -> np.ndarray:
+    """Return a 3x3 rotation matrix as an `xyzw` quaternion in float32.
+
+    A matrix that is not a rotation, such as a matrix of zeros or of NaN, gives the
+    quaternion of no rotation, so a replay still draws the body or the camera.
+    """
+    try:
+        quaternion = np.asarray(
+            from_matrix(np.asarray(rotation, dtype=np.float64), RotationFormat.QUATERNION),
+            dtype=np.float32,
+        )
+    except (ValueError, np.linalg.LinAlgError):
+        return np.array(_IDENTITY_XYZW, dtype=np.float32)
+    if not np.isfinite(quaternion).all():
+        return np.array(_IDENTITY_XYZW, dtype=np.float32)
+    return quaternion
+
+
+def rotation_matrix_from_xyzw(quaternion: np.ndarray | Sequence[float]) -> np.ndarray:
+    """Return an `xyzw` quaternion as a 3x3 rotation matrix.
+
+    A quaternion that is not a rotation, such as a quaternion of zeros or of NaN, gives
+    the identity matrix.
+    """
+    try:
+        matrix = to_matrix(
+            np.asarray(quaternion, dtype=np.float64).reshape(-1).tolist(),
+            RotationFormat.QUATERNION,
+        )
+    except ValueError:
+        return np.eye(3)
+    if not np.isfinite(matrix).all():
+        return np.eye(3)
+    return matrix
+
+
+def convert_camera_axes(rotation: np.ndarray, source: CameraAxes, target: CameraAxes) -> np.ndarray:
+    """A camera's 3x3 rotation, with its own axes changed from `source` to `target`.
+
+    The rotation is camera-to-world. MuJoCo's camera bodies use OpenGL axes, and a
+    replay log stores camera poses in OpenCV axes.
+    """
+    matrix = np.asarray(rotation, dtype=np.float64).reshape(3, 3)
+    return matrix if source is target else matrix @ _FLIP_Y_AND_Z
+
+
 __all__ = [
     "convert",
+    "convert_camera_axes",
     "from_matrix",
     "from_rotation",
     "geodesic_angle",
@@ -182,4 +252,6 @@ __all__ = [
     "six_d_from_matrix",
     "to_matrix",
     "to_rotation",
+    "wxyz_to_xyzw",
+    "xyzw_to_wxyz",
 ]
