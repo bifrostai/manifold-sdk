@@ -189,6 +189,10 @@ class SapienSimulator(Simulator):
         """An empty dict, because a SAPIEN benchmark sends the policy each camera of its replay."""
         return {}
 
+    def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
+        """No contacts, because this simulator does not read them yet."""
+        return frozenset()
+
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
         """The arm's and the gripper's joints and forces, from the articulation.
 

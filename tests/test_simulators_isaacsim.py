@@ -20,7 +20,7 @@ from manifold.benchmark.simulators.isaacsim import (
     IsaacSimSimulator,
 )
 from manifold.embodiments import DROID_JOINT_ABSOLUTE
-from manifold.replay import RerunTab
+from manifold.replay import ReplaySceneBodyRole, RerunTab
 
 _CONFIG = BenchmarkIsaacSimSimulatorConfig(
     name="isaacsim",
@@ -30,6 +30,7 @@ _CONFIG = BenchmarkIsaacSimSimulatorConfig(
     max_position_iterations=None,
     env_spacing=None,
     camera_far_clip=None,
+    touch_links=None,
 )
 
 
@@ -440,6 +441,155 @@ def test_the_settings_apply_to_the_env_config(monkeypatch: pytest.MonkeyPatch) -
     assert shoulder.spawn.clipping_range == (0.01, 20.0)
 
 
+def test_the_touch_sensors_watch_each_link_against_the_other_assets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ContactSensorCfg(SimpleNamespace):
+        pass
+
+    class AssetBaseCfg(SimpleNamespace):
+        pass
+
+    class ArticulationCfg(AssetBaseCfg):
+        pass
+
+    class RigidObjectCfg(AssetBaseCfg):
+        pass
+
+    monkeypatch.setitem(
+        sys.modules, "isaaclab.sensors", SimpleNamespace(ContactSensorCfg=ContactSensorCfg)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab.assets",
+        SimpleNamespace(
+            ArticulationCfg=ArticulationCfg,
+            AssetBaseCfg=AssetBaseCfg,
+            RigidObjectCfg=RigidObjectCfg,
+        ),
+    )
+    env_cfg = _env_cfg(
+        {
+            "robot": ArticulationCfg(prim_path="{ENV_REGEX_NS}/robot"),
+            "table": AssetBaseCfg(prim_path="{ENV_REGEX_NS}/table"),
+            "banana": RigidObjectCfg(prim_path="{ENV_REGEX_NS}/banana"),
+            "light": AssetBaseCfg(prim_path="/World/light"),
+        }
+    )
+    env_cfg.decimation = 4
+
+    IsaacSimSimulator.apply_settings(
+        env_cfg, _settings(touch_links={"panda_link1": "arm", "Gripper/finger": "gripper"})
+    )
+
+    arm = env_cfg.scene.manifold_touch__panda_link1
+    gripper = env_cfg.scene.manifold_touch__Gripper__finger
+    assert arm.prim_path == "{ENV_REGEX_NS}/robot/panda_link1"
+    assert arm.filter_prim_paths_expr == ["{ENV_REGEX_NS}/table", "{ENV_REGEX_NS}/banana"]
+    assert gripper.filter_prim_paths_expr == ["{ENV_REGEX_NS}/table"]
+    assert arm.history_length == 4
+
+
+def test_the_contacts_are_each_links_part_and_what_it_pressed_on_in_the_last_action(
+    isaac: SimpleNamespace,
+) -> None:
+    # Two envs, two physics steps, one body and two filters: the table, then the banana.
+    history = np.zeros((2, 2, 1, 2, 3))
+    history[1, 0, 0, 0] = [0.0, 0.0, 0.3]
+    history[1, 1, 0, 1] = [0.0, 0.05, 0.0]
+    sensor = SimpleNamespace(
+        cfg=SimpleNamespace(
+            prim_path="/World/envs/env_.*/robot/panda_link1",
+            filter_prim_paths_expr=["/World/envs/env_.*/table", "/World/envs/env_.*/banana"],
+        ),
+        data=SimpleNamespace(force_matrix_w_history=history),
+    )
+    scene = _Scene({"manifold_touch__panda_link1": sensor})
+    unwrapped = SimpleNamespace(
+        scene=scene,
+        termination_manager=SimpleNamespace(active_terms=[], get_term=lambda _name: None),
+    )
+    simulator = IsaacSimSimulator(
+        _settings(touch_links={"panda_link1": "arm"}), _benchmark(["over_shoulder_left"])
+    )
+    simulator.attach(SimpleNamespace(inner=SimpleNamespace(unwrapped=unwrapped)), [0, 1])
+
+    # 0.05 N on the banana is no touch, and env 0 touches nothing.
+    assert simulator.replay_contacts(1) == {("arm", "table")}
+    assert simulator.replay_contacts(0) == frozenset()
+
+
+def test_a_touch_sensor_whose_forces_outnumber_its_filters_names_no_touches(
+    isaac: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    # One filter path that matched two bodies, so two forces for one name.
+    history = np.full((1, 1, 1, 2, 3), 1.0)
+    sensor = SimpleNamespace(
+        cfg=SimpleNamespace(
+            prim_path="/World/envs/env_.*/robot/panda_link1",
+            filter_prim_paths_expr=["/World/envs/env_.*/table"],
+        ),
+        data=SimpleNamespace(force_matrix_w_history=history),
+    )
+    unwrapped = SimpleNamespace(
+        scene=_Scene({"manifold_touch__panda_link1": sensor}),
+        termination_manager=SimpleNamespace(active_terms=[], get_term=lambda _name: None),
+    )
+    simulator = IsaacSimSimulator(
+        _settings(touch_links={"panda_link1": "arm"}), _benchmark(["over_shoulder_left"])
+    )
+    simulator.attach(SimpleNamespace(inner=SimpleNamespace(unwrapped=unwrapped)), [0])
+
+    assert simulator.replay_contacts(0) == frozenset()
+    assert simulator.replay_contacts(0) == frozenset()
+    assert caplog.text.count("1 filters but 2 forces") == 1
+
+
+def test_a_gripper_sensor_watches_a_table_that_is_a_rigid_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ContactSensorCfg(SimpleNamespace):
+        pass
+
+    class AssetBaseCfg(SimpleNamespace):
+        pass
+
+    class ArticulationCfg(AssetBaseCfg):
+        pass
+
+    class RigidObjectCfg(AssetBaseCfg):
+        pass
+
+    monkeypatch.setitem(
+        sys.modules, "isaaclab.sensors", SimpleNamespace(ContactSensorCfg=ContactSensorCfg)
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab.assets",
+        SimpleNamespace(
+            ArticulationCfg=ArticulationCfg,
+            AssetBaseCfg=AssetBaseCfg,
+            RigidObjectCfg=RigidObjectCfg,
+        ),
+    )
+    env_cfg = _env_cfg(
+        {
+            "robot": ArticulationCfg(prim_path="{ENV_REGEX_NS}/robot"),
+            "table": RigidObjectCfg(prim_path="{ENV_REGEX_NS}/table"),
+            "banana": RigidObjectCfg(prim_path="{ENV_REGEX_NS}/banana"),
+            "light": AssetBaseCfg(prim_path="/World/light"),
+        }
+    )
+    env_cfg.decimation = 4
+
+    IsaacSimSimulator.apply_settings(
+        env_cfg, _settings(touch_links={"panda_link1": "arm", "Gripper/finger": "gripper"})
+    )
+
+    gripper = env_cfg.scene.manifold_touch__Gripper__finger
+    assert gripper.filter_prim_paths_expr == ["{ENV_REGEX_NS}/table"]
+
+
 def test_a_null_setting_keeps_the_envs_value() -> None:
     env_cfg = _env_cfg({})
 
@@ -520,6 +670,18 @@ def test_the_scene_groups_drawn_prims_under_their_rigid_bodies(isaac: SimpleName
     # table's guide cube and sphere and the base's collision box are left out.
     assert len(bodies["top"].parts) == 1
     assert len(bodies["base_link"].parts) == 1
+
+
+def test_each_body_has_its_role_and_the_scenes_name_for_an_object(isaac: SimpleNamespace) -> None:
+    simulator, _ = _attached({}, ["over_shoulder_left"], [0])
+    labels = {body.name: (body.role, body.object) for body in simulator.replay_bodies(0)}
+    assert labels == {
+        "base_link": (ReplaySceneBodyRole.ROBOT, None),
+        "finger": (ReplaySceneBodyRole.ROBOT, None),
+        "banana": (ReplaySceneBodyRole.OBJECT, "banana"),
+        "bowl": (ReplaySceneBodyRole.OBJECT, "bowl"),
+        "top": (ReplaySceneBodyRole.FIXTURE, "table"),
+    }
 
 
 def test_a_parts_colour_comes_from_its_material_then_its_display_colour(

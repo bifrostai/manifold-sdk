@@ -52,6 +52,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.benchmark.simulators import (
     BOX_VERTICES,
+    GRIPPER,
+    TABLE,
     Simulator,
     bounding_box_part,
 )
@@ -61,6 +63,7 @@ from manifold.replay import (
     ReplayMesh,
     ReplayPose,
     ReplaySceneBody,
+    ReplaySceneBodyRole,
     ReplayScenePart,
     RerunScalar,
     RerunTab,
@@ -99,6 +102,12 @@ _TOUCH_NEWTONS = 0.5
 # How near the end effector an object's origin counts as near the gripper, when
 # no contact sensor reports the gripper's forces.
 _GRIPPER_NEAR_METRES = 0.08
+
+# A robot part presses on a body this hard or harder, in newtons, when it touches it.
+_PART_TOUCH_NEWTONS = 0.1
+
+# The start of the scene name of each contact sensor that `apply_settings` adds.
+_TOUCH_SENSOR_PREFIX = "manifold_touch__"
 
 # How near two objects' origins count as near each other.
 _OBJECT_NEAR_METRES = 0.10
@@ -144,6 +153,11 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     1 to 255. `env_spacing` is the distance in metres
     between neighbouring envs. `camera_far_clip` is the distance in metres past which
     the cameras draw nothing.
+
+    `touch_links` maps each robot link whose contacts the replay records to `arm` or
+    `gripper`, by the link's prim path below the robot's prim, such as `panda_link1`.
+    `apply_settings` adds a contact sensor to each link, filtered to the scene's other
+    assets. Null adds none, and the replay then records no contacts.
     """
 
     # A config lists all of its values, so an unknown key raises.
@@ -156,6 +170,7 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     max_position_iterations: int | None = Field(ge=1, le=255)
     env_spacing: float | None = Field(gt=0)
     camera_far_clip: float | None = Field(gt=0)
+    touch_links: dict[str, Literal["arm", "gripper"]] | None
 
 
 def _take_sigsegv() -> None:
@@ -203,10 +218,12 @@ class IsaacSimSimulator(Simulator):
         self._envs: dict[int, tuple[Any, int]] = {}
         self._caches: dict[int, _IsaacSimEpisodeCache] = {}
         self._scalar_last = False
+        # The touch links already warned about, so each warns once.
+        self._unnamed_touches: set[str] = set()
 
     @staticmethod
     def apply_settings(env_cfg: Any, config: BenchmarkIsaacSimSimulatorConfig) -> None:
-        """Set the config's solver cap, env spacing and camera far clip on `env_cfg`.
+        """Set the config's solver cap, env spacing, camera far clip and touch sensors on `env_cfg`.
 
         `env_cfg` is an Isaac Lab env's config before the env is built. A setting that is
         null keeps the env's value. A setting without its target in `env_cfg` raises,
@@ -240,6 +257,7 @@ class IsaacSimSimulator(Simulator):
                     else _NEAR_CLIP_METRES
                 )
                 spawn.clipping_range = (near, config.camera_far_clip)
+        IsaacSimSimulator._add_touch_sensors(env_cfg, scene_cfg, config)
 
     @property
     def supported_versions(self) -> dict[str, str]:
@@ -324,6 +342,7 @@ class IsaacSimSimulator(Simulator):
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         parts: dict[str, list[ReplayScenePart]] = {}
         tracked_bodies: dict[str, _TrackedBody | ReplayPose] = {}
+        labels: dict[str, tuple[ReplaySceneBodyRole, str | None]] = {}
         owners: dict[str, str] = {}
         skipped: dict[str, int] = {}
         boxed: list[str] = []
@@ -341,6 +360,7 @@ class IsaacSimSimulator(Simulator):
             path = str(owner.GetPath())
             name = self._unique_name(str(owner.GetName()) or path, path, owners)
             tracked = self._tracked_body(path, scene)
+            labels.setdefault(name, self._body_labels(tracked))
             if tracked is None:
                 pose = self._pose(self._matrix(cache.GetLocalToWorldTransform(owner)), metres)
                 local_position = (pose.position - origin).astype(np.float32)
@@ -371,7 +391,10 @@ class IsaacSimSimulator(Simulator):
             )
         self._caches[env_id] = self._episode_cache(isaac, tracked_bodies)
         return tuple(
-            ReplaySceneBody(name=name, parts=tuple(found)) for name, found in parts.items()
+            ReplaySceneBody(
+                name=name, parts=tuple(found), role=labels[name][0], object=labels[name][1]
+            )
+            for name, found in parts.items()
         )
 
     def replay_poses(self, env_id: int) -> dict[str, ReplayPose]:
@@ -410,6 +433,37 @@ class IsaacSimSimulator(Simulator):
             output = isaac.scene.sensors[name].data.output
             frames[name] = self._halved(self._numpy(output["rgb"])[row])
         return frames
+
+    def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
+        """Each robot part that pressed on a scene asset with at least 0.1 N in the last action.
+
+        The touch sensors that `apply_settings` adds keep each physics step of an action,
+        so a touch between two actions is seen. An asset is named as the scene names it.
+        """
+        isaac, row = self._envs[env_id]
+        sensors = isaac.scene.sensors
+        touching = set()
+        for link, part in (self._config.touch_links or {}).items():
+            sensor = sensors.get(self._touch_sensor_name(link))
+            if sensor is None:
+                continue
+            history = self._numpy(sensor.data.force_matrix_w_history)
+            if history.size == 0:
+                continue
+            # (envs, steps, bodies, filters, 3), so the largest force for each filter.
+            norms = np.linalg.norm(np.asarray(history[row], dtype=np.float64), axis=-1)
+            peaks = norms.reshape(-1, norms.shape[-1]).max(axis=0)
+            names = self._touch_filter_names(isaac.scene, sensor.cfg.filter_prim_paths_expr)
+            if len(names) != len(peaks):
+                # A filter that matches several bodies, or none, gives the forces no names.
+                self._warn_unnamed_touches(link, len(names), len(peaks))
+                continue
+            touching.update(
+                (part, name)
+                for name, force in zip(names, peaks, strict=True)
+                if force >= _PART_TOUCH_NEWTONS
+            )
+        return frozenset(touching)
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
         """The robot's joints, the task's terms and distances, and the physics forces.
@@ -687,6 +741,118 @@ class IsaacSimSimulator(Simulator):
         """
         return re.fullmatch(f"{pattern}(/.*)?", path) is not None
 
+    def _body_labels(self, tracked: _TrackedBody | None) -> tuple[ReplaySceneBodyRole, str | None]:
+        """A body's role and the task's name for it, from what Isaac Lab tracks for it.
+
+        A rigid object is an object, named by the scene. A link of the config's robot is
+        the robot. A link of another articulation, such as a cabinet's door, is an object
+        that the task does not name. A body that Isaac Lab does not move is a fixture, and
+        is `TABLE`.
+        """
+        if tracked is None:
+            return ReplaySceneBodyRole.FIXTURE, TABLE
+        kind, asset, _index = tracked
+        if kind == "root":
+            return ReplaySceneBodyRole.OBJECT, asset
+        if asset == self._config.robot:
+            return ReplaySceneBodyRole.ROBOT, None
+        return ReplaySceneBodyRole.OBJECT, None
+
+    @staticmethod
+    def _add_touch_sensors(
+        env_cfg: Any, scene_cfg: Any, config: BenchmarkIsaacSimSimulatorConfig
+    ) -> None:
+        """Add a contact sensor to each of `config.touch_links`, if the config lists any.
+
+        A gripper link's sensor is filtered to the assets that are not objects, the
+        table included, and an arm link's sensor to every asset in the env other than
+        an articulation, such as the robot. Each sensor keeps every physics step of an
+        action.
+        """
+        if config.touch_links is None:
+            return
+        from isaaclab.sensors import ContactSensorCfg  # ty: ignore[unresolved-import]
+
+        robot = getattr(scene_cfg, config.robot, None)
+        if robot is None:
+            raise ValueError(f"the env's scene config has no robot {config.robot!r}")
+        assets = IsaacSimSimulator._touch_assets(scene_cfg)
+        fixtures = [path for path, is_object in assets if not is_object]
+        everything = [path for path, _is_object in assets]
+        for link, part in config.touch_links.items():
+            setattr(
+                scene_cfg,
+                IsaacSimSimulator._touch_sensor_name(link),
+                ContactSensorCfg(
+                    prim_path=f"{robot.prim_path}/{link}",
+                    filter_prim_paths_expr=fixtures if part == GRIPPER else everything,
+                    history_length=int(getattr(env_cfg, "decimation", 1)),
+                ),
+            )
+
+    @staticmethod
+    def _touch_assets(scene_cfg: Any) -> list[tuple[str, bool]]:
+        """Each asset in an env other than an articulation, with whether it is an object.
+
+        An asset is named by its prim path. An object is a rigid object other than the
+        table: a task can make its table a rigid object, and the table is never one of
+        the objects that the hooks report the gripper touching. An asset outside the
+        envs, such as the ground or a light, is left out.
+        """
+        from isaaclab.assets import (  # ty: ignore[unresolved-import]
+            ArticulationCfg,
+            AssetBaseCfg,
+            RigidObjectCfg,
+        )
+
+        found = []
+        for name, asset in vars(scene_cfg).items():
+            if not isinstance(asset, AssetBaseCfg) or isinstance(asset, ArticulationCfg):
+                continue
+            if "{ENV_REGEX_NS}" in asset.prim_path:
+                is_object = isinstance(asset, RigidObjectCfg) and name != TABLE
+                found.append((asset.prim_path, is_object))
+        return found
+
+    def _warn_unnamed_touches(self, link: str, filters: int, forces: int) -> None:
+        """Log once that a link's touches are left out.
+
+        The sensor's forces do not match its filters one to one, so no force has a name.
+        """
+        if link in self._unnamed_touches:
+            return
+        self._unnamed_touches.add(link)
+        _logger.warning(
+            "the touch sensor on %s has %d filters but %d forces, so its touches are left out",
+            link,
+            filters,
+            forces,
+        )
+
+    @staticmethod
+    def _touch_sensor_name(link: str) -> str:
+        """The scene name of the touch sensor on `link`."""
+        return _TOUCH_SENSOR_PREFIX + link.replace("/", "__")
+
+    @staticmethod
+    def _touch_filter_names(scene: Any, filters: Any) -> list[str]:
+        """The name of the asset of each filter path.
+
+        A rigid object keeps its scene name, and another asset is `TABLE`. A path is
+        matched by its last part, because Isaac Lab fills in the env's part of a path
+        when it builds the scene.
+        """
+        rigid = {
+            IsaacSimSimulator._last_part(asset.cfg.prim_path): str(name)
+            for name, asset in scene.rigid_objects.items()
+        }
+        return [rigid.get(IsaacSimSimulator._last_part(path), TABLE) for path in filters or ()]
+
+    @staticmethod
+    def _last_part(path: Any) -> str:
+        """The last part of a prim path."""
+        return str(path).rstrip("/").rsplit("/", 1)[-1]
+
     @staticmethod
     def _tracked_body(path: str, scene: Any) -> _TrackedBody | None:
         """What Isaac Lab tracks for the rigid body at `path`, or None for a fixed body."""
@@ -720,6 +886,8 @@ class IsaacSimSimulator(Simulator):
         """
         chosen: dict[str, tuple[str, tuple[str, ...]]] = {}
         for name, sensor in scene.sensors.items():
+            if str(name).startswith(_TOUCH_SENSOR_PREFIX):
+                continue
             cfg = sensor.cfg
             filters = getattr(cfg, "filter_prim_paths_expr", None)
             if filters is None or not IsaacSimSimulator._is_under(cfg.prim_path, robot_path):
