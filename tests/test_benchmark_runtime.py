@@ -839,7 +839,7 @@ def test_an_optional_hook_that_a_hooks_file_leaves_out_does_nothing():
     assert hooks.on_stop(None, None) == "stopped"
 
 
-def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monkeypatch):
+def test_check_writes_the_spec_and_the_run_values(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps(_raw_config({"type": "single"})))
     (tmp_path / "hooks.py").write_text(
         "def on_load(config, task_config, logger): ...\n"
@@ -852,7 +852,15 @@ def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monk
 
     main()
 
-    spec = Benchmark.model_validate_json((tmp_path / "spec.json").read_text())
+    written = json.loads((tmp_path / "spec.json").read_text())
+    assert written["run"] == {
+        "seed": 0,
+        "max_steps": 5,
+        "step_seconds": 0.05,
+        "image_format": "jpeg",
+    }
+    # A reader that knows only the spec's keys ignores `run`.
+    spec = Benchmark.model_validate(written)
     assert spec.name == "toy"
 
 

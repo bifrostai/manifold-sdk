@@ -3,9 +3,8 @@
 A benchmark version consists of a JSON config file and a hooks file, `hooks.py`, in
 the same directory. The config states where upstream comes from, which Service runs
 it, how many envs run at once, the run seed and the step limit, the values that only
-the hooks read, and the spec. The spec has the same JSON as the `spec.json` that
-registration reads, and `--check` writes it unchanged. The hooks file contains the
-upstream calls.
+the hooks read, and the spec. `--check` writes the spec and the run values to the
+`spec.json` that registration reads. The hooks file contains the upstream calls.
 
 A benchmark with several images, such as an image for each suite, can put the shared
 values in a base config. The config of each image lists the base config in `extends`

@@ -7,7 +7,9 @@ then builds the Service and runs the Client. The runner passes the addresses of 
 task server, the policy and the live view in environment variables.
 
 An image build runs the command with `--check`. The check reads the config and the
-hooks file, writes the spec to `spec.json` beside the config, and exits:
+hooks file, writes the spec to `spec.json` beside the config, and exits. `spec.json`
+has the spec's keys and a `run` key with the config's run values, so that registration
+stores the seed, step limit, step period and image format with the version:
 
     python -m manifold.benchmark --check /opt/manifold/config.json
 """
@@ -15,6 +17,7 @@ hooks file, writes the spec to `spec.json` beside the config, and exits:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -50,7 +53,11 @@ def main() -> None:
     hooks = load_hooks(config, args.config.parent)
     if args.check:
         spec = args.config.parent / "spec.json"
-        spec.write_text(benchmark.model_dump_json(indent=2) + "\n", encoding="utf-8")
+        advertised = {
+            **benchmark.model_dump(mode="json"),
+            "run": config.run.model_dump(mode="json"),
+        }
+        spec.write_text(json.dumps(advertised, indent=2) + "\n", encoding="utf-8")
         print(f"checked {args.config} and its hooks file, and wrote {spec}", flush=True)
         return
     # Other packages log each request at INFO, so only the `manifold` loggers show INFO.
