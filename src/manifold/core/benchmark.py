@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import (
@@ -30,11 +30,49 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 
+class ActionRange(BaseModel):
+    """The values that a benchmark accepts in one action, with one entry for each value.
+
+    `low` and `high` bound each value. `scale` is how far one unit of each value moves
+    the robot, in metres for a position and in radians for a rotation, for a benchmark
+    that scales the action that it receives. A value without a unit, such as a gripper
+    command, has a scale of 1. `scale` is None when the benchmark reads each value in
+    metres and radians already.
+
+    For example, robosuite's OSC controller clips each value to -1 to 1, and one unit
+    moves the arm 0.05 m or turns it 0.5 rad.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    low: tuple[float, ...]
+    high: tuple[float, ...]
+    scale: tuple[float, ...] | None = None
+
+    @model_validator(mode="after")
+    def _check_entries(self) -> ActionRange:
+        """Require one entry for each value, and each low bound at or below its high bound."""
+        if len(self.low) != len(self.high):
+            raise ValueError(f"low has {len(self.low)} values and high has {len(self.high)}")
+        if self.scale is not None and len(self.scale) != len(self.low):
+            raise ValueError(f"scale has {len(self.scale)} values and low has {len(self.low)}")
+        above = [
+            index for index, (lo, hi) in enumerate(zip(self.low, self.high, strict=True)) if lo > hi
+        ]
+        if above:
+            raise ValueError(f"low is above high at the values {above}")
+        return self
+
+
 class Benchmark(BaseModel):
     """An embodiment in a task, with the sensors it publishes.
 
     `instruction` records whether the benchmark publishes a language instruction.
     A policy that needs one is incompatible with a benchmark that publishes none.
+
+    `action_range` declares the values that the embodiment's action accepts, so that a
+    policy author can scale the policy's output to them. It is None when the benchmark
+    declares no range. Pairing does not compare it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -43,6 +81,18 @@ class Benchmark(BaseModel):
     embodiment: Embodiment
     sensors: list[Camera] = Field(default_factory=list)
     instruction: bool = True
+    action_range: ActionRange | None = None
+
+    @model_validator(mode="after")
+    def _check_action_range_length(self) -> Benchmark:
+        """Require the action range to have one entry for each value of the action."""
+        expected = self.embodiment.action.expected_length()
+        if self.action_range is not None and len(self.action_range.low) != expected:
+            raise ValueError(
+                f"action_range has {len(self.action_range.low)} values and the action "
+                f"has {expected}"
+            )
+        return self
 
     @classmethod
     def from_received(cls, payload: Mapping[str, Any]) -> Benchmark:
@@ -125,4 +175,7 @@ class Benchmark(BaseModel):
         return gripper
 
 
-__all__ = ["Benchmark"]
+__all__ = [
+    "ActionRange",
+    "Benchmark",
+]
