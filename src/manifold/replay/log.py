@@ -113,6 +113,14 @@ class ReplayFrameType(StrEnum):
     STEP = "step"  # one per step: a pose per body, plus the declared channels.
 
 
+class ReplaySceneBodyRole(StrEnum):
+    """What a scene body is in the task."""
+
+    ROBOT = "robot"
+    OBJECT = "object"
+    FIXTURE = "fixture"
+
+
 class ReplayChannelKind(StrEnum):
     """What a channel's per-step value is, and so how a reader renders it."""
 
@@ -242,10 +250,30 @@ class ReplayScenePart:
 
 @dataclass(frozen=True, eq=False)
 class ReplaySceneBody:
-    """One named rigid body in the scene, and the geometry that moves with it."""
+    """One named rigid body in the scene, and the geometry that moves with it.
+
+    `role` says whether the body belongs to the robot, is one of the task's objects,
+    or is a fixture, such as a table. `object` is the task's name for the body, the
+    name that the hooks' facts use, such as `akita_black_bowl_1`. Both are None when
+    the simulator cannot tell, and in a log written before they existed.
+    """
 
     name: str
     parts: tuple[ReplayScenePart, ...]
+    role: ReplaySceneBodyRole | None = None
+    object: str | None = None
+
+
+@dataclass(frozen=True, eq=False)
+class ReplayFingerPad:
+    """A fingertip pad of the gripper: the scene body it moves with, and its centre.
+
+    `offset` is the pad's centre in the body's frame, in metres. A consumer finds what
+    sits between the fingers from the segment between the two pads.
+    """
+
+    body: str
+    offset: np.ndarray
 
 
 @dataclass(frozen=True, eq=False)
@@ -415,6 +443,8 @@ class ReplayLog:
     # here, a step with no `FailureEvent` of that type had none; every other
     # type is the grader's to work out.
     failure_types: tuple[FailureType, ...] = ()
+    # The gripper's fingertip pads, empty for a log whose publisher listed none.
+    finger_pads: tuple[ReplayFingerPad, ...] = ()
 
 
 class ReplayLogWriter:
@@ -441,6 +471,7 @@ class ReplayLogWriter:
         overview_group: str | None = None,
         cameras: Iterable[ReplayCameraPinhole] = (),
         failure_types: Iterable[FailureType] = (),
+        finger_pads: Iterable[ReplayFingerPad] = (),
     ) -> None:
         """Open `path` for writing and emit the header.
 
@@ -461,6 +492,9 @@ class ReplayLogWriter:
         `failure_types` lists the failure types that the benchmark detects. For
         each listed type, the benchmark records every occurrence (ADR 0009). The
         writer omits the key when the list is empty.
+
+        `finger_pads` lists the gripper's fingertip pads. The writer omits the key when
+        the list is empty.
 
         A scalar channel's `row` is checked per group. Every channel in a group
         must declare a row, or every channel must omit it. This prevents the reader
@@ -507,6 +541,11 @@ class ReplayLogWriter:
         }
         if self._failure_types:
             header["failure_types"] = [str(failure_type) for failure_type in self._failure_types]
+        pads = tuple(finger_pads)
+        if pads:
+            header["finger_pads"] = [
+                {"body": pad.body, "offset": [float(value) for value in pad.offset]} for pad in pads
+            ]
         self._file = path.open("wb")
         self._write(ReplayFrameType.HEADER, header)
 
@@ -539,6 +578,9 @@ class ReplayLogWriter:
                     {
                         "name": body.name,
                         "parts": [_pack_part(part) for part in body.parts],
+                        # Left out when unknown, so an older reader sees the scene it knows.
+                        **({"role": str(body.role)} if body.role is not None else {}),
+                        **({"object": body.object} if body.object is not None else {}),
                     }
                     for body in bodies
                 ]
@@ -686,6 +728,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         header_payload = header.get("payload", {})
         version, episode_idx, overview_group, channels, cameras = _read_header(header_payload)
         failure_types = _read_failure_types(header_payload)
+        finger_pads = _read_finger_pads(header_payload)
         bodies: tuple[ReplaySceneBody, ...] = ()
         steps: list[ReplayStep] = []
         carried: dict[str, ReplayPose] = {}
@@ -711,6 +754,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         overview_group=overview_group,
         cameras=cameras,
         failure_types=failure_types,
+        finger_pads=finger_pads,
     )
 
 
@@ -934,6 +978,26 @@ def _read_failure_types(payload: dict[str, Any]) -> tuple[FailureType, ...]:
     return tuple(FailureType(value) for value in raw)
 
 
+def _read_finger_pads(payload: dict[str, Any]) -> tuple[ReplayFingerPad, ...]:
+    """The fingertip pads that the header lists."""
+    raw = payload.get("finger_pads", [])
+    if not isinstance(raw, list):
+        raise ValueError(f"header `finger_pads` must be a list, got {raw!r}")  # noqa: TRY004
+    pads = []
+    for node in raw:
+        offset = node.get("offset") if isinstance(node, dict) else None
+        if (
+            not isinstance(node, dict)
+            or not isinstance(node.get("body"), str)
+            or not isinstance(offset, list)
+            or len(offset) != 3
+            or not all(isinstance(value, (int, float)) for value in offset)
+        ):
+            raise ValueError(f"malformed header finger pad {node!r}")
+        pads.append(ReplayFingerPad(body=node["body"], offset=np.asarray(offset, dtype=np.float32)))
+    return tuple(pads)
+
+
 def _check_failures_listed(
     events: tuple[ManifoldEvent, ...], failure_types: tuple[FailureType, ...]
 ) -> None:
@@ -987,8 +1051,19 @@ def _read_scene(payload: dict[str, Any]) -> tuple[ReplaySceneBody, ...]:
         raw_parts = node.get("parts")
         if not isinstance(raw_parts, list):
             raise ValueError("a scene body's 'parts' must be a list")  # noqa: TRY004
+        role = node.get("role")
+        name = node.get("object")
+        if role is not None and role not in {member.value for member in ReplaySceneBodyRole}:
+            raise ValueError(f"unknown scene body role {role!r}")
+        if name is not None and not isinstance(name, str):
+            raise ValueError(f"a scene body's 'object' must be a string, not {name!r}")
         bodies.append(
-            ReplaySceneBody(name=node["name"], parts=tuple(_read_part(part) for part in raw_parts))
+            ReplaySceneBody(
+                name=node["name"],
+                parts=tuple(_read_part(part) for part in raw_parts),
+                role=ReplaySceneBodyRole(role) if role is not None else None,
+                object=name,
+            )
         )
     return tuple(bodies)
 
@@ -1119,12 +1194,14 @@ __all__ = [
     "ReplayChannel",
     "ReplayChannelKind",
     "ReplayEncodedImage",
+    "ReplayFingerPad",
     "ReplayFrameType",
     "ReplayLog",
     "ReplayLogWriter",
     "ReplayMesh",
     "ReplayPose",
     "ReplaySceneBody",
+    "ReplaySceneBodyRole",
     "ReplayScenePart",
     "ReplayStep",
     "read_replay_log",

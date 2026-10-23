@@ -24,9 +24,12 @@ from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.benchmark.simulators import (
+    ARM,
+    GRIPPER,
+    TABLE,
     Simulator,
 )
 from manifold.core.conventions import CameraAxes
@@ -35,6 +38,7 @@ from manifold.replay import (
     ReplayMesh,
     ReplayPose,
     ReplaySceneBody,
+    ReplaySceneBodyRole,
     ReplayScenePart,
     RerunScalar,
     RerunTab,
@@ -46,6 +50,10 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
+
+
+# A contact presses this hard or harder, in newtons, when it is a touch.
+_TOUCH_NEWTONS = 0.1
 
 
 @dataclass(frozen=True)
@@ -71,6 +79,10 @@ class _MujocoEpisodeCache:
     `objects` maps the name of each object's body to the body's id. An object is a
     body with a joint outside the robot. `contacts` maps the name of each body whose
     contact force the replay plots to the body's id.
+
+    `parts` maps each body of the arm and of the gripper to `ARM` or `GRIPPER`.
+    `things` maps each body that the task names to the name and to whether the body is
+    an object, for the bodies that a robot part can touch.
     """
 
     body_ids: tuple[int, ...]
@@ -82,6 +94,8 @@ class _MujocoEpisodeCache:
     object_dof: np.ndarray
     objects: dict[str, int]
     contacts: dict[str, int]
+    parts: dict[int, str]
+    things: dict[int, tuple[str, bool]]
 
 
 class BenchmarkMujocoSimulatorConfig(BaseModel):
@@ -93,6 +107,8 @@ class BenchmarkMujocoSimulatorConfig(BaseModel):
     groups that the cameras draw. `arm_prefix` and `gripper_prefix` select the arm's
     and the gripper's joints. `robot_prefixes` selects the bodies of the robot, and
     `contact_prefixes` selects the bodies whose contact force the replay plots.
+    `object_body_suffix` is what the model adds to an object's name to name its root
+    body, such as `_main` for robosuite.
     """
 
     # A config states every value, so an unknown key is an error.
@@ -106,6 +122,7 @@ class BenchmarkMujocoSimulatorConfig(BaseModel):
     gripper_prefix: str
     robot_prefixes: tuple[str, ...]
     contact_prefixes: tuple[str, ...]
+    object_body_suffix: str = Field(min_length=1)
 
 
 class MujocoSimulator(Simulator):
@@ -173,6 +190,17 @@ class MujocoSimulator(Simulator):
             )
         self._log_skipped_geoms(skipped)
         qpos, dof = self._joint_indices(model)
+        object_ids = self._object_bodies(model)
+        objects = frozenset(object_ids.values())
+        names = [self._body_name(model, body_id) for body_id in range(int(model.nbody))]
+        owners = self._owners(names)
+        labels = {
+            body_id: (
+                self._body_role(name, body_id, objects),
+                self._object_name(name, body_id, objects, owners),
+            )
+            for body_id, name in enumerate(names)
+        }
         cache = _MujocoEpisodeCache(
             body_ids=tuple(sorted(parts)),
             arm_qpos=qpos["arm"],
@@ -181,7 +209,7 @@ class MujocoSimulator(Simulator):
             gripper_dof=dof["gripper"],
             object_qpos=qpos["objects"],
             object_dof=dof["objects"],
-            objects=self._object_bodies(model),
+            objects=object_ids,
             contacts={
                 name: body_id
                 for body_id in range(int(model.nbody))
@@ -189,10 +217,21 @@ class MujocoSimulator(Simulator):
                     self._config.contact_prefixes
                 )
             },
+            parts=self._robot_parts(model),
+            things={
+                body_id: (name, role is ReplaySceneBodyRole.OBJECT)
+                for body_id, (role, name) in labels.items()
+                if name is not None
+            },
         )
         self._caches[env_id] = cache
         return tuple(
-            ReplaySceneBody(name=self._body_name(model, body_id), parts=tuple(parts[body_id]))
+            ReplaySceneBody(
+                name=self._body_name(model, body_id),
+                parts=tuple(parts[body_id]),
+                role=labels[body_id][0],
+                object=labels[body_id][1],
+            )
             for body_id in cache.body_ids
         )
 
@@ -236,6 +275,30 @@ class MujocoSimulator(Simulator):
     def replay_images(self, env_id: int) -> dict[str, np.ndarray]:
         """An empty dict, because a MuJoCo benchmark sends the policy each camera of its replay."""
         return {}
+
+    def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
+        """Each robot part that presses on a named body now with at least 0.1 N.
+
+        MuJoCo lists the contacts of the last physics step, so a touch that starts and
+        ends between two actions is missed.
+        """
+        sim = self._sim(env_id)
+        cache = self._caches[env_id]
+        model = getattr(sim.model, "_model", sim.model)
+        data = getattr(sim.data, "_data", sim.data)
+        geom_body = np.asarray(model.geom_bodyid, dtype=np.int64)
+        touching = set()
+        for index in range(int(data.ncon)):
+            contact = data.contact[index]
+            first, second = int(geom_body[contact.geom1]), int(geom_body[contact.geom2])
+            for mine, other in ((first, second), (second, first)):
+                part = cache.parts.get(mine)
+                thing = cache.things.get(other)
+                if part is None or thing is None or (part == GRIPPER and thing[1]):
+                    continue
+                if self._normal_force(model, data, index) >= _TOUCH_NEWTONS:
+                    touching.add((part, thing[0]))
+        return frozenset(touching)
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
         """The arm's and the gripper's joints, the distance to each object, and the forces.
@@ -330,6 +393,55 @@ class MujocoSimulator(Simulator):
             {part: np.array(indices[0], dtype=np.int64) for part, indices in found.items()},
             {part: np.array(indices[1], dtype=np.int64) for part, indices in found.items()},
         )
+
+    def _body_role(self, name: str, body_id: int, objects: frozenset[int]) -> ReplaySceneBodyRole:
+        """The body's role in the task.
+
+        A body under a robot prefix is the robot, a body with a joint outside the robot
+        is an object, and any other body is a fixture.
+        """
+        if name.startswith(self._config.robot_prefixes):
+            return ReplaySceneBodyRole.ROBOT
+        if body_id in objects:
+            return ReplaySceneBodyRole.OBJECT
+        return ReplaySceneBodyRole.FIXTURE
+
+    def _object_name(
+        self, name: str, body_id: int, objects: frozenset[int], owners: tuple[str, ...]
+    ) -> str | None:
+        """The task's name for the body, or None for the world, the robot, or an unnamed object.
+
+        robosuite names an object's root body after the object, with a suffix such as
+        `_main`. A fixture's other bodies start with the fixture's name, such as
+        `flat_stove_1_burner`, and are named for the fixture. Any other fixture, such as
+        the table or a wall, is `TABLE`.
+        """
+        # Body 0 is MuJoCo's world, whose geoms span the whole room.
+        if body_id == 0 or name.startswith(self._config.robot_prefixes):
+            return None
+        suffix = self._config.object_body_suffix
+        if name.endswith(suffix) and len(name) > len(suffix):
+            return name[: -len(suffix)]
+        if body_id in objects:
+            return None
+        return next((owner for owner in owners if name.startswith(f"{owner}_")), TABLE)
+
+    def _owners(self, names: list[str]) -> tuple[str, ...]:
+        """The names that the model's root bodies carry, the longest first."""
+        suffix = self._config.object_body_suffix
+        found = {name[: -len(suffix)] for name in names if name.endswith(suffix) and name != suffix}
+        return tuple(sorted(found, key=len, reverse=True))
+
+    def _robot_parts(self, model: Any) -> dict[int, str]:
+        """Each body of the gripper as `GRIPPER`, and each body of the arm as `ARM`."""
+        parts = {}
+        for body_id in range(int(model.nbody)):
+            name = self._body_name(model, body_id)
+            if name.startswith(self._config.gripper_prefix):
+                parts[body_id] = GRIPPER
+            elif name.startswith(self._config.arm_prefix):
+                parts[body_id] = ARM
+        return parts
 
     def _object_bodies(self, model: Any) -> dict[str, int]:
         """Each object's body name and id, for the bodies with a joint outside the robot."""
@@ -428,6 +540,16 @@ class MujocoSimulator(Simulator):
                 return mean[0], mean[1], mean[2], alpha
         material = np.asarray(model.mat_rgba[material_id], dtype=np.float32).reshape(-1)
         return float(material[0]), float(material[1]), float(material[2]), alpha
+
+    @staticmethod
+    def _normal_force(model: Any, data: Any, index: int) -> float:
+        """The normal force of contact `index`, in newtons."""
+        # The SDK does not depend on `mujoco`, so this import is local.
+        import mujoco  # ty: ignore[unresolved-import]
+
+        wrench = np.zeros(6, dtype=np.float64)
+        mujoco.mj_contactForce(model, data, index, wrench)
+        return abs(float(wrench[0]))
 
     @staticmethod
     def _body_name(model: Any, body_id: int) -> str:

@@ -11,6 +11,7 @@ import pytest
 
 from manifold.benchmark.simulators import Simulator
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig, MujocoSimulator
+from manifold.replay import ReplaySceneBodyRole
 
 _BOX = 6
 _PLANE = 0
@@ -47,6 +48,7 @@ _CONFIG = BenchmarkMujocoSimulatorConfig(
     gripper_prefix="gripper0_",
     robot_prefixes=("robot0_", "gripper0_", "mount0_"),
     contact_prefixes=("gripper0_",),
+    object_body_suffix="_main",
 )
 
 
@@ -119,6 +121,62 @@ def test_the_scene_holds_the_bodies_with_a_geom_in_the_groups_given():
 
     assert isinstance(simulator, Simulator)
     assert [body.name for body in simulator.replay_bodies(0)] == ["robot0_link0", "lid_handle"]
+
+
+def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
+    env = _env(
+        [
+            {"body": "robot0_link0", "group": 1},
+            {"body": "bowl_main", "group": 1},
+            {"body": "table_main", "group": 1},
+            {"body": "drawer", "group": 1},
+            {"body": "study_table", "group": 1},
+            {"body": "stove_1_main", "group": 1},
+            {"body": "stove_1_burner", "group": 1},
+        ],
+        joints=(("robot0_joint1", 1), ("bowl_joint0", 2), ("drawer_slide", 4)),
+    )
+
+    labels = {body.name: (body.role, body.object) for body in _attached(env).replay_bodies(0)}
+
+    assert labels == {
+        "robot0_link0": (ReplaySceneBodyRole.ROBOT, None),
+        "bowl_main": (ReplaySceneBodyRole.OBJECT, "bowl"),
+        "table_main": (ReplaySceneBodyRole.FIXTURE, "table"),
+        "drawer": (ReplaySceneBodyRole.OBJECT, None),
+        "study_table": (ReplaySceneBodyRole.FIXTURE, "table"),
+        "stove_1_main": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
+        "stove_1_burner": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
+    }
+
+
+def test_the_contacts_name_the_arm_and_the_gripper_and_what_each_presses_on(monkeypatch):
+    env = _env(
+        [
+            {"body": "robot0_link1", "group": 1},
+            {"body": "gripper0_finger", "group": 1},
+            {"body": "bowl_main", "group": 1},
+            {"body": "study_table", "group": 1},
+        ],
+        joints=(("robot0_joint1", 1), ("bowl_joint0", 3)),
+    )
+    # Geom i is on body i + 1: the arm, the finger, the bowl and the table.
+    pairs = [(0, 2, 1.0), (1, 2, 1.0), (1, 3, 1.0), (0, 3, 0.05)]
+    data = env.env.sim.data
+    data.ncon = len(pairs)
+    data.contact = [SimpleNamespace(geom1=first, geom2=second) for first, second, _ in pairs]
+
+    def contact_force(_model, _data, index, wrench):
+        wrench[0] = pairs[index][2]
+
+    monkeypatch.setitem(
+        sys.modules, "mujoco", SimpleNamespace(mjtGeom=mjtGeom, mj_contactForce=contact_force)
+    )
+    simulator = _attached(env)
+    simulator.replay_bodies(0)
+
+    # The gripper touching the bowl is the hooks' to report, and 0.05 N is no touch.
+    assert simulator.replay_contacts(0) == {("arm", "bowl"), ("gripper", "table")}
 
 
 def test_a_drawn_plane_is_left_out_of_the_scene():
