@@ -751,6 +751,8 @@ class _Simulator(Simulator):
         self._x = 0.0
         # The supported versions that a test sets.
         self.supported: dict[str, str] = {}
+        # The contacts that each step reports, one set per step, then none.
+        self.contacts: list[frozenset[tuple[str, str]]] = []
 
     @property
     def supported_versions(self) -> dict[str, str]:
@@ -785,6 +787,9 @@ class _Simulator(Simulator):
 
     def replay_images(self, env_id):
         return {"egocentric": np.zeros((2, 2, 3), dtype=np.uint8)}
+
+    def replay_contacts(self, env_id):
+        return self.contacts.pop(0) if self.contacts else frozenset()
 
     def replay_scalars(self, env_id, ee_position):
         return [RerunScalar("joint_torques/0", RerunTab.PHYSICS, self._x, None)]
