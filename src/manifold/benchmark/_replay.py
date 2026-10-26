@@ -12,12 +12,7 @@ The shared scalars come from the action and the observation, on three pages:
 - `Task`: the step's success, the episode's success so far, whether the gripper
   grasps an object, and each fact event.
 
-This module writes the hooks' events and derives four more events:
-`EpisodeStartedEvent`, `EpisodeEndedEvent`, `GripperCommandedEvent` when the
-commanded gripper changes direction, and `GraspedEvent` while the gripper touches an
-object and the policy commands it shut. The hooks return each `FactEvent` at each
-step. This module writes a `FactEvent` only when its `is_active` changes, and writes
-other events as they come.
+This module writes the hooks' events and the events it derives from each step.
 """
 
 from __future__ import annotations
@@ -48,9 +43,11 @@ from manifold.replay import (
     ReplayCameraPinhole,
     ReplayChannel,
     ReplayChannelKind,
+    ReplayFingerPad,
     ReplayLogWriter,
     RerunScalar,
     RerunTab,
+    TouchingEvent,
     replay_log_path,
     rerun_panel_line,
     rerun_scalars,
@@ -131,6 +128,7 @@ class _ReplayRecorder:
         self._commanded_shut: bool | None = None
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
+        self._touching: frozenset[tuple[str, str]] = frozenset()
 
     def begin(
         self,
@@ -154,6 +152,7 @@ class _ReplayRecorder:
         self._commanded_shut = None
         self._succeeded = False
         self._previous = None
+        self._touching = frozenset()
         bodies = self._simulator.replay_bodies(self._env_id) if self._simulator is not None else ()
         recorded = [
             EpisodeStartedEvent(instruction=observation.instruction or "", attributes=attributes),
@@ -187,6 +186,11 @@ class _ReplayRecorder:
                 for sensor in self._config.spec.sensors
                 if sensor.calibration is not None
             ),
+            finger_pads=tuple(
+                ReplayFingerPad(body=pad.body, offset=np.asarray(pad.offset, dtype=np.float32))
+                for pad in self._config.replay.finger_pads
+            ),
+            step_seconds=self._config.run.step_seconds,
         )
         if bodies:
             self._log.write_scene(bodies)
@@ -204,7 +208,11 @@ class _ReplayRecorder:
         """Write the frame that `action` produced, with `EpisodeEndedEvent` on the last frame."""
         self._step += 1
         self._succeeded = self._succeeded or success
-        recorded = [*self._gripper_commanded_events(action), *self._events_to_write(events, action)]
+        recorded = [
+            *self._gripper_commanded_events(action),
+            *self._events_to_write(events, action),
+            *self._touch_events(),
+        ]
         if done:
             recorded.append(EpisodeEndedEvent(success=success))
         scalars = self._frame_scalars(observation, action, success=success)
@@ -240,6 +248,24 @@ class _ReplayRecorder:
             text=text,
             events=events,
         )
+
+    def _touch_events(self) -> list[ManifoldEvent]:
+        """`TouchingEvent` for each robot part that started or stopped touching a body."""
+        if self._simulator is None:
+            return []
+        touching = self._simulator.replay_contacts(self._env_id)
+        events: list[ManifoldEvent] = [
+            *(
+                TouchingEvent(object=part, reference=thing, is_active=True)
+                for part, thing in sorted(touching - self._touching)
+            ),
+            *(
+                TouchingEvent(object=part, reference=thing, is_active=False)
+                for part, thing in sorted(self._touching - touching)
+            ),
+        ]
+        self._touching = touching
+        return events
 
     def _images(self, observation: Observation) -> dict[str, np.ndarray]:
         """The frames of the config's replay cameras and of the simulator's extra cameras.

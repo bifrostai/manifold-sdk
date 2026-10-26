@@ -315,7 +315,7 @@ def _benchmark(spec_cameras: list[str]) -> BenchmarkConfig:
             "env": {"num_envs": 2},
             "run": {"seed": 0, "max_steps": 5, "step_seconds": 0.05, "image_format": "jpeg"},
             "simulator": _CONFIG.model_dump(mode="json"),
-            "replay": {"cameras": [spec_cameras[0]]},
+            "replay": {"cameras": [spec_cameras[0]], "finger_pads": []},
             "spec": {
                 "name": "robolab",
                 "embodiment": DROID_JOINT_ABSOLUTE.model_dump(mode="json"),

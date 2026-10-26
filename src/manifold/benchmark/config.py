@@ -105,13 +105,27 @@ class BenchmarkRunConfig(_BenchmarkConfigBase):
     image_format: ImageFormat
 
 
-class BenchmarkReplayConfig(_BenchmarkConfigBase):
-    """The cameras that each replay frame contains, by their names in the spec.
+class BenchmarkFingerPadConfig(_BenchmarkConfigBase):
+    """A fingertip pad of the gripper: the scene body it moves with and where it sits.
 
-    The live view streams `cameras[0]`.
+    `body` is the pad's finger, by its name in the replay scene. `offset` is the pad's
+    centre in that body's frame, in metres.
+    """
+
+    body: str
+    offset: tuple[float, float, float]
+
+
+class BenchmarkReplayConfig(_BenchmarkConfigBase):
+    """The cameras that each replay frame contains, and the gripper's fingertip pads.
+
+    `cameras` lists camera names from the spec, and the live view streams `cameras[0]`.
+    `finger_pads` lists the gripper's two fingertip pads for each replay's header, and is
+    empty when the gripper has no pads or the replay has no scene.
     """
 
     cameras: tuple[str, ...] = Field(min_length=1)
+    finger_pads: tuple[()] | tuple[BenchmarkFingerPadConfig, BenchmarkFingerPadConfig]
 
 
 class BenchmarkConfig(_BenchmarkConfigBase):
@@ -220,6 +234,7 @@ __all__ = [
     "BenchmarkBatchedServiceConfig",
     "BenchmarkConfig",
     "BenchmarkEnvConfig",
+    "BenchmarkFingerPadConfig",
     "BenchmarkReplayConfig",
     "BenchmarkRunConfig",
     "BenchmarkSingleServiceConfig",
