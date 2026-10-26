@@ -13,11 +13,13 @@ from manifold.replay import (
     ReplayCameraPinhole,
     ReplayChannel,
     ReplayChannelKind,
+    ReplayFingerPad,
     ReplayFrameType,
     ReplayLogWriter,
     ReplayMesh,
     ReplayPose,
     ReplaySceneBody,
+    ReplaySceneBodyRole,
     ReplayScenePart,
     read_replay_log,
     replay_log_path,
@@ -453,6 +455,72 @@ def test_two_scene_bodies_may_not_share_a_name(tmp_path):
         pytest.raises(ValueError, match="share a name"),
     ):
         log.write_scene((body, body))
+
+
+def test_a_scene_body_keeps_its_role_and_the_tasks_name_for_it(tmp_path):
+    path = tmp_path / "episode.replay"
+    box = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_scene(
+            (
+                ReplaySceneBody(
+                    name="bowl_main", parts=box, role=ReplaySceneBodyRole.OBJECT, object="bowl"
+                ),
+                ReplaySceneBody(name="robot0_link0", parts=box, role=ReplaySceneBodyRole.ROBOT),
+                ReplaySceneBody(name="marker", parts=box),
+            )
+        )
+
+    bodies = read_replay_log(path).bodies
+
+    assert [(body.role, body.object) for body in bodies] == [
+        (ReplaySceneBodyRole.OBJECT, "bowl"),
+        (ReplaySceneBodyRole.ROBOT, None),
+        (None, None),
+    ]
+
+
+def test_the_header_keeps_the_fingertip_pads(tmp_path):
+    path = tmp_path / "episode.replay"
+    pads = (
+        ReplayFingerPad(body="gripper0_leftfinger", offset=np.array([0.0, 0.0035, 0.041])),
+        ReplayFingerPad(body="gripper0_rightfinger", offset=np.array([0.0, -0.0035, 0.041])),
+    )
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, finger_pads=pads):
+        pass
+
+    read = read_replay_log(path).finger_pads
+
+    assert [pad.body for pad in read] == ["gripper0_leftfinger", "gripper0_rightfinger"]
+    np.testing.assert_allclose(read[1].offset, [0.0, -0.0035, 0.041], atol=1e-7)
+
+
+def test_the_header_keeps_the_step_length(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, step_seconds=0.05):
+        pass
+
+    assert read_replay_log(path).step_seconds == 0.05
+
+
+def test_a_log_without_fingertip_pads_lists_none(tmp_path):
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS):
+        pass
+
+    assert read_replay_log(path).finger_pads == ()
+    assert read_replay_log(path).step_seconds is None
+
+
+def test_a_scene_body_with_an_unknown_role_is_refused_at_read(tmp_path):
+    path = tmp_path / "episode.replay"
+    box = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_scene((ReplaySceneBody(name="bowl", parts=box, role=ReplaySceneBodyRole.OBJECT),))
+    path.write_bytes(path.read_bytes().replace(b"\xa6object", b"\xa6thingy", 1))
+
+    with pytest.raises(ValueError, match="unknown scene body role"):
+        read_replay_log(path)
 
 
 def test_a_frame_no_reader_would_accept_is_refused_at_write(tmp_path):
