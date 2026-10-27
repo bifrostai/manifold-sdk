@@ -159,6 +159,9 @@ class MujocoSimulator(Simulator):
             raise ValueError(f"a MuJoCo handle holds one env, not {len(env_ids)}")
         self._envs[env_ids[0]] = env
 
+    def post_step(self) -> None:
+        """Keep nothing, because each replay method reads the env when it is called."""
+
     def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
         """Each body with a drawn geom, read again at the start of each episode.
 

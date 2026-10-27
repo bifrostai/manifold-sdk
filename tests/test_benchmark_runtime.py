@@ -768,6 +768,9 @@ class _Simulator(Simulator):
     def attach(self, env, env_ids) -> None:
         self.attached.append(list(env_ids))
 
+    def post_step(self) -> None:
+        pass
+
     def replay_bodies(self, env_id):
         return (
             ReplaySceneBody(
@@ -814,6 +817,51 @@ def test_the_replay_holds_the_simulators_scene_images_and_scalars(tmp_path, monk
     assert [step.poses["cube"].position[0] for step in log.steps] == [
         float(index + 1) for index in range(len(log.steps))
     ]
+
+
+@pytest.mark.parametrize(
+    "service",
+    [{"type": "single"}, {"type": "batched", "reset_together": False}],
+    ids=["single", "batched"],
+)
+def test_the_service_runs_the_simulators_post_step_after_the_hooks_reset_and_step(
+    tmp_path, service
+):
+    calls: list[str] = []
+
+    class _Recorder(_Simulator):
+        def post_step(self) -> None:
+            calls.append("post_step")
+
+    def on_reset(*args):
+        calls.append("on_reset")
+        return ResetResult(
+            _observation(0.0),
+            instruction="lift the toy",
+            task_id="toy/clean",
+            attributes={},
+            events=(),
+            max_steps=None,
+        )
+
+    def on_step(*args):
+        calls.append("on_step")
+        result = StepResult(_observation(0.0), success=False, done=False, events=())
+        return [result, result] if service["type"] == "batched" else result
+
+    hooks = types.SimpleNamespace(
+        env_key=lambda config, task_config, logger: None,
+        on_load=lambda config, task_config, logger: types.SimpleNamespace(),
+        on_reset=on_reset,
+        on_step=on_step,
+    )
+    runner = make_service(_config(service, 2), hooks)
+    runner.simulator = _Recorder()
+    runner.load(_task(tmp_path, (0, 1)))
+    runner.reset({0: 0, 1: 1}, {0: _LOGGER, 1: _LOGGER})
+    runner.step({0: _action(0), 1: _action(0)}, {0: _LOGGER, 1: _LOGGER})
+    steps = ["on_step"] if service["type"] == "batched" else ["on_step", "on_step"]
+    assert calls == ["on_reset", "on_reset", "post_step", *steps, "post_step"]
 
 
 def test_the_client_sends_env_0_to_the_live_view(tmp_path, monkeypatch):

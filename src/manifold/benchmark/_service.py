@@ -216,6 +216,11 @@ class Service(ABC):
     def _load_envs(self, task: WorkerTask) -> None:
         """Run the hooks' `on_load` for `task`, and attach the simulator."""
 
+    def _run_simulator_post_step(self) -> None:
+        """Run the simulator's `post_step`, after the hooks reset or step any env."""
+        if self.simulator is not None:
+            self.simulator.post_step()
+
     @abstractmethod
     def _unload_envs(self) -> None:
         """Run the hooks' `on_unload` for each loaded env."""
@@ -255,7 +260,7 @@ class SingleService(Service):
     def reset(
         self, episodes: Mapping[int, int], loggers: Mapping[int, LoggerAdapter[Logger]]
     ) -> dict[int, ResetResult]:
-        return {
+        results = {
             env_id: self.hooks.on_reset(
                 self.config,
                 self._envs[env_id],
@@ -265,16 +270,20 @@ class SingleService(Service):
             )
             for env_id, episode_idx in episodes.items()
         }
+        self._run_simulator_post_step()
+        return results
 
     def step(
         self, actions: Mapping[int, Action], loggers: Mapping[int, LoggerAdapter[Logger]]
     ) -> dict[int, StepResult]:
-        return {
+        results = {
             env_id: self.hooks.on_step(
                 self.config, self._envs[env_id], self._task.task_config, action, loggers[env_id]
             )
             for env_id, action in actions.items()
         }
+        self._run_simulator_post_step()
+        return results
 
     def _unload_envs(self) -> None:
         for env in self._envs:
@@ -306,7 +315,7 @@ class BatchedService(Service):
             raise ValueError(
                 "a Service that resets all envs together resets env ids 0..n-1 at once"
             )
-        return {
+        results = {
             env_id: self.hooks.on_reset(
                 self.config,
                 self._env,
@@ -317,6 +326,8 @@ class BatchedService(Service):
             )
             for env_id in sorted(episodes)
         }
+        self._run_simulator_post_step()
+        return results
 
     def step(
         self, actions: Mapping[int, Action], loggers: Mapping[int, LoggerAdapter[Logger]]
@@ -330,6 +341,7 @@ class BatchedService(Service):
             [actions[env_id] for env_id in env_ids],
             [loggers[env_id] for env_id in env_ids],
         )
+        self._run_simulator_post_step()
         return dict(zip(env_ids, results, strict=True))
 
     def _unload_envs(self) -> None:

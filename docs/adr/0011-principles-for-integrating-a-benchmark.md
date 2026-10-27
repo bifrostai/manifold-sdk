@@ -119,7 +119,7 @@ file.
 
 The Service runs the lifecycle steps, and the simulator's process starts and
 stops with them. The Service therefore creates the simulator, and calls
-its `start`, `attach` and `stop` methods.
+its `start`, `attach`, `post_step` and `stop` methods.
 
 ### Simulator classes
 
@@ -139,11 +139,11 @@ methods then use the cache at each step.
 
 The simulator class has only the public methods and the property that `Simulator`
 declares. Shared code calls only these, so it would not call a new public method.
-The lifecycle methods are `start`, `stop` and `attach`. The names of the replay
-methods start with `replay_`. Only the Client's replay recorder calls the replay
-methods. The property `supported_versions` gives the version range of each Python
-package that the simulator reads, and the Service logs a warning for an installed
-version outside it.
+The lifecycle methods are `start`, `stop`, `attach` and `post_step`. The names
+of the replay methods start with `replay_`. Only the Client's replay recorder
+calls the replay methods. The property `supported_versions` gives the version
+range of each Python package that the simulator reads, and the Service logs a
+warning for an installed version outside it.
 
 One public method can be added. Some config values have to be set on an env before
 the env is built, and the simulator gets the env only after it is built. The
