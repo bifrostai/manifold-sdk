@@ -56,8 +56,8 @@ class Simulator(ABC):
     """A base class that runs a simulator's process and reads the simulator for the replay.
 
     The Service calls `start` before the hooks' `on_start`, `attach` after each
-    `on_load`, and `stop` after `on_stop`. A benchmark needs the process whether or
-    not it writes a replay.
+    `on_load`, `post_step` after each `on_reset` and `on_step`, and `stop` after
+    `on_stop`. A benchmark needs the process whether or not it writes a replay.
 
     Only the Client's replay recorder calls the `replay_*` methods. They read the env
     that `attach` gave.
@@ -100,6 +100,14 @@ class Simulator(ABC):
 
         `env` is an env that `on_load` returned. A single Service attaches each env
         with its own id. A batched Service attaches its single env with all env ids.
+        """
+
+    @abstractmethod
+    def post_step(self) -> None:
+        """Drop the values that the replay methods copied since the previous reset or step.
+
+        The Service calls this after the hooks reset or step any env, so that the next
+        replay read copies the current state.
         """
 
     @abstractmethod

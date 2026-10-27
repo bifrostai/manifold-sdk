@@ -216,7 +216,12 @@ class IsaacSimSimulator(Simulator):
         self._spec_cameras = tuple(str(camera.name) for camera in benchmark.spec.sensors)
         self._app: Any = None
         self._envs: dict[int, tuple[Any, int]] = {}
+        # The world position of each env's origin, copied to the host when it is attached.
+        self._origins: dict[int, np.ndarray] = {}
         self._caches: dict[int, _IsaacSimEpisodeCache] = {}
+        # Each pose tensor that a replay method copied to the host since the last reset
+        # or step, by its scene, asset and field. It holds the rows of all envs.
+        self._host_tensors: dict[tuple[int, str, str], np.ndarray] = {}
         self._scalar_last = False
         # The touch links already warned about.
         self._unnamed_touches: set[str] = set()
@@ -319,9 +324,16 @@ class IsaacSimSimulator(Simulator):
         found = attrgetter(self._config.path)(env)
         isaac = getattr(found, "unwrapped", found)
         self._scalar_last = self._isaaclab_orders_xyzw()
+        origins = np.asarray(self._numpy(isaac.scene.env_origins), dtype=np.float64)
         for row, env_id in enumerate(env_ids):
             self._envs[env_id] = (isaac, row)
+            self._origins[env_id] = origins.reshape(-1, 3)[row]
             self._caches.pop(env_id, None)
+        self._host_tensors.clear()
+
+    def post_step(self) -> None:
+        """Drop the pose tensors copied to the host since the previous reset or step."""
+        self._host_tensors.clear()
 
     def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
         """Each body of the env's USD prim with its drawn parts, read again for each episode.
@@ -337,7 +349,7 @@ class IsaacSimSimulator(Simulator):
         isaac, row = self._envs[env_id]
         scene = isaac.scene
         stage = scene.stage
-        origin = self._origin(scene, row)
+        origin = self._origins[env_id]
         metres = float(UsdGeom.GetStageMetersPerUnit(stage))
         cache = UsdGeom.XformCache(Usd.TimeCode.Default())
         parts: dict[str, list[ReplayScenePart]] = {}
@@ -405,7 +417,7 @@ class IsaacSimSimulator(Simulator):
         for a rigid object. A fixed body keeps the pose that it had on the stage.
         """
         isaac, row = self._envs[env_id]
-        origin = self._origin(isaac.scene, row)
+        origin = self._origins[env_id]
         poses = {}
         for name, held in self._caches[env_id].bodies.items():
             if isinstance(held, ReplayPose):
@@ -474,7 +486,7 @@ class IsaacSimSimulator(Simulator):
         isaac, row = self._envs[env_id]
         cache = self._caches[env_id]
         scene = isaac.scene
-        origin = self._origin(scene, row)
+        origin = self._origins[env_id]
         positions = {
             name: self._row(scene[name].data, "root_link_pos_w", row, 3) - origin
             for name in cache.objects
@@ -642,17 +654,23 @@ class IsaacSimSimulator(Simulator):
     def _world_pose(self, scene: Any, tracked: _TrackedBody, row: int) -> ReplayPose:
         """A tracked body's world pose now, from Isaac Lab's tensors."""
         kind, asset, link = tracked
-        data = scene[asset].data
         if kind == "link":
-            position = self._numpy(data.body_link_pos_w)[row, link]
-            quaternion = self._numpy(data.body_link_quat_w)[row, link]
+            position = self._host_tensor(scene, asset, "body_link_pos_w")[row, link]
+            quaternion = self._host_tensor(scene, asset, "body_link_quat_w")[row, link]
         else:
-            position = self._numpy(data.root_link_pos_w)[row]
-            quaternion = self._numpy(data.root_link_quat_w)[row]
+            position = self._host_tensor(scene, asset, "root_link_pos_w")[row]
+            quaternion = self._host_tensor(scene, asset, "root_link_quat_w")[row]
         return ReplayPose(
             position=np.asarray(position, dtype=np.float64).reshape(3),
             orientation=self._xyzw(quaternion).astype(np.float32),
         )
+
+    def _host_tensor(self, scene: Any, asset: str, field: str) -> np.ndarray:
+        """`scene[asset].data.<field>` on the host, copied once for all envs per step."""
+        key = (id(scene), asset, field)
+        if key not in self._host_tensors:
+            self._host_tensors[key] = self._numpy(getattr(scene[asset].data, field))
+        return self._host_tensors[key]
 
     def _episode_cache(
         self, isaac: Any, bodies: dict[str, _TrackedBody | ReplayPose]
@@ -862,12 +880,6 @@ class IsaacSimSimulator(Simulator):
             if IsaacSimSimulator._is_under(path, asset.cfg.prim_path) and leaf in links:
                 return ("link", name, links.index(leaf))
         return None
-
-    @staticmethod
-    def _origin(scene: Any, row: int) -> np.ndarray:
-        """The world position of env row `row`'s origin."""
-        origins = IsaacSimSimulator._numpy(scene.env_origins)
-        return np.asarray(origins, dtype=np.float64).reshape(-1, 3)[row]
 
     @staticmethod
     def _contact_sensors(scene: Any, robot_path: str) -> tuple[tuple[str, tuple[str, ...]], ...]:

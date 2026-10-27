@@ -729,9 +729,19 @@ def test_an_isaac_lab_from_version_1_is_read_as_xyzw(isaac: SimpleNamespace) -> 
     isaac.package.__version__ = "6.1.17"
     simulator, scene = _attached({}, ["over_shoulder_left"], [0])
     scene.rigid_objects["banana"].data.root_link_quat_w = np.tile([0.0, 0.0, 1.0, 0.0], (2, 1))
+    simulator.post_step()
     np.testing.assert_allclose(
         simulator.replay_poses(0)["banana"].orientation, [0.0, 0.0, 1.0, 0.0]
     )
+
+
+def test_the_poses_of_one_step_are_copied_once_for_all_envs(isaac: SimpleNamespace) -> None:
+    simulator, scene = _attached({}, ["over_shoulder_left"], [0, 1])
+    simulator.replay_poses(0)
+    scene.rigid_objects["banana"].data.root_link_pos_w = _ORIGINS + np.array([0.0, 0.0, 9.0])
+    np.testing.assert_allclose(simulator.replay_poses(1)["banana"].position, [0.3, 0.0, 0.0])
+    simulator.post_step()
+    np.testing.assert_allclose(simulator.replay_poses(1)["banana"].position, [0.0, 0.0, 9.0])
 
 
 def test_a_single_env_is_read_from_its_first_row(isaac: SimpleNamespace) -> None:
