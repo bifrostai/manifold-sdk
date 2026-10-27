@@ -21,16 +21,20 @@ import pytest
 from manifold.adapters.action import (
     DiscreteBinarize,
     GripperThresholdAdapter,
+    JointGripperPolarityAdapter,
     UnifiedGripperThresholdAdapter,
     UnifiedSliceAdapter,
 )
 from manifold.core.benchmark import Benchmark
+from manifold.core.check import check_compatibility
 from manifold.core.conventions import GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     EEActionSpace,
     EEObservationSpec,
     Embodiment,
     GripperObservationSpec,
+    JointActionSpace,
+    JointObservationSpec,
     Proprioception,
     UnifiedActionSpace,
 )
@@ -38,6 +42,7 @@ from manifold.core.names import EmbodimentName
 from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.sensor import Camera
+from manifold.embodiments import DROID_JOINT_ABSOLUTE
 from manifold.sensors import CameraName
 
 # ---------------------------------------------------------------------------
@@ -409,3 +414,75 @@ def test_unified_gripper_threshold_thresholds_through_pipeline(
     # After slicing to the 7-D EE payload, the gripper is the last dim.
     assert len(out) == 7
     assert out[6] == expected
+
+
+# ---------------------------------------------------------------------------
+# JointGripperPolarityAdapter
+# ---------------------------------------------------------------------------
+
+
+def _joint_continuous_gripper(arm_count: int) -> JointActionSpace:
+    """Joint action whose gripper is a continuous value, 1 closed, as real-robot policies emit."""
+    return JointActionSpace(
+        dof=7 * arm_count,
+        gripper=GripperFormat.UNSIGNED_OPEN_LOW,
+        arm_count=arm_count,
+        delta=False,
+    )
+
+
+def test_joint_gripper_polarity_applies_when_the_gripper_differs() -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)
+    assert adapter.applies(_joint_continuous_gripper(arm_count=1))
+
+
+def test_joint_gripper_polarity_does_not_apply_when_the_gripper_matches() -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.UNSIGNED_OPEN_LOW)
+    assert not adapter.applies(_joint_continuous_gripper(arm_count=1))
+
+
+def test_joint_gripper_polarity_does_not_apply_to_ee() -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)
+    assert not adapter.applies(_ee_unsigned())
+
+
+def test_joint_gripper_polarity_produce_sets_the_target_gripper() -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)
+    produced = adapter.produce(_joint_continuous_gripper(arm_count=1))
+    assert produced.gripper == GripperFormat.BINARY_OPEN_LOW
+    assert not adapter.applies(produced)
+
+
+@pytest.mark.parametrize(("continuous", "binary"), [(0.8, 1.0), (0.2, 0.0)])
+def test_joint_gripper_polarity_closes_above_half_and_opens_below(
+    continuous: float, binary: float
+) -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)
+    joints = [0.1, -0.2, 0.3, -0.4, 0.5, -0.6, 0.7]
+    out = adapter.adapt([*joints, continuous], source=_joint_continuous_gripper(arm_count=1))
+    assert out == pytest.approx([*joints, binary])
+
+
+def test_joint_gripper_polarity_remaps_the_gripper_of_every_arm() -> None:
+    adapter = JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)
+    left = [0.1] * 7
+    right = [0.2] * 7
+    out = adapter.adapt([*left, 0.9, *right, 0.1], source=_joint_continuous_gripper(arm_count=2))
+    assert out == pytest.approx([*left, 1.0, *right, 0.0])
+
+
+def test_joint_gripper_polarity_pairs_a_continuous_gripper_with_a_binary_one() -> None:
+    signature = PolicySignature(
+        proprioception=Proprioception(
+            joint_pos=JointObservationSpec(dof=7, gripper=GripperFormat.UNSIGNED_OPEN_LOW),
+        ),
+        action_space=_joint_continuous_gripper(arm_count=1),
+        instruction=True,
+    )
+    benchmark = Benchmark(name="joint", embodiment=DROID_JOINT_ABSOLUTE, instruction=True)
+    pipeline = Pipeline(
+        action=[JointGripperPolarityAdapter(target=GripperFormat.BINARY_OPEN_LOW)],
+    )
+
+    assert not check_compatibility(signature, benchmark).ok
+    assert check_compatibility(signature, benchmark, pipeline).ok

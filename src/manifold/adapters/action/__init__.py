@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from manifold.adapters.action.base_pin import BasePinWiden
 from manifold.adapters.action.discrete_binarize import DiscreteBinarize
-from manifold.adapters.action.gripper_polarity import GripperPolarityAdapter
+from manifold.adapters.action.gripper_polarity import (
+    GripperPolarityAdapter,
+    JointGripperPolarityAdapter,
+)
 from manifold.adapters.action.gripper_threshold import (
     GripperThresholdAdapter,
     UnifiedGripperThresholdAdapter,
@@ -19,6 +22,7 @@ __all__ = [
     "GripperPolarityAdapter",
     "GripperThresholdAdapter",
     "GroupAdapter",
+    "JointGripperPolarityAdapter",
     "RotationFormatAdapter",
     "UnifiedGripperThresholdAdapter",
     "UnifiedSliceAdapter",
