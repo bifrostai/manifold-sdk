@@ -29,6 +29,13 @@ if TYPE_CHECKING:
 # as a scanned table. A very large mesh would make each replay log large.
 BOX_VERTICES = 50_000
 
+# The label for any fixture outside the task, such as the table or the walls.
+TABLE = "table"
+
+# The robot parts in a contact.
+ARM = "arm"
+GRIPPER = "gripper"
+
 
 def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
     """A box part that bounds `parts`, in the colour of the first part.
@@ -115,6 +122,14 @@ class Simulator(ABC):
         """
 
     @abstractmethod
+    def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
+        """Each robot part that touches a scene body in env `env_id` now, with the body.
+
+        A part is `ARM` or `GRIPPER`, and a body is its scene name. The result excludes
+        the gripper touching the task's objects, because the hooks emit those as events.
+        """
+
+    @abstractmethod
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
         """Env `env_id`'s scalars now: the same names, in the same order, at every step.
 
@@ -146,7 +161,10 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
 
 
 __all__ = [
+    "ARM",
     "BOX_VERTICES",
+    "GRIPPER",
+    "TABLE",
     "Simulator",
     "bounding_box_part",
     "make_simulator",

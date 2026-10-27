@@ -43,6 +43,7 @@ from manifold.replay import (
     RerunScalar,
     RerunTab,
     Severity,
+    TouchingEvent,
     TurnedOnEvent,
     read_replay_log,
     replay_log_path,
@@ -80,7 +81,7 @@ def _raw_config(service: dict[str, Any], num_envs: int = 1, max_steps: int | Non
         "env": {"num_envs": num_envs},
         "run": {"seed": 0, "max_steps": max_steps, "step_seconds": 0.05, "image_format": "jpeg"},
         "simulator": None,
-        "replay": {"cameras": ["agentview"]},
+        "replay": {"cameras": ["agentview"], "finger_pads": []},
         "spec": _SPEC,
     }
 
@@ -751,6 +752,8 @@ class _Simulator(Simulator):
         self._x = 0.0
         # The supported versions that a test sets.
         self.supported: dict[str, str] = {}
+        # The contacts that each step reports, one set per step, then none.
+        self.contacts: list[frozenset[tuple[str, str]]] = []
 
     @property
     def supported_versions(self) -> dict[str, str]:
@@ -785,6 +788,9 @@ class _Simulator(Simulator):
 
     def replay_images(self, env_id):
         return {"egocentric": np.zeros((2, 2, 3), dtype=np.uint8)}
+
+    def replay_contacts(self, env_id):
+        return self.contacts.pop(0) if self.contacts else frozenset()
 
     def replay_scalars(self, env_id, ee_position):
         return [RerunScalar("joint_torques/0", RerunTab.PHYSICS, self._x, None)]
@@ -948,6 +954,46 @@ def test_the_replay_plots_no_command_for_a_unified_action():
     values = np.zeros(32, dtype=np.float32)
 
     assert recorder._action_scalars(Action(values=values)) == []
+
+
+def test_the_replay_records_when_a_robot_part_starts_and_stops_touching_a_body(tmp_path):
+    simulator = _Simulator()
+    simulator.contacts = [frozenset({("arm", "table")}), frozenset({("arm", "table")})]
+    recorder = _ReplayRecorder(
+        BenchmarkConfig.model_validate(_raw_config({"type": "single"})), simulator, 0
+    )
+
+    recorder.begin(tmp_path, 0, _observation(0), {}, ())
+    for step in range(1, 4):
+        recorder.record(None, _observation(step), (), success=False, done=step == 3)
+    recorder.end()
+
+    touches = [
+        [event for event in step.events if isinstance(event, TouchingEvent)]
+        for step in read_replay_log(replay_log_path(tmp_path, 0)).steps
+    ]
+    assert touches == [
+        [],
+        [TouchingEvent(object="arm", reference="table", is_active=True)],
+        [],
+        [TouchingEvent(object="arm", reference="table", is_active=False)],
+    ]
+
+
+def test_the_replay_header_lists_the_configs_fingertip_pads_and_step_length(tmp_path):
+    raw = _raw_config({"type": "single"})
+    raw["replay"]["finger_pads"] = [
+        {"body": "left_finger", "offset": [0.0, 0.0, 0.04]},
+        {"body": "right_finger", "offset": [0.0, 0.0, 0.04]},
+    ]
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+
+    recorder.begin(tmp_path, 0, _observation(0), {}, ())
+    recorder.end()
+
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+    assert [pad.body for pad in log.finger_pads] == ["left_finger", "right_finger"]
+    assert log.step_seconds == raw["run"]["step_seconds"]
 
 
 def test_a_replay_without_action_plots_names_no_overview_group(tmp_path):
