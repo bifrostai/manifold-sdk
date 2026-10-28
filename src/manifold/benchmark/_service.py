@@ -47,7 +47,15 @@ _logger = logging.getLogger(__name__)
 _hooks_logger = logging.getLogger("manifold.benchmark.hooks")
 
 
-class _HooksLogger(logging.LoggerAdapter[logging.Logger]):
+# `logging.LoggerAdapter` is generic only from Python 3.11, so the subscript is for type
+# checkers alone.
+if TYPE_CHECKING:
+    _LoggerAdapter = logging.LoggerAdapter[logging.Logger]
+else:
+    _LoggerAdapter = logging.LoggerAdapter
+
+
+class _HooksLogger(_LoggerAdapter):
     """A logger for the hooks. It writes `prefix` before each message."""
 
     def __init__(self, prefix: str) -> None:
