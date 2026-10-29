@@ -121,3 +121,45 @@ def test_pairing_does_not_compare_the_action_range():
         instruction=benchmark.observation_space.instruction,
     )
     assert check_compatibility(policy, benchmark).status is Compatibility.COMPATIBLE
+
+
+# The architectures of PyTorch 2.7 built for CUDA 12.8.
+_TORCH_ARCHITECTURES = ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120", "compute_120"]
+
+
+def _tabletop_with_cuda_architectures(cuda_architectures: object) -> Benchmark:
+    return Benchmark.model_validate(
+        {**TABLETOP.model_dump(mode="json"), "cuda_architectures": cuda_architectures}
+    )
+
+
+def test_a_benchmark_declares_no_cuda_architectures_by_default():
+    assert TABLETOP.cuda_architectures is None
+    assert TABLETOP.model_dump(mode="json")["cuda_architectures"] is None
+
+
+def test_cuda_architectures_round_trip_through_json():
+    benchmark = _tabletop_with_cuda_architectures(_TORCH_ARCHITECTURES)
+    assert benchmark.cuda_architectures == tuple(_TORCH_ARCHITECTURES)
+    assert Benchmark.model_validate_json(benchmark.model_dump_json()) == benchmark
+
+
+@pytest.mark.parametrize(
+    "cuda_architectures", [[], ["8.6"], ["sm86"], ["ptx_120"], ["sm_86", "sm_86"]]
+)
+def test_cuda_architectures_must_be_a_nonempty_list_of_unique_architecture_names(
+    cuda_architectures,
+):
+    with pytest.raises(ValidationError):
+        _tabletop_with_cuda_architectures(cuda_architectures)
+
+
+def test_pairing_does_not_compare_the_cuda_architectures():
+    benchmark = _tabletop_with_cuda_architectures(["sm_90"])
+    policy = PolicySignature(
+        action_space=benchmark.action_space,
+        proprioception=benchmark.observation_space.proprioception,
+        cameras=list(benchmark.observation_space.cameras),
+        instruction=benchmark.observation_space.instruction,
+    )
+    assert check_compatibility(policy, benchmark).status is Compatibility.COMPATIBLE
