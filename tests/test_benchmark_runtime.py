@@ -230,6 +230,38 @@ def test_the_spec_may_leave_out_the_action_range():
     assert spec.action_range.high == (1.0,) * 8
 
 
+def test_the_spec_may_leave_out_the_gpu_architectures():
+    assert "gpu_architectures" not in _SPEC
+    assert _config({"type": "single"}).spec.gpu_architectures is None
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "gpu_architectures": ["sm_86", "compute_86"]}
+    spec = BenchmarkConfig.model_validate(raw).spec
+    assert spec.gpu_architectures == ("sm_86", "compute_86")
+
+
+def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
+    sent = []
+    replies = [{"type": FrameType.READY, "payload": {}}]
+    channel = types.SimpleNamespace(
+        send=lambda *args: sent.append(args), recv=lambda: replies.pop(0)
+    )
+    monkeypatch.setattr(
+        _client.socket,
+        "create_connection",
+        lambda *_args: types.SimpleNamespace(close=lambda: None),
+    )
+    monkeypatch.setattr(_client.FrameChannel, "from_socket", staticmethod(lambda _s: channel))
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "gpu_architectures": ["sm_86"]}
+    benchmark = BenchmarkConfig.model_validate(raw).spec
+
+    _ClientPolicyConnection("policy:9000", benchmark, "raw")
+
+    ((frame_type, payload),) = sent
+    assert frame_type is FrameType.HELLO
+    assert "gpu_architectures" not in payload["benchmark"]
+
+
 def test_a_hooks_file_must_define_its_services_hooks():
     with pytest.raises(HooksError, match="must define on_reset"):
         _check_hooks(

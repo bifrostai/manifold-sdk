@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import (
@@ -24,13 +24,97 @@ from manifold.core.embodiment import (
 from manifold.core.names import CameraName
 from manifold.core.observation_space import ObservationSpace
 from manifold.core.sensor import Camera
-from manifold.lib.compat import assert_never
+from manifold.lib.compat import StrEnum, assert_never
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
 # The image encodings carried in an `__image__` wrapper's `format` field.
 ImageFormat = Literal["raw", "jpeg", "png"]
+
+
+class GpuArchitecture(StrEnum):
+    """A GPU architecture that CUDA code is compiled for.
+
+    The values are the names that `nvcc` accepts in CUDA 12.9 and 13.4: `sm_` for native
+    code or `compute_` for PTX, then a compute capability without its dot, then an
+    optional `a` or `f` suffix.
+    """
+
+    SM_50 = "sm_50"
+    SM_52 = "sm_52"
+    SM_53 = "sm_53"
+    SM_60 = "sm_60"
+    SM_61 = "sm_61"
+    SM_62 = "sm_62"
+    SM_70 = "sm_70"
+    SM_72 = "sm_72"
+    SM_75 = "sm_75"
+    SM_80 = "sm_80"
+    SM_86 = "sm_86"
+    SM_87 = "sm_87"
+    SM_88 = "sm_88"
+    SM_89 = "sm_89"
+    SM_90 = "sm_90"
+    SM_90A = "sm_90a"
+    SM_100 = "sm_100"
+    SM_100A = "sm_100a"
+    SM_100F = "sm_100f"
+    SM_101 = "sm_101"
+    SM_101A = "sm_101a"
+    SM_101F = "sm_101f"
+    SM_103 = "sm_103"
+    SM_103A = "sm_103a"
+    SM_103F = "sm_103f"
+    SM_107 = "sm_107"
+    SM_107A = "sm_107a"
+    SM_107F = "sm_107f"
+    SM_110 = "sm_110"
+    SM_110A = "sm_110a"
+    SM_110F = "sm_110f"
+    SM_120 = "sm_120"
+    SM_120A = "sm_120a"
+    SM_120F = "sm_120f"
+    SM_121 = "sm_121"
+    SM_121A = "sm_121a"
+    SM_121F = "sm_121f"
+    COMPUTE_50 = "compute_50"
+    COMPUTE_52 = "compute_52"
+    COMPUTE_53 = "compute_53"
+    COMPUTE_60 = "compute_60"
+    COMPUTE_61 = "compute_61"
+    COMPUTE_62 = "compute_62"
+    COMPUTE_70 = "compute_70"
+    COMPUTE_72 = "compute_72"
+    COMPUTE_75 = "compute_75"
+    COMPUTE_80 = "compute_80"
+    COMPUTE_86 = "compute_86"
+    COMPUTE_87 = "compute_87"
+    COMPUTE_88 = "compute_88"
+    COMPUTE_89 = "compute_89"
+    COMPUTE_90 = "compute_90"
+    COMPUTE_90A = "compute_90a"
+    COMPUTE_100 = "compute_100"
+    COMPUTE_100A = "compute_100a"
+    COMPUTE_100F = "compute_100f"
+    COMPUTE_101 = "compute_101"
+    COMPUTE_101A = "compute_101a"
+    COMPUTE_101F = "compute_101f"
+    COMPUTE_103 = "compute_103"
+    COMPUTE_103A = "compute_103a"
+    COMPUTE_103F = "compute_103f"
+    COMPUTE_107 = "compute_107"
+    COMPUTE_107A = "compute_107a"
+    COMPUTE_107F = "compute_107f"
+    COMPUTE_110 = "compute_110"
+    COMPUTE_110A = "compute_110a"
+    COMPUTE_110F = "compute_110f"
+    COMPUTE_120 = "compute_120"
+    COMPUTE_120A = "compute_120a"
+    COMPUTE_120F = "compute_120f"
+    COMPUTE_121 = "compute_121"
+    COMPUTE_121A = "compute_121a"
+    COMPUTE_121F = "compute_121f"
 
 
 class ActionRange(BaseModel):
@@ -84,6 +168,14 @@ class Benchmark(BaseModel):
     are None when the benchmark does not state them, and `max_steps` is None when each
     task has its own limit or upstream ends episodes itself. Pairing does not compare
     them.
+
+    `gpu_architectures` lists the GPU architectures that the benchmark's compiled CUDA
+    code is built for, in the form that `nvcc --gpu-architecture` accepts. Native code,
+    such as `sm_86`, runs on a GPU of the same major compute capability and the same or a
+    higher minor one. PTX, such as `compute_120`, runs on a GPU of that compute capability
+    or a higher one. A name with an `a` suffix runs only on that exact compute capability,
+    and one with an `f` suffix only on GPUs of the same family. It is None when the
+    benchmark does not declare the list. The benchmark does not send it to the policy.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -96,6 +188,15 @@ class Benchmark(BaseModel):
     step_seconds: float | None = Field(default=None, gt=0)
     max_steps: int | None = Field(default=None, ge=1)
     image_format: ImageFormat | None = None
+    gpu_architectures: tuple[GpuArchitecture, ...] | None = Field(default=None, min_length=1)
+
+    @field_validator("gpu_architectures")
+    @classmethod
+    def _drop_repeated_gpu_architectures(
+        cls, gpu_architectures: tuple[GpuArchitecture, ...] | None
+    ) -> tuple[GpuArchitecture, ...] | None:
+        """Keep the first of each repeated GPU architecture."""
+        return tuple(dict.fromkeys(gpu_architectures)) if gpu_architectures is not None else None
 
     @model_validator(mode="after")
     def _check_action_range_length(self) -> Benchmark:
