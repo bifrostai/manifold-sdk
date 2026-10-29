@@ -212,6 +212,15 @@ def test_the_spec_may_leave_out_the_action_range():
     assert spec.action_range.high == (1.0,) * 8
 
 
+def test_the_spec_may_leave_out_the_cuda_architectures():
+    assert "cuda_architectures" not in _SPEC
+    assert _config({"type": "single"}).spec.cuda_architectures is None
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "cuda_architectures": ["sm_86", "compute_86"]}
+    spec = BenchmarkConfig.model_validate(raw).spec
+    assert spec.cuda_architectures == ("sm_86", "compute_86")
+
+
 def test_a_hooks_file_must_define_its_services_hooks():
     with pytest.raises(HooksError, match="must define on_reset"):
         _check_hooks(

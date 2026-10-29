@@ -8,9 +8,9 @@ must drive (the embodiment's `action`).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Annotated, Any
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import (
@@ -28,6 +28,10 @@ from manifold.lib.compat import assert_never
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+# The form of a CUDA architecture name: `sm_` for native code or `compute_` for PTX, the
+# compute capability without its dot, and an optional `a` or `f` feature suffix.
+_CUDA_ARCHITECTURE_PATTERN = r"^(sm|compute)_[1-9][0-9]{1,2}[af]?$"
 
 
 class ActionRange(BaseModel):
@@ -73,6 +77,14 @@ class Benchmark(BaseModel):
     `action_range` declares the values that the embodiment's action accepts, so that a
     policy author can scale the policy's output to them. It is None when the benchmark
     declares no range. Pairing does not compare it.
+
+    `cuda_architectures` lists the GPU architectures that the benchmark's compiled CUDA
+    code is built for, in the form that `nvcc --gpu-architecture` accepts. Native code,
+    such as `sm_86`, runs on a GPU of the same major compute capability and the same or a
+    higher minor one. PTX, such as `compute_120`, runs on a GPU of that compute capability
+    or a higher one. A name with an `a` suffix runs only on that exact compute capability,
+    and one with an `f` suffix only on GPUs of the same family. It is None when the
+    benchmark does not declare the list. Pairing does not compare it.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -82,6 +94,18 @@ class Benchmark(BaseModel):
     sensors: list[Camera] = Field(default_factory=list)
     instruction: bool = True
     action_range: ActionRange | None = None
+    cuda_architectures: (
+        tuple[Annotated[str, StringConstraints(pattern=_CUDA_ARCHITECTURE_PATTERN)], ...] | None
+    ) = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _check_cuda_architectures_are_unique(self) -> Benchmark:
+        """Require each CUDA architecture to appear once."""
+        names = self.cuda_architectures or ()
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"cuda_architectures lists {repeated} more than once")
+        return self
 
     @model_validator(mode="after")
     def _check_action_range_length(self) -> Benchmark:
