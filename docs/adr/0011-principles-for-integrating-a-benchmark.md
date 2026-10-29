@@ -35,7 +35,8 @@ container claims a task, runs its episodes, and reports the results.
 
 The author states every value that the benchmark uses. Shared code does not fill
 in a value that the author left out. A reader then sees all the values in a
-single place.
+single place. A spec key whose default is `None` may be left out: leaving it out
+declares nothing, and shared code fills in nothing.
 
 ### Lifecycle steps
 
