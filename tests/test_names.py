@@ -34,7 +34,7 @@ def _advertised(camera: str) -> dict[str, Any]:
 
 def test_a_camera_refuses_an_unlisted_name():
     with pytest.raises(ValidationError, match="name"):
-        Camera(name=cast(Any, "head"), shape=(8, 8, 3))
+        Camera(name=cast(Any, "chest"), shape=(8, 8, 3))
 
 
 def test_an_embodiment_refuses_an_unlisted_name():
@@ -54,7 +54,7 @@ def test_a_listed_name_given_as_its_string_becomes_the_member():
 
 
 def test_a_received_benchmark_drops_a_camera_this_sdk_does_not_list():
-    benchmark = Benchmark.from_received(_advertised("head"))
+    benchmark = Benchmark.from_received(_advertised("chest"))
 
     assert [camera.name for camera in benchmark.sensors] == [CameraName.AGENTVIEW]
 
@@ -79,7 +79,7 @@ def test_a_received_benchmark_refuses_an_unlisted_embodiment():
 def test_a_policy_pairs_with_a_benchmark_that_also_publishes_an_unlisted_camera():
     # A peer on a newer SDK may publish a camera this SDK has no name for. A policy
     # that does not read it still pairs.
-    benchmark = Benchmark.from_received(_advertised("head"))
+    benchmark = Benchmark.from_received(_advertised("chest"))
     policy = PolicySignature(
         action_space=FRANKA_EE_DELTA.action,
         proprioception=FRANKA_EE_DELTA.proprioception,

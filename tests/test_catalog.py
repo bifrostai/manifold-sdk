@@ -54,6 +54,7 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
     # `EmbodimentName` lists exactly the shipped embodiments, under the strings a hello
     # and a registered version already carry.
     assert {name.value for name in EmbodimentName} == {
+        "aloha_agilex_joint_absolute",
         "droid_joint_absolute",
         "franka_ee_delta",
         "franka_joint_absolute",
@@ -73,7 +74,10 @@ def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
         "agentview_left_depth",
         "agentview_right",
         "agentview_right_depth",
+        "head",
+        "left_wrist",
         "over_shoulder_left",
+        "right_wrist",
         "wrist",
         "wrist_depth",
     }
