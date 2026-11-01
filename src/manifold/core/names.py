@@ -27,6 +27,8 @@ class CameraName(_Name):
     AGENTVIEW_RIGHT = "agentview_right"
     AGENTVIEW_RIGHT_DEPTH = "agentview_right_depth"
     HEAD = "head"
+    HEAD_LEFT = "head_left"
+    HEAD_RIGHT = "head_right"
     LEFT_WRIST = "left_wrist"
     OVER_SHOULDER_LEFT = "over_shoulder_left"
     RIGHT_WRIST = "right_wrist"
@@ -57,6 +59,7 @@ class EmbodimentName(_Name):
     FRANKA_EE_DELTA = "franka_ee_delta"
     FRANKA_JOINT_ABSOLUTE = "franka_joint_absolute"
     PANDA_OMRON_WHOLE_BODY = "panda_omron_whole_body"
+    RBY1_WUJI2_JOINT_ABSOLUTE = "rby1_wuji2_joint_absolute"
     WIDOWX_EE_DELTA = "widowx_ee_delta"
 
 

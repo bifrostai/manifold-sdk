@@ -59,6 +59,7 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
         "franka_ee_delta",
         "franka_joint_absolute",
         "panda_omron_whole_body",
+        "rby1_wuji2_joint_absolute",
         "widowx_ee_delta",
     }
     assert {name.value for name in EmbodimentName} == set(MODULES)
@@ -75,6 +76,8 @@ def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
         "agentview_right",
         "agentview_right_depth",
         "head",
+        "head_left",
+        "head_right",
         "left_wrist",
         "over_shoulder_left",
         "right_wrist",
