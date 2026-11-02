@@ -18,10 +18,12 @@ This module writes the hooks' events and the events it derives from each step.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from manifold.benchmark.simulators import bounding_box_part
 from manifold.core.conventions import RotationFormat, ee_step_layout
 from manifold.core.embodiment.action_space import (
     EEActionSpace,
@@ -45,6 +47,9 @@ from manifold.replay import (
     ReplayChannelKind,
     ReplayFingerPad,
     ReplayLogWriter,
+    ReplayMesh,
+    ReplaySceneBody,
+    ReplayScenePart,
     RerunScalar,
     RerunTab,
     TouchingEvent,
@@ -63,6 +68,34 @@ if TYPE_CHECKING:
 
 
 _logger = logging.getLogger(__name__)
+
+
+def _boxed(body: ReplaySceneBody) -> ReplaySceneBody:
+    """`body` with its parts replaced by one box that bounds them, in the body's frame.
+
+    Grading takes each body's size from its parts, and the box keeps that size.
+    """
+    if not body.parts:
+        return body
+    posed = [
+        ReplayScenePart(
+            mesh=ReplayMesh(
+                vertices=_rotate(part.orientation, np.asarray(part.mesh.vertices, dtype=np.float64))
+                + np.asarray(part.position, dtype=np.float64),
+                faces=part.mesh.faces,
+            ),
+            color=part.color,
+        )
+        for part in body.parts
+    ]
+    return replace(body, parts=(bounding_box_part(posed),))
+
+
+def _rotate(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
+    """`vectors` rotated by an `xyzw` quaternion."""
+    x, y, z, w = (float(value) for value in quaternion)
+    u = np.array([x, y, z])
+    return vectors + 2.0 * np.cross(u, np.cross(u, vectors) + w * vectors)
 
 
 def _event_key(event: FactEvent) -> tuple[Any, ...]:
@@ -154,6 +187,7 @@ class _ReplayRecorder:
         self._previous = None
         self._touching = frozenset()
         bodies = self._simulator.replay_bodies(self._env_id) if self._simulator is not None else ()
+        bodies = tuple(_boxed(body) for body in bodies)
         recorded = [
             EpisodeStartedEvent(instruction=observation.instruction or "", attributes=attributes),
             *self._events_to_write(events, None),

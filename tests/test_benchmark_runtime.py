@@ -23,7 +23,7 @@ from manifold.benchmark import (
 )
 from manifold.benchmark.__main__ import main
 from manifold.benchmark._client import Client, _ClientPolicyConnection, _upright_image_pipeline
-from manifold.benchmark._replay import _ReplayRecorder
+from manifold.benchmark._replay import _boxed, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
@@ -772,11 +772,8 @@ class _Simulator(Simulator):
         pass
 
     def replay_bodies(self, env_id):
-        return (
-            ReplaySceneBody(
-                name="cube", parts=(ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
-            ),
-        )
+        parts = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+        return (ReplaySceneBody(name="cube", parts=parts),)
 
     def replay_poses(self, env_id):
         self._x += 1.0
@@ -810,6 +807,12 @@ def test_the_replay_holds_the_simulators_scene_images_and_scalars(tmp_path, monk
     log = read_replay_log(artifacts[0][0])
     assert simulator.attached == [[0]]
     assert [body.name for body in log.bodies] == ["cube"]
+    # The log holds each body as the box that bounds its meshes, and the body keeps its
+    # moving pose.
+    (part,) = log.bodies[0].parts
+    vertices = np.asarray(part.mesh.vertices)
+    # The tolerance allows for the float16 vertices that the log stores.
+    assert np.allclose(vertices.max(axis=0) - vertices.min(axis=0), [0.2, 0.2, 0.2], atol=1e-3)
     assert "egocentric" in {channel.name for channel in log.channels}
     assert ("joint_torques/0", "Physics") in {
         (channel.name, channel.group) for channel in log.channels
@@ -1084,3 +1087,16 @@ def test_an_installed_version_outside_the_range_is_logged(caplog):
         _log_unsupported_versions(simulator)
 
     assert [record.getMessage().split(" ")[0] for record in caplog.records] == ["numpy"]
+
+
+def test_a_body_is_written_as_the_box_that_bounds_its_posed_parts():
+    # A 0.2 x 0.4 x 0.6 part, turned 90 degrees about z and moved 1 m along x.
+    part = ReplayScenePart(
+        mesh=ReplayMesh.box([0.1, 0.2, 0.3]),
+        position=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        orientation=np.array([0.0, 0.0, 0.7071068, 0.7071068], dtype=np.float32),
+    )
+    (box,) = _boxed(ReplaySceneBody(name="body", parts=(part,))).parts
+    vertices = np.asarray(box.mesh.vertices) + np.asarray(box.position)
+    assert np.allclose(vertices.min(axis=0), [0.8, -0.1, -0.3], atol=1e-5)
+    assert np.allclose(vertices.max(axis=0), [1.2, 0.1, 0.3], atol=1e-5)
