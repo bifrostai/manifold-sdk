@@ -133,8 +133,9 @@ class Simulator(ABC):
     def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
         """Each robot part that touches a scene body in env `env_id` now, with the body.
 
-        A part is `ARM` or `GRIPPER`, and a body is its scene name. The result excludes
-        the gripper touching the task's objects, because the hooks emit those as events.
+        A part is `ARM`, `GRIPPER`, or the name of a hand link, and a body is its scene
+        name. The result leaves out the gripper touching the task's objects, because the
+        hooks record those as events, but includes a hand link's touches of them.
         """
 
     @abstractmethod
