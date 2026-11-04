@@ -139,6 +139,15 @@ class _IsaacSimEpisodeCache:
     cameras: tuple[str, ...]
 
 
+class _HandTouchLink(BaseModel):
+    """A touch link of a dexterous hand: which hand it is on, and whether it is the thumb."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hand: str
+    thumb: bool
+
+
 class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     """Where an Isaac Lab env is, and how Isaac Sim is launched.
 
@@ -154,10 +163,15 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     between neighbouring envs. `camera_far_clip` is the distance in metres past which
     the cameras draw nothing.
 
-    `touch_links` maps each robot link whose contacts the replay records to `arm` or
-    `gripper`, by the link's prim path below the robot's prim, such as `panda_link1`.
-    `apply_settings` adds a contact sensor to each link, filtered to the scene's other
-    assets. Null adds none, and the replay then records no contacts.
+    `touch_links` maps each robot link whose contacts the replay records to `arm`,
+    `gripper` or a hand link, by the link's prim path below the robot's prim, such as
+    `panda_link1`. `apply_settings` adds a contact sensor to each link, filtered to the
+    scene's other assets. A `gripper` link leaves out the task's objects, because the
+    hooks record those touches. A hand link, `{"hand": "left", "thumb": false}`, is a
+    link of a dexterous hand on a robot with no gripper command: the replay records its
+    touches of objects as the gripper touching them, and its grasps from which links of
+    which hand touch an object. Null adds none, and the replay then records no
+    contacts.
     """
 
     # A config lists all of its values, so an unknown key raises.
@@ -170,7 +184,7 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     max_position_iterations: int | None = Field(ge=1, le=255)
     env_spacing: float | None = Field(gt=0)
     camera_far_clip: float | None = Field(gt=0)
-    touch_links: dict[str, Literal["arm", "gripper"]] | None
+    touch_links: dict[str, Literal["arm", "gripper"] | _HandTouchLink] | None
 
 
 def _take_sigsegv() -> None:
@@ -450,7 +464,8 @@ class IsaacSimSimulator(Simulator):
         """Each robot part that touched a scene asset during the last action, with the asset.
 
         The touch sensors keep every physics step of an action, so the result includes a
-        touch between two actions. An asset is its scene name.
+        touch between two actions. An asset is its scene name. A hand link's touches
+        name the link in place of a part.
         """
         isaac, row = self._envs[env_id]
         sensors = isaac.scene.sensors
@@ -465,15 +480,20 @@ class IsaacSimSimulator(Simulator):
             # Shape (envs, steps, bodies, filters, 3).
             norms = np.linalg.norm(np.asarray(history[row], dtype=np.float64), axis=-1)
             peaks = norms.reshape(-1, norms.shape[-1]).max(axis=0)
-            names = self._touch_filter_names(isaac.scene, sensor.cfg.filter_prim_paths_expr)
+            names = self._touch_counterpart_names(isaac.scene, sensor)
+            if names is None:
+                names = self._touch_filter_names(isaac.scene, sensor.cfg.filter_prim_paths_expr)
             if len(names) != len(peaks):
                 # A filter that matches several bodies or none leaves the forces unmatched.
                 self._warn_unnamed_touches(link, len(names), len(peaks))
                 continue
-            touching.update(
-                (part, name)
+            touched = [
+                name
                 for name, force in zip(names, peaks, strict=True)
                 if force >= _PART_TOUCH_NEWTONS
+            ]
+            touching.update(
+                (link if isinstance(part, _HandTouchLink) else part, name) for name in touched
             )
         return frozenset(touching)
 
@@ -793,6 +813,10 @@ class IsaacSimSimulator(Simulator):
         if robot is None:
             raise ValueError(f"the env's scene config has no robot {config.robot!r}")
         assets = IsaacSimSimulator._touch_assets(scene_cfg)
+        if IsaacSimSimulator._on_newton(env_cfg):
+            # Newton matches a filter against each body's path, and an asset's bodies
+            # can sit below its prim, so each filter takes the bodies below it too.
+            assets = [(f"{path}(/.*)?", is_object) for path, is_object in assets]
         fixtures = [path for path, is_object in assets if not is_object]
         everything = [path for path, _is_object in assets]
         for link, part in config.touch_links.items():
@@ -848,6 +872,42 @@ class IsaacSimSimulator(Simulator):
     def _touch_sensor_name(link: str) -> str:
         """The scene name of the touch sensor on `link`."""
         return _TOUCH_SENSOR_PREFIX + link.replace("/", "__")
+
+    @staticmethod
+    def _on_newton(env_cfg: Any) -> bool:
+        """Whether the env runs on Isaac Lab's Newton physics instead of PhysX."""
+        physics = getattr(getattr(env_cfg, "sim", None), "physics", None)
+        return type(physics).__name__ == "NewtonCfg"
+
+    @staticmethod
+    def _touch_counterpart_names(scene: Any, sensor: Any) -> list[str] | None:
+        """On Newton, the asset of each of a sensor's force columns, or None on PhysX.
+
+        Newton gives a sensor one force column for each body or shape that its filters
+        matched, in place of one for each filter. A column's asset is the rigid object
+        whose prim the body sits under, and another body is `TABLE`.
+        """
+        view = getattr(sensor, "contact_view", None)
+        kind = getattr(view, "counterpart_type", None)
+        if view is None or kind is None:
+            return None
+        # Isaac Lab's Newton sensor reads the model's labels with this method.
+        labels = sensor._get_model_labels(kind)
+        row = view.counterpart_indices[0] if view.counterpart_indices else []
+        names = []
+        for index in row:
+            path = str(labels[index])
+            names.append(
+                next(
+                    (
+                        str(name)
+                        for name, asset in scene.rigid_objects.items()
+                        if IsaacSimSimulator._is_under(path, asset.cfg.prim_path)
+                    ),
+                    TABLE,
+                )
+            )
+        return names
 
     @staticmethod
     def _touch_filter_names(scene: Any, filters: Any) -> list[str]:
