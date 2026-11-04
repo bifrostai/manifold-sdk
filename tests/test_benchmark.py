@@ -18,6 +18,7 @@ from manifold.core import (
     Compatibility,
     EEActionSpace,
     Embodiment,
+    GpuArchitecture,
     GripperFormat,
     JointActionSpace,
     PolicySignature,
@@ -114,6 +115,50 @@ def test_an_action_range_must_fit_the_action(action_range, message):
 
 def test_pairing_does_not_compare_the_action_range():
     benchmark = _tabletop_with_range(_OSC_RANGE)
+    policy = PolicySignature(
+        action_space=benchmark.action_space,
+        proprioception=benchmark.observation_space.proprioception,
+        cameras=list(benchmark.observation_space.cameras),
+        instruction=benchmark.observation_space.instruction,
+    )
+    assert check_compatibility(policy, benchmark).status is Compatibility.COMPATIBLE
+
+
+# The architectures of PyTorch 2.7 built for CUDA 12.8.
+_TORCH_ARCHITECTURES = ["sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120", "compute_120"]
+
+
+def _tabletop_with_gpu_architectures(gpu_architectures: object) -> Benchmark:
+    return Benchmark.model_validate(
+        {**TABLETOP.model_dump(mode="json"), "gpu_architectures": gpu_architectures}
+    )
+
+
+def test_a_benchmark_declares_no_gpu_architectures_by_default():
+    assert TABLETOP.gpu_architectures is None
+    assert TABLETOP.model_dump(mode="json")["gpu_architectures"] is None
+
+
+def test_gpu_architectures_round_trip_through_json():
+    benchmark = _tabletop_with_gpu_architectures(_TORCH_ARCHITECTURES)
+    assert benchmark.gpu_architectures == tuple(
+        GpuArchitecture(name) for name in _TORCH_ARCHITECTURES
+    )
+    assert Benchmark.model_validate_json(benchmark.model_dump_json()) == benchmark
+
+
+@pytest.mark.parametrize(
+    "gpu_architectures", [[], ["8.6"], ["sm86"], ["sm_130"], ["sm_86", "sm_86"]]
+)
+def test_gpu_architectures_must_be_a_nonempty_list_of_unique_listed_architectures(
+    gpu_architectures,
+):
+    with pytest.raises(ValidationError):
+        _tabletop_with_gpu_architectures(gpu_architectures)
+
+
+def test_pairing_does_not_compare_the_gpu_architectures():
+    benchmark = _tabletop_with_gpu_architectures(["sm_90"])
     policy = PolicySignature(
         action_space=benchmark.action_space,
         proprioception=benchmark.observation_space.proprioception,
