@@ -391,7 +391,7 @@ class IsaacSimSimulator(Simulator):
             path = str(owner.GetPath())
             name = self._unique_name(str(owner.GetName()) or path, path, owners)
             tracked = self._tracked_body(path, scene)
-            labels.setdefault(name, self._body_labels(tracked))
+            labels.setdefault(name, self._body_labels(name, tracked))
             if tracked is None:
                 pose = self._pose(self._matrix(cache.GetLocalToWorldTransform(owner)), metres)
                 local_position = (pose.position - origin).astype(np.float32)
@@ -786,16 +786,18 @@ class IsaacSimSimulator(Simulator):
         """
         return re.fullmatch(f"{pattern}(/.*)?", path) is not None
 
-    def _body_labels(self, tracked: _TrackedBody | None) -> tuple[ReplaySceneBodyRole, str | None]:
+    def _body_labels(
+        self, name: str, tracked: _TrackedBody | None
+    ) -> tuple[ReplaySceneBodyRole, str | None]:
         """A body's role and the task's name for it, from what Isaac Lab tracks for it.
 
         A rigid object is an object, under its scene name. A link of the config's robot is
         the robot. A link of another articulation, such as a cabinet's door, is an object
-        that the task does not name. A body that Isaac Lab does not move is a fixture, and
-        is `TABLE`.
+        that the task does not name. A body that Isaac Lab does not move is a fixture,
+        under its own prim's `name`, so that two fixtures have different names.
         """
         if tracked is None:
-            return ReplaySceneBodyRole.FIXTURE, TABLE
+            return ReplaySceneBodyRole.FIXTURE, name
         kind, asset, _index = tracked
         if kind == "root":
             return ReplaySceneBodyRole.OBJECT, asset
