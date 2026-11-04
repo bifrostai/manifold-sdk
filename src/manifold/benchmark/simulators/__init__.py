@@ -29,7 +29,8 @@ if TYPE_CHECKING:
 # as a scanned table. A very large mesh would make each replay log large.
 BOX_VERTICES = 50_000
 
-# The label for any fixture outside the task, such as the table or the walls.
+# The name of a fixture in a touch, and of a MuJoCo fixture that no task object owns,
+# such as the table or the walls.
 TABLE = "table"
 
 # The robot parts in a contact.

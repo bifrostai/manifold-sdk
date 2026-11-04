@@ -672,7 +672,7 @@ def test_the_scene_groups_drawn_prims_under_their_rigid_bodies(isaac: SimpleName
     assert len(bodies["base_link"].parts) == 1
 
 
-def test_each_body_has_its_role_and_the_scenes_name_for_an_object(isaac: SimpleNamespace) -> None:
+def test_each_body_has_its_role_and_a_fixture_keeps_its_own_name(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
     labels = {body.name: (body.role, body.object) for body in simulator.replay_bodies(0)}
     assert labels == {
@@ -680,7 +680,7 @@ def test_each_body_has_its_role_and_the_scenes_name_for_an_object(isaac: SimpleN
         "finger": (ReplaySceneBodyRole.ROBOT, None),
         "banana": (ReplaySceneBodyRole.OBJECT, "banana"),
         "bowl": (ReplaySceneBodyRole.OBJECT, "bowl"),
-        "top": (ReplaySceneBodyRole.FIXTURE, "table"),
+        "top": (ReplaySceneBodyRole.FIXTURE, "top"),
     }
 
 
