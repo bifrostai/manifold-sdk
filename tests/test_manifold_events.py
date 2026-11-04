@@ -43,6 +43,7 @@ from manifold.replay import (
     Severity,
     StackedEvent,
     StackOrder,
+    StageReachedEvent,
     TouchingEvent,
     TurnedOnEvent,
     UprightEvent,
@@ -84,6 +85,7 @@ EVERY_TYPE = (
             InFrontOfEvent,
             BehindEvent,
             TouchingEvent,
+            StageReachedEvent,
         )
     ),
     StackedEvent(
