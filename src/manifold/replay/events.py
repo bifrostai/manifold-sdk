@@ -231,6 +231,17 @@ class StackedEvent(FactEvent):
     order: StackOrder | None = None
 
 
+class StageReachedEvent(RelationFactEvent):
+    """`object` reached `reference`, a named stage of the benchmark's own progress check.
+
+    A benchmark that scores partial credit through ordered stages records each stage
+    that its tracker marks reached. The fact holds from that step to the end of the
+    episode.
+    """
+
+    event_type: Literal["stage_reached"] = "stage_reached"
+
+
 class GripperCommandedEvent(_Event):
     """The policy commanded the gripper open or closed."""
 
@@ -327,6 +338,7 @@ ManifoldEvent = Annotated[
     | BehindEvent
     | TouchingEvent
     | StackedEvent
+    | StageReachedEvent
     | GripperCommandedEvent
     | GripperHitEvent
     | ObjectTippedEvent
