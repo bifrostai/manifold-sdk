@@ -33,6 +33,7 @@ from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorCon
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
 from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig
 from manifold.core.benchmark import Benchmark
+from manifold.replay.events import FailureType
 from manifold.wire import ImageFormat
 
 if TYPE_CHECKING:
@@ -121,11 +122,14 @@ class BenchmarkReplayConfig(_BenchmarkConfigBase):
 
     `cameras` lists camera names from the spec, and the live view streams `cameras[0]`.
     `finger_pads` lists the gripper's two fingertip pads for each replay's header, and is
-    empty when the gripper has no pads or the replay has no scene.
+    empty when the gripper has no pads or the replay has no scene. `failure_types` lists
+    the failure types that the hooks record as `FailureEvent`s, for each replay's header;
+    the replay refuses a `FailureEvent` of any other type.
     """
 
     cameras: tuple[str, ...] = Field(min_length=1)
     finger_pads: tuple[()] | tuple[BenchmarkFingerPadConfig, BenchmarkFingerPadConfig]
+    failure_types: tuple[FailureType, ...] = ()
 
 
 class BenchmarkConfig(_BenchmarkConfigBase):

@@ -33,6 +33,8 @@ from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE
 from manifold.replay import (
+    FailureEvent,
+    FailureType,
     GraspedEvent,
     GripperTouchingEvent,
     NoteEvent,
@@ -981,6 +983,21 @@ def _recorder_for(action_space) -> _ReplayRecorder:
     raw = _raw_config({"type": "single"})
     raw["spec"] = {**raw["spec"], "embodiment": embodiment.model_dump(mode="json")}
     return _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+
+
+def test_a_listed_failure_type_is_recorded_and_named_in_the_header(tmp_path) -> None:
+    raw = _raw_config({"type": "single"})
+    raw["replay"] = {**raw["replay"], "failure_types": ["slip_drop"]}
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+    drop = FailureEvent(failure_type=FailureType.SLIP_DROP, object="cube")
+
+    recorder.begin(tmp_path, 0, _observation(0), {}, ())
+    recorder.record(None, _observation(1), (drop,), success=False, done=True)
+    recorder.end()
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+
+    assert log.failure_types == (FailureType.SLIP_DROP,)
+    assert drop in log.steps[1].events
 
 
 def test_a_rotation_of_zeros_is_charted_as_a_quaternion_of_zeros():

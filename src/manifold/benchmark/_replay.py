@@ -270,6 +270,7 @@ class _ReplayRecorder:
                 for pad in self._config.replay.finger_pads
             ),
             step_seconds=self._config.run.step_seconds,
+            failure_types=self._config.replay.failure_types,
         )
         if bodies:
             self._log.write_scene(bodies)
