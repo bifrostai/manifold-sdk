@@ -21,7 +21,7 @@ from manifold.benchmark import (
     _client,
     load_config,
 )
-from manifold.benchmark.__main__ import main
+from manifold.benchmark.__main__ import _log_by_level, main
 from manifold.benchmark._client import Client, _ClientPolicyConnection, _upright_image_pipeline
 from manifold.benchmark._replay import _boxed, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
@@ -915,6 +915,26 @@ def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monk
 
     spec = Benchmark.model_validate_json((tmp_path / "spec.json").read_text())
     assert spec.name == "toy"
+
+
+def test_records_below_error_go_to_stdout_and_the_rest_to_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(logging.getLogger(), "handlers", [])
+    _log_by_level()
+    # A simulator can set every root handler to one level, as Isaac Lab's AppLauncher does.
+    for handler in logging.getLogger().handlers:
+        handler.setLevel(logging.INFO)
+    logger = logging.getLogger("manifold.test_log_by_level")
+    logger.setLevel(logging.INFO)
+
+    logger.info("started")
+    logger.warning("slow")
+    logger.error("failed")
+
+    captured = capsys.readouterr()
+    assert captured.out == (
+        "INFO manifold.test_log_by_level: started\nWARNING manifold.test_log_by_level: slow\n"
+    )
+    assert captured.err == "ERROR manifold.test_log_by_level: failed\n"
 
 
 def test_the_client_refuses_an_action_that_the_benchmark_cannot_take(monkeypatch):

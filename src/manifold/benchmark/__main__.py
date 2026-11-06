@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
 from pathlib import Path
 
 from manifold.benchmark._client import Client
@@ -32,6 +33,21 @@ _TASK_SERVER_ADDRESS_ENV = "MANIFOLD_TASK_SERVER_ADDRESS"
 _WORKER_ID_ENV = "MANIFOLD_WORKER_ID"
 # The runner sets this variable only when a user watches the live view.
 _LIVE_VIEW_SERVER_ADDRESS_ENV = "MANIFOLD_LIVE_VIEW_SERVER_ADDRESS"
+
+
+def _log_by_level() -> None:
+    """Write log records below ERROR to stdout, and ERROR and above to stderr.
+
+    Each handler picks its records with a filter rather than a level, because a
+    simulator can set the level of every root handler, as Isaac Lab's `AppLauncher` does.
+    """
+    below_error = logging.StreamHandler(sys.stdout)
+    below_error.addFilter(lambda record: record.levelno < logging.ERROR)
+    from_error = logging.StreamHandler(sys.stderr)
+    from_error.addFilter(lambda record: record.levelno >= logging.ERROR)
+    logging.basicConfig(
+        format="%(levelname)s %(name)s: %(message)s", handlers=[below_error, from_error]
+    )
 
 
 def main() -> None:
@@ -55,7 +71,7 @@ def main() -> None:
         return
     # Other packages log each request at INFO, so only the `manifold` loggers show INFO.
     # The hooks write to `manifold.benchmark.hooks`.
-    logging.basicConfig(format="%(levelname)s %(name)s: %(message)s")
+    _log_by_level()
     logging.getLogger("manifold").setLevel(logging.INFO)
     service = make_service(config, hooks)
     policy_address = os.environ[_SERVER_URL_ENV]
