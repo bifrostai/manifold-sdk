@@ -139,6 +139,15 @@ class _IsaacSimEpisodeCache:
     cameras: tuple[str, ...]
 
 
+class _HandTouchLink(BaseModel):
+    """A touch link of a dexterous hand, with the hand it belongs to and whether it is the thumb."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hand: str
+    thumb: bool
+
+
 class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     """Where an Isaac Lab env is, and how Isaac Sim is launched.
 
@@ -154,10 +163,17 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     between neighbouring envs. `camera_far_clip` is the distance in metres past which
     the cameras draw nothing.
 
-    `touch_links` maps each robot link whose contacts the replay records to `arm` or
-    `gripper`, by the link's prim path below the robot's prim, such as `panda_link1`.
-    `apply_settings` adds a contact sensor to each link, filtered to the scene's other
-    assets. Null adds none, and the replay then records no contacts.
+    `touch_links` maps each robot link whose contacts the replay records to `arm`,
+    `gripper` or a hand link, by the link's prim path below the robot's prim, such as
+    `panda_link1`. `apply_settings` adds a contact sensor to each link, filtered to the
+    scene's other assets. The sensor on a `gripper` link leaves out the task's objects,
+    because the hooks record those touches. A hand link, such as
+    `{"hand": "left", "thumb": false}`, is a link of a dexterous hand on a robot that has no
+    gripper command. The replay records a hand link's touches of objects as the gripper
+    touching them, and records a grasp from which links of which hand touch an object. On
+    Newton physics, the replay reads the touches from the contacts that the solver already
+    computes, in place of adding a sensor. Null adds no sensors, and the replay then records
+    no contacts.
     """
 
     # A config lists all of its values, so an unknown key raises.
@@ -170,7 +186,7 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     max_position_iterations: int | None = Field(ge=1, le=255)
     env_spacing: float | None = Field(gt=0)
     camera_far_clip: float | None = Field(gt=0)
-    touch_links: dict[str, Literal["arm", "gripper"]] | None
+    touch_links: dict[str, Literal["arm", "gripper"] | _HandTouchLink] | None
 
 
 def _take_sigsegv() -> None:
@@ -225,6 +241,9 @@ class IsaacSimSimulator(Simulator):
         self._scalar_last = False
         # The touch links already warned about.
         self._unnamed_touches: set[str] = set()
+        # The last solver that `_contact_sides` read, with the touch link or scene body of
+        # each of its MuJoCo geoms.
+        self._solver_sides: tuple[Any, dict[int, tuple[str, Any] | str]] | None = None
 
     @staticmethod
     def apply_settings(env_cfg: Any, config: BenchmarkIsaacSimSimulatorConfig) -> None:
@@ -372,7 +391,7 @@ class IsaacSimSimulator(Simulator):
             path = str(owner.GetPath())
             name = self._unique_name(str(owner.GetName()) or path, path, owners)
             tracked = self._tracked_body(path, scene)
-            labels.setdefault(name, self._body_labels(tracked))
+            labels.setdefault(name, self._body_labels(name, tracked))
             if tracked is None:
                 pose = self._pose(self._matrix(cache.GetLocalToWorldTransform(owner)), metres)
                 local_position = (pose.position - origin).astype(np.float32)
@@ -449,10 +468,15 @@ class IsaacSimSimulator(Simulator):
     def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
         """Each robot part that touched a scene asset during the last action, with the asset.
 
-        The touch sensors keep every physics step of an action, so the result includes a
-        touch between two actions. An asset is its scene name.
+        On PhysX the touch sensors keep every physics step of an action, so the result
+        includes a touch between two actions. On Newton the result holds the solver's
+        contacts from the action's last physics step, which the simulator reads without
+        adding anything to the scene. An asset appears under its scene name. A hand link's
+        touches carry the link's name in place of a part.
         """
         isaac, row = self._envs[env_id]
+        if self._config.touch_links and self._newton_solver() is not None:
+            return self._solver_touches(isaac, row)
         sensors = isaac.scene.sensors
         touching = set()
         for link, part in (self._config.touch_links or {}).items():
@@ -470,10 +494,13 @@ class IsaacSimSimulator(Simulator):
                 # A filter that matches several bodies or none leaves the forces unmatched.
                 self._warn_unnamed_touches(link, len(names), len(peaks))
                 continue
-            touching.update(
-                (part, name)
+            touched = [
+                name
                 for name, force in zip(names, peaks, strict=True)
                 if force >= _PART_TOUCH_NEWTONS
+            ]
+            touching.update(
+                (link if isinstance(part, _HandTouchLink) else part, name) for name in touched
             )
         return frozenset(touching)
 
@@ -759,16 +786,18 @@ class IsaacSimSimulator(Simulator):
         """
         return re.fullmatch(f"{pattern}(/.*)?", path) is not None
 
-    def _body_labels(self, tracked: _TrackedBody | None) -> tuple[ReplaySceneBodyRole, str | None]:
+    def _body_labels(
+        self, name: str, tracked: _TrackedBody | None
+    ) -> tuple[ReplaySceneBodyRole, str | None]:
         """A body's role and the task's name for it, from what Isaac Lab tracks for it.
 
         A rigid object is an object, under its scene name. A link of the config's robot is
         the robot. A link of another articulation, such as a cabinet's door, is an object
-        that the task does not name. A body that Isaac Lab does not move is a fixture, and
-        is `TABLE`.
+        that the task does not name. A body that Isaac Lab does not move is a fixture,
+        under its own prim's `name`, so that two fixtures have different names.
         """
         if tracked is None:
-            return ReplaySceneBodyRole.FIXTURE, TABLE
+            return ReplaySceneBodyRole.FIXTURE, name
         kind, asset, _index = tracked
         if kind == "root":
             return ReplaySceneBodyRole.OBJECT, asset
@@ -785,7 +814,9 @@ class IsaacSimSimulator(Simulator):
         A gripper link's sensor excludes the task's objects, because the hooks emit those
         touches as events.
         """
-        if config.touch_links is None:
+        if config.touch_links is None or IsaacSimSimulator._on_newton(env_cfg):
+            # On Newton, `replay_contacts` reads touches from the contacts that the solver
+            # already computes, in place of a sensor on each link.
             return
         from isaaclab.sensors import ContactSensorCfg  # ty: ignore[unresolved-import]
 
@@ -828,6 +859,105 @@ class IsaacSimSimulator(Simulator):
                 found.append((asset.prim_path, is_object))
         return found
 
+    @staticmethod
+    def _newton_solver() -> Any:
+        """Newton's MuJoCo Warp solver, when the env runs on it, or None."""
+        manager = sys.modules.get("isaaclab_newton.physics.newton_manager")
+        solver = getattr(getattr(manager, "NewtonManager", None), "_solver", None)
+        return solver if getattr(solver, "mjw_data", None) is not None else None
+
+    def _solver_touches(self, isaac: Any, row: int) -> frozenset[tuple[str, str]]:
+        """Each touch link's contacts in env row `row`, from the solver's own arrays.
+
+        A contact counts when its normal force is at least `_PART_TOUCH_NEWTONS`. The solver
+        holds every contact from the last physics step, whether MuJoCo or Newton's collision
+        pipeline found it, so the replay reads them in place of adding a sensor or a buffer
+        to the simulation. Each touch pairs the touch link with a rigid object, under its scene
+        name, or with another asset, as `TABLE`. The result leaves out contacts of the robot
+        with itself and a gripper link's contacts with objects, as the PhysX path does.
+        """
+        solver = self._newton_solver()
+        sides = self._contact_sides(isaac, solver)
+        data = solver.mjw_data
+        count = int(data.nacon.numpy()[0])
+        if count == 0:
+            return frozenset()
+        contact = data.contact
+        geoms = contact.geom.numpy()[:count]
+        worlds = contact.worldid.numpy()[:count]
+        dims = contact.dim.numpy()[:count]
+        rows = contact.efc_address.numpy()[:count]
+        forces = data.efc.force.numpy()
+        elliptic = int(solver.mjw_model.opt.cone) == 1
+        touching = set()
+        for (first, second), world, dim, address in zip(geoms, worlds, dims, rows, strict=True):
+            if world != row or address[0] < 0:
+                continue
+            ends = (sides.get(int(first)), sides.get(int(second)))
+            pair = self._touch_pair(*ends) or self._touch_pair(*reversed(ends))
+            if pair is None:
+                continue
+            # Take the normal force from the first row of an elliptic cone, or from the sum
+            # of a pyramid's rows, as MuJoCo computes a contact force.
+            used = address[:1] if elliptic or dim == 1 else address[: 2 * (dim - 1)]
+            if float(forces[world, used].sum()) >= _PART_TOUCH_NEWTONS:
+                touching.add(pair)
+        return frozenset(touching)
+
+    def _touch_pair(self, link: Any, thing: Any) -> tuple[str, str] | None:
+        """The touch of a contact between touch link `link` and `thing`, or None.
+
+        The touch has the same form as each touch that `replay_contacts` returns.
+        """
+        if not isinstance(link, tuple) or not isinstance(thing, str):
+            return None
+        name, part = link
+        if part == GRIPPER and thing != TABLE:
+            return None
+        return (name if isinstance(part, _HandTouchLink) else part, thing)
+
+    def _contact_sides(self, isaac: Any, solver: Any) -> dict[int, tuple[str, Any] | str]:
+        """The touch link or scene body of each MuJoCo geom of env row 0, by geom index.
+
+        A geom of a touch link maps to the link's name and its kind. A geom of a rigid
+        object maps to the object's scene name, and a geom of any other asset outside the
+        robots maps to `TABLE`. A geom of another robot link has no entry. The result is
+        cached for each solver, because the solver is rebuilt with each scene.
+        """
+        cached = self._solver_sides
+        if cached is not None and cached[0] is solver:
+            return cached[1]
+        scene = isaac.scene
+        model = solver.model
+        labels = [str(label) for label in getattr(model, "body_label", None) or model.body_key]
+        shape_body = model.shape_body.numpy()
+        geom_shape = solver.mjc_geom_to_newton_shape.numpy()[0]
+        robots = [asset.cfg.prim_path for asset in scene.articulations.values()]
+        robot = scene[self._config.robot].cfg.prim_path
+        links = self._config.touch_links or {}
+        sides: dict[int, tuple[str, Any] | str] = {}
+        for geom, shape in enumerate(geom_shape):
+            if shape < 0 or shape_body[shape] < 0:
+                continue
+            path = labels[shape_body[shape]]
+            if self._is_under(path, robot):
+                link = self._last_part(path)
+                if link in links:
+                    sides[geom] = (link, links[link])
+                continue
+            if any(self._is_under(path, prim) for prim in robots):
+                continue
+            sides[geom] = next(
+                (
+                    str(name)
+                    for name, asset in scene.rigid_objects.items()
+                    if self._is_under(path, asset.cfg.prim_path)
+                ),
+                TABLE,
+            )
+        self._solver_sides = (solver, sides)
+        return sides
+
     def _warn_unnamed_touches(self, link: str, filters: int, forces: int) -> None:
         """Log once that a link's touches are left out.
 
@@ -848,6 +978,12 @@ class IsaacSimSimulator(Simulator):
     def _touch_sensor_name(link: str) -> str:
         """The scene name of the touch sensor on `link`."""
         return _TOUCH_SENSOR_PREFIX + link.replace("/", "__")
+
+    @staticmethod
+    def _on_newton(env_cfg: Any) -> bool:
+        """Whether the env runs on Isaac Lab's Newton physics instead of PhysX."""
+        physics = getattr(getattr(env_cfg, "sim", None), "physics", None)
+        return type(physics).__name__ == "NewtonCfg"
 
     @staticmethod
     def _touch_filter_names(scene: Any, filters: Any) -> list[str]:

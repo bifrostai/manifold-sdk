@@ -23,7 +23,7 @@ from manifold.benchmark import (
 )
 from manifold.benchmark.__main__ import main
 from manifold.benchmark._client import Client, _ClientPolicyConnection, _upright_image_pipeline
-from manifold.benchmark._replay import _ReplayRecorder
+from manifold.benchmark._replay import _boxed, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
@@ -33,12 +33,16 @@ from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE
 from manifold.replay import (
+    FailureEvent,
+    FailureType,
+    GraspedEvent,
     GripperTouchingEvent,
     NoteEvent,
     OnEvent,
     ReplayMesh,
     ReplayPose,
     ReplaySceneBody,
+    ReplaySceneBodyRole,
     ReplayScenePart,
     RerunScalar,
     RerunTab,
@@ -772,11 +776,8 @@ class _Simulator(Simulator):
         pass
 
     def replay_bodies(self, env_id):
-        return (
-            ReplaySceneBody(
-                name="cube", parts=(ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
-            ),
-        )
+        parts = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+        return (ReplaySceneBody(name="cube", parts=parts),)
 
     def replay_poses(self, env_id):
         self._x += 1.0
@@ -810,6 +811,12 @@ def test_the_replay_holds_the_simulators_scene_images_and_scalars(tmp_path, monk
     log = read_replay_log(artifacts[0][0])
     assert simulator.attached == [[0]]
     assert [body.name for body in log.bodies] == ["cube"]
+    # The log holds each body as the box that bounds its meshes, and the body keeps its
+    # moving pose.
+    (part,) = log.bodies[0].parts
+    vertices = np.asarray(part.mesh.vertices)
+    # The tolerance allows for the float16 vertices that the log stores.
+    assert np.allclose(vertices.max(axis=0) - vertices.min(axis=0), [0.2, 0.2, 0.2], atol=1e-3)
     assert "egocentric" in {channel.name for channel in log.channels}
     assert ("joint_torques/0", "Physics") in {
         (channel.name, channel.group) for channel in log.channels
@@ -979,6 +986,21 @@ def _recorder_for(action_space) -> _ReplayRecorder:
     return _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
 
 
+def test_a_listed_failure_type_is_recorded_and_named_in_the_header(tmp_path) -> None:
+    raw = _raw_config({"type": "single"})
+    raw["replay"] = {**raw["replay"], "failure_types": ["slip_drop"]}
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+    drop = FailureEvent(failure_type=FailureType.SLIP_DROP, object="cube")
+
+    recorder.begin(tmp_path, 0, _observation(0), {}, ())
+    recorder.record(None, _observation(1), (drop,), success=False, done=True)
+    recorder.end()
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+
+    assert log.failure_types == (FailureType.SLIP_DROP,)
+    assert drop in log.steps[1].events
+
+
 def test_a_rotation_of_zeros_is_charted_as_a_quaternion_of_zeros():
     raw = _raw_config({"type": "single"})
     raw["spec"] = {**raw["spec"], "embodiment": DROID_JOINT_ABSOLUTE.model_dump(mode="json")}
@@ -1025,6 +1047,103 @@ def test_the_replay_records_when_a_robot_part_starts_and_stops_touching_a_body(t
         [TouchingEvent(object="arm", reference="table", is_active=True)],
         [],
         [TouchingEvent(object="arm", reference="table", is_active=False)],
+    ]
+
+
+class _HandSimulator(_Simulator):
+    """A scene with one object, a cube, and one fixture, a table.
+
+    `heights` gives the cube's height for each pose read. `hand_contacts` gives the hand
+    links' touches for each step, in the form that `replay_contacts` returns, and no
+    touches after the list ends.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.heights: list[float] = []
+        self.hand_contacts: list[frozenset[tuple[str, str]]] = []
+
+    def replay_poses(self, env_id):
+        height = self.heights.pop(0) if self.heights else 0.0
+        return {
+            "cube": ReplayPose(
+                position=np.array([0.0, 0.0, height]), orientation=np.array([0.0, 0.0, 0.0, 1.0])
+            )
+        }
+
+    def replay_contacts(self, env_id):
+        hands = self.hand_contacts.pop(0) if self.hand_contacts else frozenset()
+        return super().replay_contacts(env_id) | hands
+
+    def replay_bodies(self, env_id):
+        box = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+        return (
+            ReplaySceneBody(name="cube", parts=box, role=ReplaySceneBodyRole.OBJECT, object="cube"),
+            ReplaySceneBody(
+                name="table", parts=box, role=ReplaySceneBodyRole.FIXTURE, object="table"
+            ),
+        )
+
+
+# The thumb and index finger links of each hand of a two-handed robot.
+_HAND_LINKS = {
+    "left_thumb": {"hand": "left", "thumb": True},
+    "left_index": {"hand": "left", "thumb": False},
+    "right_thumb": {"hand": "right", "thumb": True},
+    "right_index": {"hand": "right", "thumb": False},
+}
+
+
+def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[Any]]:
+    """Record `steps` steps with the hand links, and return each frame's events."""
+    raw = _raw_config({"type": "single"})
+    raw["simulator"] = {
+        "name": "isaacsim",
+        "path": "env.unwrapped",
+        "app": {},
+        "robot": "robot",
+        "max_position_iterations": None,
+        "env_spacing": None,
+        "camera_far_clip": None,
+        "touch_links": _HAND_LINKS,
+    }
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), simulator, 0)
+    recorder.begin(tmp_path, 0, _observation(0), {}, ())
+    for step in range(1, steps + 1):
+        recorder.record(None, _observation(step), (), success=False, done=step == steps)
+    recorder.end()
+    return [list(step.events) for step in read_replay_log(replay_log_path(tmp_path, 0)).steps]
+
+
+def _grasps(frames: list[list[Any]]) -> list[tuple[int, bool]]:
+    return [
+        (index, event.is_active)
+        for index, events in enumerate(frames)
+        for event in events
+        if isinstance(event, GraspedEvent)
+    ]
+
+
+def test_a_hands_touch_of_an_object_is_the_gripper_touching_it(tmp_path):
+    simulator = _HandSimulator()
+    simulator.hand_contacts = [frozenset({("left_index", "cube"), ("left_index", "table")})]
+
+    frames = _hand_steps(tmp_path, simulator, 2)
+
+    touches = [
+        [event for event in events if isinstance(event, (GripperTouchingEvent, TouchingEvent))]
+        for events in frames
+    ]
+    assert touches == [
+        [],
+        [
+            GripperTouchingEvent(object="cube", is_active=True),
+            TouchingEvent(object="gripper", reference="table", is_active=True),
+        ],
+        [
+            GripperTouchingEvent(object="cube", is_active=False),
+            TouchingEvent(object="gripper", reference="table", is_active=False),
+        ],
     ]
 
 
@@ -1084,3 +1203,72 @@ def test_an_installed_version_outside_the_range_is_logged(caplog):
         _log_unsupported_versions(simulator)
 
     assert [record.getMessage().split(" ")[0] for record in caplog.records] == ["numpy"]
+
+
+def test_a_body_is_written_as_the_box_that_bounds_its_posed_parts():
+    # A 0.2 x 0.4 x 0.6 part, turned 90 degrees about z and moved 1 m along x.
+    part = ReplayScenePart(
+        mesh=ReplayMesh.box([0.1, 0.2, 0.3]),
+        position=np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        orientation=np.array([0.0, 0.0, 0.7071068, 0.7071068], dtype=np.float32),
+    )
+    (box,) = _boxed(ReplaySceneBody(name="body", parts=(part,))).parts
+    vertices = np.asarray(box.mesh.vertices) + np.asarray(box.position)
+    assert np.allclose(vertices.min(axis=0), [0.8, -0.1, -0.3], atol=1e-5)
+    assert np.allclose(vertices.max(axis=0), [1.2, 0.1, 0.3], atol=1e-5)
+
+
+def test_a_hand_grasps_a_lifted_object_that_its_thumb_and_a_finger_touch(tmp_path):
+    simulator = _HandSimulator()
+    # The first height is for the episode's first frame.
+    simulator.heights = [0.0, 0.0, 0.01, 0.03, 0.05, 0.05, 0.05, 0.05]
+    held = frozenset({("left_thumb", "cube"), ("left_index", "cube")})
+    simulator.hand_contacts = [held, held, held, held]
+
+    frames = _hand_steps(tmp_path, simulator, 7)
+
+    # The grasp starts once the cube is 2 cm above its rest height, and ends when the hand
+    # lets go.
+    assert _grasps(frames) == [(3, True), (5, False)]
+
+
+def test_one_finger_alone_never_grasps(tmp_path):
+    simulator = _HandSimulator()
+    simulator.heights = [0.0, 0.0, 0.03, 0.05]
+    simulator.hand_contacts = [frozenset({("left_index", "cube")})] * 3
+
+    assert _grasps(_hand_steps(tmp_path, simulator, 3)) == []
+
+
+def test_both_hands_grasp_a_lifted_object_without_a_thumb(tmp_path):
+    simulator = _HandSimulator()
+    simulator.heights = [0.0, 0.0, 0.03]
+    both = frozenset({("left_index", "cube"), ("right_index", "cube")})
+    simulator.hand_contacts = [both, both]
+
+    assert _grasps(_hand_steps(tmp_path, simulator, 2)) == [(2, True)]
+
+
+def test_a_hand_grasps_again_after_a_short_gap_with_no_new_lift(tmp_path):
+    simulator = _HandSimulator()
+    simulator.heights = [0.0, 0.0, 0.05] + [0.05] * 6
+    held = frozenset({("left_thumb", "cube"), ("left_index", "cube")})
+    none = frozenset()
+    # The hand grasps the cube at step 2, lets go for two steps, holds it again without a
+    # new lift, and then lets go.
+    simulator.hand_contacts = [held, held, none, none, held, none, none, none]
+
+    assert _grasps(_hand_steps(tmp_path, simulator, 8)) == [
+        (2, True),
+        (3, False),
+        (5, True),
+        (6, False),
+    ]
+
+    # One finger that touches the object within the gap does not hold it.
+    simulator = _HandSimulator()
+    simulator.heights = [0.0, 0.0, 0.05, 0.05, 0.04, 0.02, 0.0, 0.0]
+    brush = frozenset({("left_index", "cube")})
+    simulator.hand_contacts = [held, held, held, none, brush, none, none, none]
+
+    assert _grasps(_hand_steps(tmp_path / "brush", simulator, 8)) == [(2, True), (4, False)]

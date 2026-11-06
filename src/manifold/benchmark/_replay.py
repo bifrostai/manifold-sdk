@@ -18,10 +18,12 @@ This module writes the hooks' events and the events it derives from each step.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from manifold.benchmark.simulators import GRIPPER, bounding_box_part
 from manifold.core.conventions import RotationFormat, ee_step_layout
 from manifold.core.embodiment.action_space import (
     EEActionSpace,
@@ -45,6 +47,10 @@ from manifold.replay import (
     ReplayChannelKind,
     ReplayFingerPad,
     ReplayLogWriter,
+    ReplayMesh,
+    ReplaySceneBody,
+    ReplaySceneBodyRole,
+    ReplayScenePart,
     RerunScalar,
     RerunTab,
     TouchingEvent,
@@ -59,10 +65,49 @@ if TYPE_CHECKING:
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.benchmark.simulators import Simulator
     from manifold.core.values import Observation
-    from manifold.replay import ManifoldEvent
+    from manifold.replay import ManifoldEvent, ReplayPose
 
 
 _logger = logging.getLogger(__name__)
+
+
+# The height in metres that an object rises above its last rest before a hand grasps it.
+_LIFT_METRES = 0.02
+# The number of steps after a grasp ends in which a new hold grasps the object again
+# without a new lift.
+_TOUCH_GAP_STEPS = 2
+# The speed in metres a second below which an object counts as still.
+_REST_SPEED = 0.05
+# The number of steps an object stays still before it is at rest.
+_REST_STEPS = 3
+
+
+def _boxed(body: ReplaySceneBody) -> ReplaySceneBody:
+    """`body` with its parts replaced by one box that bounds them, in the body's frame.
+
+    Grading takes each body's size from its parts, and the box keeps that size.
+    """
+    if not body.parts:
+        return body
+    posed = [
+        ReplayScenePart(
+            mesh=ReplayMesh(
+                vertices=_rotate(part.orientation, np.asarray(part.mesh.vertices, dtype=np.float64))
+                + np.asarray(part.position, dtype=np.float64),
+                faces=part.mesh.faces,
+            ),
+            color=part.color,
+        )
+        for part in body.parts
+    ]
+    return replace(body, parts=(bounding_box_part(posed),))
+
+
+def _rotate(quaternion: np.ndarray, vectors: np.ndarray) -> np.ndarray:
+    """`vectors` rotated by an `xyzw` quaternion."""
+    x, y, z, w = (float(value) for value in quaternion)
+    u = np.array([x, y, z])
+    return vectors + 2.0 * np.cross(u, np.cross(u, vectors) + w * vectors)
 
 
 def _event_key(event: FactEvent) -> tuple[Any, ...]:
@@ -129,6 +174,28 @@ class _ReplayRecorder:
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
         self._touching: frozenset[tuple[str, str]] = frozenset()
+        touch_links = getattr(config.simulator, "touch_links", None) or {}
+        # The hand and the thumb flag of each hand link. When the config has hand links,
+        # the recorder records the hands' touches and grasps of the task's objects as the
+        # gripper's, and the hooks record none of the gripper's touches or grasps. The
+        # recorder records both hands of a two-handed robot as one gripper, because grading
+        # models a single gripper.
+        self._hand_links = {
+            link: (part.hand, part.thumb)
+            for link, part in touch_links.items()
+            if not isinstance(part, str)
+        }
+        self._hands = bool(self._hand_links)
+        # The task's object for each object body in the episode's scene, set by `begin`.
+        self._object_bodies: dict[str, str] = {}
+        self._objects: frozenset[str] = frozenset()
+        # Each object's last position, the number of steps it has been still, and its
+        # height at its last rest, which `_hand_grasp_events` uses.
+        self._last_position: dict[str, np.ndarray] = {}
+        self._still_steps: dict[str, int] = {}
+        self._rest_height: dict[str, float] = {}
+        # The number of steps since the grasp ended, for each object that a hand let go of.
+        self._since_release: dict[str, int] = {}
 
     def begin(
         self,
@@ -154,6 +221,17 @@ class _ReplayRecorder:
         self._previous = None
         self._touching = frozenset()
         bodies = self._simulator.replay_bodies(self._env_id) if self._simulator is not None else ()
+        bodies = tuple(_boxed(body) for body in bodies)
+        self._object_bodies = {
+            body.name: body.object
+            for body in bodies
+            if body.role == ReplaySceneBodyRole.OBJECT and body.object is not None
+        }
+        self._objects = frozenset(self._object_bodies.values())
+        self._last_position = {}
+        self._still_steps = {}
+        self._rest_height = {}
+        self._since_release = {}
         recorded = [
             EpisodeStartedEvent(instruction=observation.instruction or "", attributes=attributes),
             *self._events_to_write(events, None),
@@ -191,6 +269,7 @@ class _ReplayRecorder:
                 for pad in self._config.replay.finger_pads
             ),
             step_seconds=self._config.run.step_seconds,
+            failure_types=self._config.replay.failure_types,
         )
         if bodies:
             self._log.write_scene(bodies)
@@ -208,15 +287,18 @@ class _ReplayRecorder:
         """Write the frame that `action` produced, with `EpisodeEndedEvent` on the last frame."""
         self._step += 1
         self._succeeded = self._succeeded or success
+        contacts = self._contacts()
+        poses = self._simulator.replay_poses(self._env_id) if self._simulator is not None else {}
         recorded = [
             *self._gripper_commanded_events(action),
-            *self._events_to_write(events, action),
-            *self._touch_events(),
+            *self._events_to_write((*events, *self._hand_facts(contacts)), action),
+            *self._hand_grasp_events(contacts, poses),
+            *self._touch_events(contacts),
         ]
         if done:
             recorded.append(EpisodeEndedEvent(success=success))
         scalars = self._frame_scalars(observation, action, success=success)
-        self._write_step(observation, self._images(observation), scalars, recorded)
+        self._write_step(observation, self._images(observation), scalars, recorded, poses)
 
     def end(self) -> None:
         """Close the log."""
@@ -230,6 +312,7 @@ class _ReplayRecorder:
         images: dict[str, np.ndarray],
         scalars: list[RerunScalar],
         events: list[ManifoldEvent],
+        poses: dict[str, ReplayPose] | None = None,
     ) -> None:
         if self._log is None:
             return
@@ -240,8 +323,10 @@ class _ReplayRecorder:
         if lines:
             text["events"] = " / ".join(lines)
         simulator = self._simulator
+        if poses is None:
+            poses = simulator.replay_poses(self._env_id) if simulator is not None else {}
         self._log.write_step(
-            simulator.replay_poses(self._env_id) if simulator is not None else {},
+            poses,
             extrinsics=simulator.replay_extrinsics(self._env_id) if simulator is not None else {},
             images=images,
             scalars={scalar.name: scalar.value for scalar in scalars},
@@ -249,11 +334,118 @@ class _ReplayRecorder:
             events=events,
         )
 
-    def _touch_events(self) -> list[ManifoldEvent]:
-        """`TouchingEvent` for each robot part that started or stopped touching a body."""
+    def _contacts(self) -> frozenset[tuple[str, str]]:
+        """Each robot part that touched a body during the last action, with the body."""
         if self._simulator is None:
+            return frozenset()
+        return frozenset(self._simulator.replay_contacts(self._env_id))
+
+    def _hand_facts(self, contacts: frozenset[tuple[str, str]]) -> tuple[ManifoldEvent, ...]:
+        """`GripperTouchingEvent` for each of the task's objects, active while a hand touches it."""
+        if not self._hands:
+            return ()
+        touched = {
+            thing for part, thing in contacts if part in self._hand_links and thing in self._objects
+        }
+        return tuple(
+            GripperTouchingEvent(object=thing, is_active=thing in touched)
+            for thing in sorted(self._objects)
+        )
+
+    def _hand_grasp_events(
+        self, contacts: frozenset[tuple[str, str]], poses: dict[str, ReplayPose]
+    ) -> list[ManifoldEvent]:
+        """`GraspedEvent` for each of the task's objects that a hand started or stopped grasping.
+
+        A hand grasps an object once the object has risen `_LIFT_METRES` above where it
+        last came to rest, while the thumb and another link of one hand touch it, or
+        while both hands touch it. The grasp ends on the first step that no hand touches
+        the object. When the hand holds the object again within `_TOUCH_GAP_STEPS` steps,
+        the object is grasped again without a new lift, and grading merges the two grasps
+        into one.
+        """
+        if not self._hands:
             return []
-        touching = self._simulator.replay_contacts(self._env_id)
+        links: dict[str, set[str]] = {}
+        for link, thing in contacts:
+            if link in self._hand_links and thing in self._objects:
+                links.setdefault(thing, set()).add(link)
+        events: list[ManifoldEvent] = []
+        for body, thing in self._object_bodies.items():
+            pose = poses.get(body)
+            if pose is None:
+                continue
+            touching = links.get(thing, set())
+            held = self._grasped.get(thing, False)
+            height = self._rested_height(
+                thing,
+                np.asarray(pose.position, dtype=np.float64),
+                still_free=not touching and not held,
+            )
+            # A grasp that ended within the gap starts again at the next hold.
+            regrasp = (
+                self._holds(touching) and 0 < self._since_release.get(thing, 0) <= _TOUCH_GAP_STEPS
+            )
+            grasped = (
+                bool(touching)
+                if held
+                else bool(regrasp)
+                or (self._holds(touching) and height - self._rest_height[thing] >= _LIFT_METRES)
+            )
+            if held and not grasped:
+                self._since_release[thing] = 1
+            elif grasped:
+                self._since_release.pop(thing, None)
+            elif thing in self._since_release:
+                self._since_release[thing] += 1
+            if grasped != held:
+                events.append(GraspedEvent(object=thing, is_active=grasped))
+            self._grasped[thing] = grasped
+        return events
+
+    def _rested_height(self, thing: str, position: np.ndarray, *, still_free: bool) -> float:
+        """The object's height at `position`, after setting its rest height when it is at rest.
+
+        An object is at rest once its body has moved slower than `_REST_SPEED` for
+        `_REST_STEPS` steps and, on the current step, no hand touches or grasps it
+        (`still_free`). The first height read for an object is also its first rest height.
+        """
+        last = self._last_position.get(thing)
+        speed = (
+            0.0
+            if last is None
+            else float(np.linalg.norm(position - last)) / self._config.run.step_seconds
+        )
+        self._last_position[thing] = position
+        still = self._still_steps.get(thing, 0) + 1 if speed <= _REST_SPEED else 0
+        self._still_steps[thing] = still
+        if last is None or (still >= _REST_STEPS and still_free):
+            self._rest_height[thing] = float(position[2])
+        return float(position[2])
+
+    def _holds(self, links: set[str]) -> bool:
+        """Whether `links` hold an object.
+
+        A hold takes the thumb and another link of one hand, or links of both hands.
+        """
+        hands: dict[str, set[bool]] = {}
+        for link in links:
+            hand, thumb = self._hand_links[link]
+            hands.setdefault(hand, set()).add(thumb)
+        return len(hands) >= 2 or any(kinds == {True, False} for kinds in hands.values())
+
+    def _touch_events(self, contacts: frozenset[tuple[str, str]]) -> list[ManifoldEvent]:
+        """`TouchingEvent` for each robot part that started or stopped touching a body.
+
+        The result leaves out a hand's touches of the task's objects, because `_hand_facts`
+        records them as the gripper touching the object. The result records a hand's other
+        touches as touches by `GRIPPER`.
+        """
+        touching = frozenset(
+            (GRIPPER if part in self._hand_links else part, thing)
+            for part, thing in contacts
+            if not (part in self._hand_links and thing in self._objects)
+        )
         events: list[ManifoldEvent] = [
             *(
                 TouchingEvent(object=part, reference=thing, is_active=True)
@@ -317,6 +509,10 @@ class _ReplayRecorder:
             if (last.is_active if last is not None else False) != event.is_active:
                 recorded.append(event)
             self._latest[key] = event
+        if self._hands:
+            # `_hand_grasp_events` records a hand's grasps, because a hand has no gripper
+            # command to derive them from.
+            return recorded
         shut = self._commanded_shut is True
         for latest in self._latest.values():
             if not isinstance(latest, GripperTouchingEvent):

@@ -519,6 +519,104 @@ def test_the_contacts_are_each_links_part_and_what_it_pressed_on_in_the_last_act
     assert simulator.replay_contacts(0) == frozenset()
 
 
+class _Array:
+    """A stand-in for a Warp array, whose `numpy()` returns its values."""
+
+    def __init__(self, values: Any) -> None:
+        self._values = np.asarray(values)
+
+    def numpy(self) -> np.ndarray:
+        return self._values
+
+
+def _solver(contacts: list[tuple[int, int, int, list[int]]], forces: np.ndarray) -> Any:
+    """A stand-in MuJoCo Warp solver with four bodies of one geom each.
+
+    The bodies are the robot's panda_link1 and panda_link2, the table and the banana. Each
+    entry of `contacts` holds two geoms, a world and the contact's efc rows.
+    """
+    labels = [
+        f"/World/envs/env_0/{path}"
+        for path in ("robot/panda_link1", "robot/panda_link2", "table", "banana")
+    ]
+    rows = np.full((len(contacts), 4), -1)
+    for index, (_first, _second, _world, efc) in enumerate(contacts):
+        rows[index, : len(efc)] = efc
+    contact = SimpleNamespace(
+        geom=_Array([[first, second] for first, second, _world, _efc in contacts]),
+        worldid=_Array([world for _first, _second, world, _efc in contacts]),
+        dim=_Array([3] * len(contacts)),
+        efc_address=_Array(rows),
+    )
+    return SimpleNamespace(
+        mjw_data=SimpleNamespace(
+            nacon=_Array([len(contacts)]),
+            contact=contact,
+            efc=SimpleNamespace(force=_Array(forces)),
+        ),
+        mjw_model=SimpleNamespace(opt=SimpleNamespace(cone=0)),
+        model=SimpleNamespace(body_label=labels, shape_body=_Array([0, 1, 2, 3])),
+        mjc_geom_to_newton_shape=_Array([[0, 1, 2, 3], [0, 1, 2, 3]]),
+    )
+
+
+def test_on_newton_the_touches_come_from_the_solvers_contacts(
+    isaac: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    forces = np.zeros((2, 16))
+    # link1 presses on the table in env 1 with 0.4 N over the pyramid's four rows.
+    forces[1, 0:4] = 0.1
+    # link1 presses on the banana in env 1 with 0.04 N, which is below the touch threshold.
+    forces[1, 4:8] = 0.01
+    # link1 presses on link2, so the robot touches itself.
+    forces[1, 8:12] = 1.0
+    # The banana presses on link1 in env 0, with the geoms in the opposite order.
+    forces[0, 12:16] = 1.0
+    solver = _solver(
+        [
+            (0, 2, 1, [0, 1, 2, 3]),
+            (0, 3, 1, [4, 5, 6, 7]),
+            (0, 1, 1, [8, 9, 10, 11]),
+            (3, 0, 0, [12, 13, 14, 15]),
+            # MuJoCo left this contact out of its constraints.
+            (0, 2, 0, []),
+        ],
+        forces,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=SimpleNamespace(_solver=solver)),
+    )
+    unwrapped = SimpleNamespace(
+        scene=_Scene({}),
+        termination_manager=SimpleNamespace(active_terms=[], get_term=lambda _name: None),
+    )
+    simulator = IsaacSimSimulator(
+        _settings(touch_links={"panda_link1": "arm", "panda_link2": "arm"}),
+        _benchmark(["over_shoulder_left"]),
+    )
+    simulator.attach(SimpleNamespace(inner=SimpleNamespace(unwrapped=unwrapped)), [0, 1])
+
+    assert simulator.replay_contacts(1) == {("arm", "table")}
+    assert simulator.replay_contacts(0) == {("arm", "banana")}
+
+
+def test_on_newton_no_touch_sensor_is_added(monkeypatch: pytest.MonkeyPatch) -> None:
+    class NewtonCfg:
+        pass
+
+    monkeypatch.setitem(sys.modules, "isaaclab.sensors", SimpleNamespace())
+    env_cfg = SimpleNamespace(
+        sim=SimpleNamespace(physics=NewtonCfg()),
+        scene=SimpleNamespace(robot=SimpleNamespace(prim_path="/World/envs/env_.*/robot")),
+    )
+
+    IsaacSimSimulator.apply_settings(env_cfg, _settings(touch_links={"panda_link1": "arm"}))
+
+    assert sorted(vars(env_cfg.scene)) == ["robot"]
+
+
 def test_a_touch_sensor_whose_forces_outnumber_its_filters_names_no_touches(
     isaac: SimpleNamespace, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -672,7 +770,7 @@ def test_the_scene_groups_drawn_prims_under_their_rigid_bodies(isaac: SimpleName
     assert len(bodies["base_link"].parts) == 1
 
 
-def test_each_body_has_its_role_and_the_scenes_name_for_an_object(isaac: SimpleNamespace) -> None:
+def test_each_body_has_its_role_and_a_fixture_keeps_its_own_name(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
     labels = {body.name: (body.role, body.object) for body in simulator.replay_bodies(0)}
     assert labels == {
@@ -680,7 +778,7 @@ def test_each_body_has_its_role_and_the_scenes_name_for_an_object(isaac: SimpleN
         "finger": (ReplaySceneBodyRole.ROBOT, None),
         "banana": (ReplaySceneBodyRole.OBJECT, "banana"),
         "bowl": (ReplaySceneBodyRole.OBJECT, "bowl"),
-        "top": (ReplaySceneBodyRole.FIXTURE, "table"),
+        "top": (ReplaySceneBodyRole.FIXTURE, "top"),
     }
 
 
