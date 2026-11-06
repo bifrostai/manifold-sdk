@@ -3,9 +3,8 @@
 A benchmark version consists of a JSON config file and a hooks file, `hooks.py`, in
 the same directory. The config states where upstream comes from, which Service runs
 it, how many envs run at once, the run seed and the step limit, the values that only
-the hooks read, and the spec. The spec has the same JSON as the `spec.json` that
-registration reads, and `--check` writes it unchanged. The hooks file contains the
-upstream calls.
+the hooks read, and the spec. `--check` writes the spec and the run values to the
+`spec.json` that registration reads. The hooks file contains the upstream calls.
 
 A benchmark with several images, such as an image for each suite, can put the shared
 values in a base config. The config of each image lists the base config in `extends`
@@ -165,15 +164,24 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     @model_validator(mode="before")
     @classmethod
     def _check_spec_keys(cls, data: Any) -> Any:
-        """Require all keys of the spec, because `Benchmark` has defaults for some keys."""
+        """Require each key of the spec whose default states a value.
+
+        A default such as `instruction=True` states a fact about the benchmark, so the
+        config lists the key. A key whose default is None, such as `action_range`,
+        declares nothing when the config leaves it out.
+        """
         spec = data.get("spec") if isinstance(data, dict) else None
         if isinstance(spec, dict):
             keys = set(Benchmark.model_fields)
-            missing, unknown = keys - set(spec), set(spec) - keys
+            required = {
+                name for name, field in Benchmark.model_fields.items() if field.default is not None
+            }
+            missing, unknown = required - set(spec), set(spec) - keys
             if missing or unknown:
                 raise ValueError(
-                    f"spec must have exactly the keys {sorted(keys)}; it lacks "
-                    f"{sorted(missing)} and has the unknown keys {sorted(unknown)}"
+                    f"spec must have the keys {sorted(required)} and may have only the keys "
+                    f"{sorted(keys)}; it lacks {sorted(missing)} and has the unknown keys "
+                    f"{sorted(unknown)}"
                 )
         return data
 

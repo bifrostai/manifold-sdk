@@ -191,15 +191,26 @@ def test_the_spec_is_an_sdk_benchmark():
     ("change", "message"),
     [
         (lambda spec: spec.pop("instruction"), "lacks \\['instruction'\\]"),
+        (lambda spec: spec.pop("sensors"), "lacks \\['sensors'\\]"),
         (lambda spec: spec.update(cameras=[]), "unknown keys \\['cameras'\\]"),
     ],
 )
-def test_the_spec_must_have_exactly_the_keys_of_a_benchmark(change, message):
+def test_the_spec_must_have_each_key_of_a_benchmark_whose_default_states_a_value(change, message):
     raw = _raw_config({"type": "single"})
     raw["spec"] = dict(raw["spec"])
     change(raw["spec"])
     with pytest.raises(ValidationError, match=message):
         BenchmarkConfig.model_validate(raw)
+
+
+def test_the_spec_may_leave_out_the_action_range():
+    assert "action_range" not in _SPEC
+    assert _config({"type": "single"}).spec.action_range is None
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "action_range": {"low": [-1.0] * 8, "high": [1.0] * 8}}
+    spec = BenchmarkConfig.model_validate(raw).spec
+    assert spec.action_range is not None
+    assert spec.action_range.high == (1.0,) * 8
 
 
 def test_a_hooks_file_must_define_its_services_hooks():
@@ -893,7 +904,7 @@ def test_an_optional_hook_that_a_hooks_file_leaves_out_does_nothing():
     assert hooks.on_stop(None, None) == "stopped"
 
 
-def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monkeypatch):
+def test_check_writes_the_spec_and_the_run_values(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(json.dumps(_raw_config({"type": "single"})))
     (tmp_path / "hooks.py").write_text(
         "def on_load(config, task_config, logger): ...\n"
@@ -906,8 +917,17 @@ def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monk
 
     main()
 
-    spec = Benchmark.model_validate_json((tmp_path / "spec.json").read_text())
+    written = json.loads((tmp_path / "spec.json").read_text())
+    assert written["run"] == {
+        "seed": 0,
+        "max_steps": 5,
+        "step_seconds": 0.05,
+        "image_format": "jpeg",
+    }
+    # A reader that knows only the spec's keys ignores `run`.
+    spec = Benchmark.model_validate(written)
     assert spec.name == "toy"
+    assert "run" not in spec.model_dump()
 
 
 def test_the_client_refuses_an_action_that_the_benchmark_cannot_take(monkeypatch):
