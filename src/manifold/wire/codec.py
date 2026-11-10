@@ -23,13 +23,12 @@ from __future__ import annotations
 
 import math
 import time
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import msgpack
 import numpy as np
 
-# The image encodings carried in an `__image__` wrapper's `format` field.
-ImageFormat = Literal["raw", "jpeg", "png"]
+from manifold.core.benchmark import ImageFormat
 
 # The little-endian dtypes accepted off the wire. This is the gate: a dtype
 # string from an untrusted frame decodes only if it is one of these.

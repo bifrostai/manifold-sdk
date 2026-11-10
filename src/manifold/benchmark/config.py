@@ -4,8 +4,9 @@ A benchmark version consists of a JSON config file and a hooks file, `hooks.py`,
 the same directory. The config states where upstream comes from, which Service runs
 it, how many envs run at once, the run seed and the step limit, the values that only
 the hooks read, and the spec. The spec has the same JSON as the `spec.json` that
-registration reads, and `--check` writes it unchanged. The hooks file contains the
-upstream calls.
+registration reads, and `--check` writes it. The spec carries the step period, the
+step limit and the image format from `run`. The hooks file contains the upstream
+calls.
 
 A benchmark with several images, such as an image for each suite, can put the shared
 values in a base config. The config of each image lists the base config in `extends`
@@ -106,6 +107,10 @@ class BenchmarkRunConfig(_BenchmarkConfigBase):
     image_format: ImageFormat
 
 
+# The values of `run` that the spec also carries, so that registration advertises them.
+_RUN_KEYS_IN_SPEC = ("step_seconds", "max_steps", "image_format")
+
+
 class BenchmarkFingerPadConfig(_BenchmarkConfigBase):
     """A fingertip pad of the gripper: the scene body it moves with and where it sits.
 
@@ -169,16 +174,36 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     @model_validator(mode="before")
     @classmethod
     def _check_spec_keys(cls, data: Any) -> Any:
-        """Require all keys of the spec, because `Benchmark` has defaults for some keys."""
+        """Require each key of the spec whose default states a value, and copy in `run`.
+
+        A default such as `instruction=True` states a fact about the benchmark, so the
+        config lists the key. A key whose default is None, such as `action_range`,
+        declares nothing when the config leaves it out. The config states the step
+        period, the step limit and the image format once, under `run`, and this copies
+        them into the spec.
+        """
         spec = data.get("spec") if isinstance(data, dict) else None
         if isinstance(spec, dict):
+            stated = sorted(key for key in _RUN_KEYS_IN_SPEC if key in spec)
+            if stated:
+                raise ValueError(f"spec states {stated}, which the config states under run")
             keys = set(Benchmark.model_fields)
-            missing, unknown = keys - set(spec), set(spec) - keys
+            required = {
+                name for name, field in Benchmark.model_fields.items() if field.default is not None
+            }
+            missing, unknown = required - set(spec), set(spec) - keys
             if missing or unknown:
                 raise ValueError(
-                    f"spec must have exactly the keys {sorted(keys)}; it lacks "
-                    f"{sorted(missing)} and has the unknown keys {sorted(unknown)}"
+                    f"spec must have the keys {sorted(required)} and may have only the keys "
+                    f"{sorted(keys)}; it lacks {sorted(missing)} and has the unknown keys "
+                    f"{sorted(unknown)}"
                 )
+            run = data.get("run")
+            if isinstance(run, dict):
+                data = {
+                    **data,
+                    "spec": {**spec, **{key: run[key] for key in _RUN_KEYS_IN_SPEC if key in run}},
+                }
         return data
 
     @model_validator(mode="after")

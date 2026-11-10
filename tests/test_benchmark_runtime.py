@@ -195,15 +195,39 @@ def test_the_spec_is_an_sdk_benchmark():
     ("change", "message"),
     [
         (lambda spec: spec.pop("instruction"), "lacks \\['instruction'\\]"),
+        (lambda spec: spec.pop("sensors"), "lacks \\['sensors'\\]"),
         (lambda spec: spec.update(cameras=[]), "unknown keys \\['cameras'\\]"),
     ],
 )
-def test_the_spec_must_have_exactly_the_keys_of_a_benchmark(change, message):
+def test_the_spec_must_have_each_key_of_a_benchmark_whose_default_states_a_value(change, message):
     raw = _raw_config({"type": "single"})
     raw["spec"] = dict(raw["spec"])
     change(raw["spec"])
     with pytest.raises(ValidationError, match=message):
         BenchmarkConfig.model_validate(raw)
+
+
+def test_the_spec_must_not_state_a_value_of_run():
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "step_seconds": 0.1}
+    with pytest.raises(ValidationError, match="spec states \\['step_seconds'\\], which the config"):
+        BenchmarkConfig.model_validate(raw)
+
+
+def test_the_spec_carries_the_step_period_step_limit_and_image_format_from_run():
+    spec = _config({"type": "single"}, max_steps=None).spec
+    assert (spec.step_seconds, spec.max_steps, spec.image_format) == (0.05, None, "jpeg")
+    assert _config({"type": "single"}, max_steps=5).spec.max_steps == 5
+
+
+def test_the_spec_may_leave_out_the_action_range():
+    assert "action_range" not in _SPEC
+    assert _config({"type": "single"}).spec.action_range is None
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "action_range": {"low": [-1.0] * 8, "high": [1.0] * 8}}
+    spec = BenchmarkConfig.model_validate(raw).spec
+    assert spec.action_range is not None
+    assert spec.action_range.high == (1.0,) * 8
 
 
 def test_a_hooks_file_must_define_its_services_hooks():
@@ -915,6 +939,7 @@ def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monk
 
     spec = Benchmark.model_validate_json((tmp_path / "spec.json").read_text())
     assert spec.name == "toy"
+    assert (spec.step_seconds, spec.max_steps, spec.image_format) == (0.05, 5, "jpeg")
 
 
 def test_records_below_error_go_to_stdout_and_the_rest_to_stderr(monkeypatch, capsys):
