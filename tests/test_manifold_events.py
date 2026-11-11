@@ -27,6 +27,7 @@ from manifold.replay import (
     InsideEvent,
     LeftOfEvent,
     ManifoldEvent,
+    MovedBySceneEvent,
     NoteEvent,
     ObjectDisplacedEvent,
     ObjectLeftSceneEvent,
@@ -70,6 +71,7 @@ EVERY_TYPE = (
             OpenEvent,
             ClosedEvent,
             TurnedOnEvent,
+            MovedBySceneEvent,
         )
     ),
     *(
