@@ -612,6 +612,44 @@ def test_every_step_carries_every_cameras_extrinsic(tmp_path):
         )
 
 
+def test_every_step_carries_every_bodys_pose(tmp_path):
+    """A body's pose written once is filled forward, so no step is missing a body."""
+    path = tmp_path / "episode.replay"
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for i in range(4):
+            # The table never moves; the link moves every step.
+            log.write_step({"table": _pose(0.0), "robot0_link0": _pose(0.1 * i)})
+    steps = read_replay_log(path).steps
+    for i, step in enumerate(steps):
+        assert sorted(step.poses) == ["robot0_link0", "table"]
+        assert step.poses["table"].position[0] == pytest.approx(0.0)
+        assert step.poses["robot0_link0"].position[0] == pytest.approx(0.1 * i, abs=1e-6)
+
+
+def test_a_body_that_moves_stops_and_moves_again_reads_back_each_step(tmp_path):
+    path = tmp_path / "episode.replay"
+    xs = (0.0, 0.1, 0.2, 0.2, 0.2, 0.3, 0.3, 0.0)
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for x in xs:
+            log.write_step({"robot0_link0": _pose(x)})
+    steps = read_replay_log(path).steps
+    assert [step.poses["robot0_link0"].position[0] for step in steps] == pytest.approx(xs)
+
+
+def test_an_unmoved_body_is_stored_once(tmp_path):
+    still = tmp_path / "still.replay"
+    with ReplayLogWriter(still, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for _ in range(50):
+            log.write_step({"table": _pose(0.0)})
+    moving = tmp_path / "moving.replay"
+    with ReplayLogWriter(moving, episode_idx=0, channels=CHANNELS, image_format="raw") as log:
+        for i in range(50):
+            log.write_step({"table": _pose(0.01 * i)})
+
+    assert all("table" in step.poses for step in read_replay_log(still).steps)
+    assert still.stat().st_size < moving.stat().st_size
+
+
 def test_an_unmoved_camera_is_stored_once(tmp_path):
     """The saving this encoding exists for: a static camera stores one row, not one per step."""
     still = tmp_path / "still.replay"
