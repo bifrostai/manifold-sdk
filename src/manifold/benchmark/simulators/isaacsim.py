@@ -106,6 +106,11 @@ _GRIPPER_NEAR_METRES = 0.08
 # The smallest force, in newtons, that counts as a touch.
 _PART_TOUCH_NEWTONS = 0.1
 
+# How far, in metres, a soft body's particle can be from a shape's surface and still
+# count as touching it. A soft contact is listed while the particle is within the
+# solver's contact margin, which can be wider.
+_SOFT_TOUCH_METRES = 0.002
+
 # The prefix of the contact sensors that `apply_settings` adds to the scene.
 _TOUCH_SENSOR_PREFIX = "manifold_touch__"
 
@@ -198,6 +203,43 @@ def _take_sigsegv() -> None:
     faulthandler.enable(all_threads=True)
 
 
+def _attribute(owner: Any, name: str) -> Any:
+    """`owner.name`, or None when `owner` has no such attribute or reading it fails."""
+    try:
+        return getattr(owner, name, None)
+    except Exception:
+        return None
+
+
+def _attribute_values(owner: Any) -> list[Any]:
+    """The values of the attributes that `owner` holds itself, or none when it has none."""
+    try:
+        return list(vars(owner).values())
+    except TypeError:
+        return []
+
+
+def _subclasses(owner: Any) -> list[type]:
+    """Every subclass of `owner`, at any depth, or none when `owner` is not a class."""
+    if not isinstance(owner, type):
+        return []
+    found: list[type] = []
+    pending = list(owner.__subclasses__())
+    while pending:
+        cls = pending.pop()
+        if cls not in found:
+            found.append(cls)
+            pending += cls.__subclasses__()
+    return found
+
+
+def _rotate_xyzw(quaternions: np.ndarray, vectors: np.ndarray) -> np.ndarray:
+    """Each vector rotated by its `xyzw` quaternion, row by row."""
+    axis, w = quaternions[:, :3], quaternions[:, 3:4]
+    twice = 2.0 * np.cross(axis, vectors)
+    return vectors + w * twice + np.cross(axis, twice)
+
+
 def _camera_cfgs(scene_cfg: Any) -> list[Any]:
     """Return the camera configs on `scene_cfg`.
 
@@ -244,6 +286,11 @@ class IsaacSimSimulator(Simulator):
         # The last solver that `_contact_sides` read, with the touch link or scene body of
         # each of its MuJoCo geoms.
         self._solver_sides: tuple[Any, dict[int, tuple[str, Any] | str]] | None = None
+        # The last solver that `_shape_sides` read, with the touch link or scene body of
+        # each of its Newton shapes, and whether each shape is a touch link's.
+        self._solver_shapes: tuple[Any, dict[int, tuple[str, Any] | str], np.ndarray] | None = None
+        # Whether a missing soft-contact read has been warned about.
+        self._warned_soft = False
 
     @staticmethod
     def apply_settings(env_cfg: Any, config: BenchmarkIsaacSimSimulatorConfig) -> None:
@@ -861,10 +908,40 @@ class IsaacSimSimulator(Simulator):
 
     @staticmethod
     def _newton_solver() -> Any:
-        """Newton's MuJoCo Warp solver, when the env runs on it, or None."""
-        manager = sys.modules.get("isaaclab_newton.physics.newton_manager")
-        solver = getattr(getattr(manager, "NewtonManager", None), "_solver", None)
-        return solver if getattr(solver, "mjw_data", None) is not None else None
+        """Newton's MuJoCo Warp solver, when the env runs on it, or None.
+
+        A scene that couples another solver to MuJoCo can put the coupled solver in
+        Newton's solver slot, or keep MuJoCo's solver on its physics manager. Isaac Lab
+        can record that manager as a `module:Class` path, which the search looks up in
+        the loaded modules. It covers the slot, the physics manager and each class the
+        manager inherits from, or each subclass of `NewtonManager` when the path names
+        no loaded class. In each, it looks at every attribute, and at each item that
+        an attribute holds, by itself or as its `solver`.
+        """
+        manager = _attribute(
+            sys.modules.get("isaaclab_newton.physics.newton_manager"), "NewtonManager"
+        )
+        slot = _attribute(manager, "_solver")
+        if _attribute(slot, "mjw_data") is not None:
+            return slot
+        physics = _attribute(_attribute(manager, "_sim"), "physics_manager")
+        if isinstance(physics, str):
+            module, _, name = physics.partition(":")
+            physics = _attribute(sys.modules.get(module), name)
+        classes = physics.__mro__[:-1] if isinstance(physics, type) else _subclasses(manager)
+        candidates = [slot]
+        for holder in (slot, physics, *classes):
+            for value in _attribute_values(holder):
+                if isinstance(value, dict):
+                    items = list(value.values())
+                elif isinstance(value, (list, tuple)):
+                    items = list(value)
+                else:
+                    items = [value]
+                candidates += [
+                    found for item in items for found in (item, _attribute(item, "solver"))
+                ]
+        return next((c for c in candidates if _attribute(c, "mjw_data") is not None), None)
 
     def _solver_touches(self, isaac: Any, row: int) -> frozenset[tuple[str, str]]:
         """Each touch link's contacts in env row `row`, from the solver's own arrays.
@@ -874,14 +951,16 @@ class IsaacSimSimulator(Simulator):
         pipeline found it, so the replay reads them in place of adding a sensor or a buffer
         to the simulation. Each touch pairs the touch link with a rigid object, under its scene
         name, or with another asset, as `TABLE`. The result leaves out contacts of the robot
-        with itself and a gripper link's contacts with objects, as the PhysX path does.
+        with itself and a gripper link's contacts with objects, as the PhysX path does. It
+        also holds each touch link's touches of a soft body, from `_soft_touches`.
         """
         solver = self._newton_solver()
         sides = self._contact_sides(isaac, solver)
+        soft = self._soft_touches(isaac, row, solver)
         data = solver.mjw_data
         count = int(data.nacon.numpy()[0])
         if count == 0:
-            return frozenset()
+            return frozenset(soft)
         contact = data.contact
         geoms = contact.geom.numpy()[:count]
         worlds = contact.worldid.numpy()[:count]
@@ -902,7 +981,101 @@ class IsaacSimSimulator(Simulator):
             used = address[:1] if elliptic or dim == 1 else address[: 2 * (dim - 1)]
             if float(forces[world, used].sum()) >= _PART_TOUCH_NEWTONS:
                 touching.add(pair)
-        return frozenset(touching)
+        return frozenset(touching | soft)
+
+    def _soft_touches(self, isaac: Any, row: int, solver: Any) -> set[tuple[str, str]]:
+        """Each touch link's touches of a soft body in env row `row`, by the body's name.
+
+        A soft body, such as a bag or a sheet, is a set of particles that MuJoCo does not
+        see, so its contacts are Newton's soft contacts: a particle near a shape. A
+        contact counts when the particle is within `_SOFT_TOUCH_METRES` of the shape's
+        surface. A particle belongs to the deformable object in the scene whose particles
+        for row `row` include it. A scene with no deformable object reads nothing.
+
+        Each call reads every env's soft contacts and keeps its own env's. That was
+        measured with one env, which every scene with a soft body runs today.
+        """
+        owners = self._particle_owners(isaac, row)
+        if not owners:
+            return set()
+        manager = _attribute(
+            sys.modules.get("isaaclab_newton.physics.newton_manager"), "NewtonManager"
+        )
+        contacts = _attribute(manager, "_contacts")
+        state = _attribute(manager, "_state_0")
+        if _attribute(contacts, "soft_contact_count") is None or state is None:
+            if not self._warned_soft:
+                self._warned_soft = True
+                _logger.warning(
+                    "Newton's manager has no _contacts or _state_0, so touches of soft "
+                    "bodies are left out"
+                )
+            return set()
+        count = int(contacts.soft_contact_count.numpy()[0])
+        if count == 0:
+            return set()
+        particles = contacts.soft_contact_particle[:count].numpy()
+        starts = np.array([start for start, _stop, _name in owners])
+        stops = np.array([stop for _start, stop, _name in owners])
+        owner = np.searchsorted(starts, particles, side="right") - 1
+        owned = (owner >= 0) & (particles < stops[np.maximum(owner, 0)])
+        sides = self._shape_sides(isaac, solver)
+        shapes = contacts.soft_contact_shape[:count].numpy()
+        link_shapes = self._solver_shapes[2] if self._solver_shapes is not None else np.zeros(0)
+        # Only a touch link's contacts can be touches, so the gaps of the rest are skipped.
+        links = np.zeros(len(shapes), dtype=bool)
+        known = (shapes >= 0) & (shapes < len(link_shapes))
+        links[known] = link_shapes[shapes[known]]
+        keep = owned & links
+        if not keep.any():
+            return set()
+        particles, shapes, owner = particles[keep], shapes[keep], owner[keep]
+        body_pos = contacts.soft_contact_body_pos[:count].numpy()[keep]
+        normals = contacts.soft_contact_normal[:count].numpy()[keep]
+        model = solver.model
+        poses = state.body_q.numpy()[model.shape_body.numpy()[shapes]]
+        points = poses[:, :3] + _rotate_xyzw(poses[:, 3:7], body_pos)
+        offsets = state.particle_q.numpy()[particles] - points
+        gaps = (offsets * normals).sum(axis=1) - model.particle_radius.numpy()[particles]
+        touching = set()
+        for shape, index in {
+            (int(shape), int(index))
+            for shape, index, gap in zip(shapes, owner, gaps, strict=True)
+            if gap <= _SOFT_TOUCH_METRES
+        }:
+            pair = self._touch_pair(sides[shape], owners[index][2])
+            if pair is not None:
+                touching.add(pair)
+        return touching
+
+    def replay_soft_objects(self, env_id: int) -> tuple[str, ...]:
+        """The scene name of each deformable object with particles in env `env_id`."""
+        isaac, row = self._envs[env_id]
+        return tuple(name for _start, _stop, name in self._particle_owners(isaac, row))
+
+    @staticmethod
+    def _particle_owners(isaac: Any, row: int) -> list[tuple[int, int, str]]:
+        """Each deformable object's particle range in env row `row`, with its name.
+
+        The ranges are ordered by their first particle.
+
+        Isaac Lab's particle-based objects list each env's first particle in
+        `particle_offsets` and the particles of one env in `particles_per_object`.
+        """
+        owners = []
+        deformables = _attribute(isaac.scene, "deformable_objects") or {}
+        for name, asset in deformables.items():
+            offsets = _attribute(asset, "particle_offsets")
+            per_object = _attribute(asset, "particles_per_object")
+            if offsets is None or not per_object:
+                continue
+            offsets = np.asarray(offsets.numpy() if hasattr(offsets, "numpy") else offsets).reshape(
+                -1
+            )
+            if row < len(offsets):
+                start = int(offsets[row])
+                owners.append((start, start + int(per_object), str(name)))
+        return sorted(owners)
 
     def _touch_pair(self, link: Any, thing: Any) -> tuple[str, str] | None:
         """The touch of a contact between touch link `link` and `thing`, or None.
@@ -919,35 +1092,54 @@ class IsaacSimSimulator(Simulator):
     def _contact_sides(self, isaac: Any, solver: Any) -> dict[int, tuple[str, Any] | str]:
         """The touch link or scene body of each MuJoCo geom of env row 0, by geom index.
 
-        A geom of a touch link maps to the link's name and its kind. A geom of a rigid
-        object maps to the object's scene name, and a geom of any other asset outside the
-        robots maps to `TABLE`. A geom of another robot link has no entry. The result is
+        Each geom takes the side of its Newton shape, from `_shape_sides`. The result is
         cached for each solver, because the solver is rebuilt with each scene.
         """
         cached = self._solver_sides
+        if cached is not None and cached[0] is solver:
+            return cached[1]
+        shapes = self._shape_sides(isaac, solver)
+        geom_shape = solver.mjc_geom_to_newton_shape.numpy()[0]
+        sides = {
+            geom: shapes[int(shape)]
+            for geom, shape in enumerate(geom_shape)
+            if int(shape) in shapes
+        }
+        self._solver_sides = (solver, sides)
+        return sides
+
+    def _shape_sides(self, isaac: Any, solver: Any) -> dict[int, tuple[str, Any] | str]:
+        """The touch link or scene body of each Newton shape, by shape index.
+
+        A shape of a touch link maps to the link's name and its kind. A shape of a rigid
+        object maps to the object's scene name, and a shape of any other asset outside the
+        robots maps to `TABLE`. A shape of another robot link, or one with no body, has
+        no entry. The result is cached for each solver, because the solver is rebuilt
+        with each scene.
+        """
+        cached = self._solver_shapes
         if cached is not None and cached[0] is solver:
             return cached[1]
         scene = isaac.scene
         model = solver.model
         labels = [str(label) for label in getattr(model, "body_label", None) or model.body_key]
         shape_body = model.shape_body.numpy()
-        geom_shape = solver.mjc_geom_to_newton_shape.numpy()[0]
         robots = [asset.cfg.prim_path for asset in scene.articulations.values()]
         robot = scene[self._config.robot].cfg.prim_path
         links = self._config.touch_links or {}
         sides: dict[int, tuple[str, Any] | str] = {}
-        for geom, shape in enumerate(geom_shape):
-            if shape < 0 or shape_body[shape] < 0:
+        for shape, body in enumerate(shape_body):
+            if body < 0:
                 continue
-            path = labels[shape_body[shape]]
+            path = labels[body]
             if self._is_under(path, robot):
                 link = self._last_part(path)
                 if link in links:
-                    sides[geom] = (link, links[link])
+                    sides[shape] = (link, links[link])
                 continue
             if any(self._is_under(path, prim) for prim in robots):
                 continue
-            sides[geom] = next(
+            sides[shape] = next(
                 (
                     str(name)
                     for name, asset in scene.rigid_objects.items()
@@ -955,7 +1147,9 @@ class IsaacSimSimulator(Simulator):
                 ),
                 TABLE,
             )
-        self._solver_sides = (solver, sides)
+        links = np.zeros(len(shape_body), dtype=bool)
+        links[[shape for shape, side in sides.items() if isinstance(side, tuple)]] = True
+        self._solver_shapes = (solver, sides, links)
         return sides
 
     def _warn_unnamed_touches(self, link: str, filters: int, forces: int) -> None:

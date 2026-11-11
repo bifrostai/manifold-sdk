@@ -223,6 +223,7 @@ class _Scene:
         self.stage = SimpleNamespace(GetPrimAtPath=roots.__getitem__)
         self.env_prim_paths = list(roots)
         self.env_origins = _ORIGINS
+        self.deformable_objects: dict[str, Any] = {}
         joint_pos = np.array([[0.1 * i for i in range(9)], [0.2 * i for i in range(9)]])
         link_pos = _ORIGINS[:, None, :] + np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 0.5]])
         self.robot = SimpleNamespace(
@@ -528,6 +529,9 @@ class _Array:
     def numpy(self) -> np.ndarray:
         return self._values
 
+    def __getitem__(self, index: Any) -> _Array:
+        return _Array(self._values[index])
+
 
 def _solver(contacts: list[tuple[int, int, int, list[int]]], forces: np.ndarray) -> Any:
     """A stand-in MuJoCo Warp solver with four bodies of one geom each.
@@ -600,6 +604,181 @@ def test_on_newton_the_touches_come_from_the_solvers_contacts(
 
     assert simulator.replay_contacts(1) == {("arm", "table")}
     assert simulator.replay_contacts(0) == {("arm", "banana")}
+
+
+def test_on_newton_a_hand_link_near_a_soft_bodys_particle_touches_it(
+    isaac: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    radius = 0.005
+    # panda_link1 sits 1 m up, turned 90 degrees about x, so its contact point 0.1 m
+    # along its own y lies 0.1 m above it in the world.
+    turn = [np.sin(np.pi / 4), 0.0, 0.0, np.cos(np.pi / 4)]
+    body_q = np.array([[0.0, 0.0, 1.0, *turn], [0, 0, 0, 0, 0, 0, 1], [0, 0, 0, 0, 0, 0, 1]])
+    point = np.array([0.0, 0.0, 1.1])
+
+    def above(gap: float) -> list[float]:
+        return list(point + np.array([0.0, 0.0, radius + gap]))
+
+    # The bag holds particles 0-3 in env 0 and 4-7 in env 1; the sheet holds 8-9 in
+    # env 0 and 10-11 in env 1.
+    particle_q = np.zeros((12, 3))
+    particle_q[3] = above(0.01)  # env 0's last bag particle, 10 mm away: too far.
+    particle_q[4] = above(0.0)  # env 1's first bag particle, on link1.
+    particle_q[9] = above(-0.003)  # env 0's last sheet particle, pressed 3 mm into link1.
+    particle_q[11] = above(0.0)  # env 1's last sheet particle, on the table.
+    contacts = [(3, 0), (4, 0), (9, 0), (11, 2)]
+    solver = _solver([], np.zeros((2, 1)))
+    # The model holds where the particles and bodies started, not where they are.
+    solver.model.particle_radius = _Array([radius] * 12)
+    solver.model.particle_q = _Array(np.tile([0.0, 0.0, 10.0], (12, 1)))
+    solver.model.body_q = _Array(np.tile([0, 0, 0, 0, 0, 0, 1.0], (3, 1)))
+    manager = SimpleNamespace(
+        _solver=solver,
+        _contacts=SimpleNamespace(
+            soft_contact_count=_Array([len(contacts)]),
+            # Newton's buffer holds more rows than the count.
+            soft_contact_particle=_Array([particle for particle, _shape in contacts] + [0]),
+            soft_contact_shape=_Array([shape for _particle, shape in contacts] + [0]),
+            soft_contact_body_pos=_Array([[0.0, 0.1, 0.0]] * (len(contacts) + 1)),
+            soft_contact_normal=_Array([[0.0, 0.0, 1.0]] * (len(contacts) + 1)),
+        ),
+        _state_0=SimpleNamespace(particle_q=_Array(particle_q), body_q=_Array(body_q)),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=manager),
+    )
+    scene = _Scene({})
+    scene.deformable_objects = {
+        "sheet": SimpleNamespace(particle_offsets=[8, 10], particles_per_object=2),
+        "bag": SimpleNamespace(particle_offsets=[0, 4], particles_per_object=4),
+    }
+    unwrapped = SimpleNamespace(
+        scene=scene,
+        termination_manager=SimpleNamespace(active_terms=[], get_term=lambda _name: None),
+    )
+    simulator = IsaacSimSimulator(
+        _settings(touch_links={"panda_link1": "arm", "panda_link2": "arm"}),
+        _benchmark(["over_shoulder_left"]),
+    )
+    simulator.attach(SimpleNamespace(inner=SimpleNamespace(unwrapped=unwrapped)), [0, 1])
+
+    assert simulator.replay_contacts(0) == {("arm", "sheet")}
+    assert simulator.replay_contacts(1) == {("arm", "bag")}
+    assert simulator.replay_soft_objects(0) == ("bag", "sheet")
+
+
+@pytest.mark.parametrize("held_by", ["slot", "coupled_solver", "sub_solvers", "physics_manager"])
+def test_on_newton_the_mujoco_solver_is_found_behind_a_coupled_solver(
+    held_by: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mujoco = SimpleNamespace(mjw_data=SimpleNamespace())
+    other = SimpleNamespace(particle_q=None)
+    slots = {
+        "slot": mujoco,
+        "coupled_solver": SimpleNamespace(cloth=other, inner=mujoco),
+        "sub_solvers": SimpleNamespace(
+            entries=[SimpleNamespace(solver=other), SimpleNamespace(solver=mujoco)]
+        ),
+        "physics_manager": SimpleNamespace(cloth=other),
+    }
+    physics = SimpleNamespace(rigid=mujoco if held_by == "physics_manager" else None)
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(
+            NewtonManager=SimpleNamespace(
+                _solver=slots[held_by], _sim=SimpleNamespace(physics_manager=physics)
+            )
+        ),
+    )
+
+    assert IsaacSimSimulator._newton_solver() is mujoco
+
+
+def _managers(mujoco: Any, holder: str) -> tuple[type, type]:
+    """A `NewtonManager` stand-in, and a coupled manager two levels below it.
+
+    The manager named by Isaac Lab's path is `CoupledManager`; `holder` names the class
+    that keeps MuJoCo's solver.
+    """
+
+    class NewtonManager:
+        _solver = SimpleNamespace(cloth=[1, 2])
+        _sim = SimpleNamespace(physics_manager="scene.physics:CoupledManager")
+
+    class CoupledBase(NewtonManager):
+        pass
+
+    class CoupledManager(CoupledBase):
+        pass
+
+    owner: Any = {"base": CoupledBase, "manager": CoupledManager}[holder]
+    owner._rigid_solver = mujoco
+    return NewtonManager, CoupledManager
+
+
+@pytest.mark.parametrize("holder", ["base", "manager"])
+def test_on_newton_the_mujoco_solver_is_found_on_the_manager_a_path_names(
+    holder: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    mujoco = SimpleNamespace(mjw_data=SimpleNamespace())
+    newton_manager, coupled = _managers(mujoco, holder)
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=newton_manager),
+    )
+    monkeypatch.setitem(sys.modules, "scene.physics", SimpleNamespace(CoupledManager=coupled))
+
+    assert IsaacSimSimulator._newton_solver() is mujoco
+
+
+def test_on_newton_the_manager_a_path_names_wins_over_another_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mujoco = SimpleNamespace(mjw_data=SimpleNamespace())
+    newton_manager, coupled = _managers(mujoco, "manager")
+
+    class OtherManager(newton_manager):
+        _rigid_solver = SimpleNamespace(mjw_data=SimpleNamespace())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=newton_manager),
+    )
+    monkeypatch.setitem(sys.modules, "scene.physics", SimpleNamespace(CoupledManager=coupled))
+
+    assert IsaacSimSimulator._newton_solver() is mujoco
+
+
+def test_on_newton_a_path_to_no_loaded_class_finds_the_solver_on_a_deeper_subclass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mujoco = SimpleNamespace(mjw_data=SimpleNamespace())
+    newton_manager, _coupled = _managers(mujoco, "manager")
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=newton_manager),
+    )
+    monkeypatch.delitem(sys.modules, "scene.physics", raising=False)
+
+    assert IsaacSimSimulator._newton_solver() is mujoco
+
+
+def test_on_newton_without_a_mujoco_solver_no_solver_is_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        sys.modules,
+        "isaaclab_newton.physics.newton_manager",
+        SimpleNamespace(NewtonManager=SimpleNamespace(_solver=SimpleNamespace(cloth=[1, 2]))),
+    )
+
+    assert IsaacSimSimulator._newton_solver() is None
 
 
 def test_on_newton_no_touch_sensor_is_added(monkeypatch: pytest.MonkeyPatch) -> None:

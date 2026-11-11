@@ -115,6 +115,15 @@ class Simulator(ABC):
     def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
         """Each body of env `env_id`'s scene with its meshes, read at the start of an episode."""
 
+    def replay_soft_objects(self, env_id: int) -> tuple[str, ...]:
+        """The scene name of each soft object in env `env_id`, such as a bag or a sheet.
+
+        A soft object has no rigid body, so it is not among `replay_bodies`, but a hand's
+        touches of it are touches of a task's object. A simulator without soft objects
+        returns none.
+        """
+        return ()
+
     @abstractmethod
     def replay_poses(self, env_id: int) -> dict[str, ReplayPose]:
         """A dict from each scene body's name to its pose in env `env_id` now."""
