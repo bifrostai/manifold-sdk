@@ -1132,13 +1132,17 @@ class _HandSimulator(_Simulator):
 
     `heights` gives the cube's height for each pose read. `hand_contacts` gives the hand
     links' touches for each step, in the form that `replay_contacts` returns, and no
-    touches after the list ends.
+    touches after the list ends. `soft_objects` names the scene's soft objects.
     """
 
     def __init__(self) -> None:
         super().__init__()
         self.heights: list[float] = []
         self.hand_contacts: list[frozenset[tuple[str, str]]] = []
+        self.soft_objects: tuple[str, ...] = ()
+
+    def replay_soft_objects(self, env_id):
+        return self.soft_objects
 
     def replay_poses(self, env_id):
         height = self.heights.pop(0) if self.heights else 0.0
@@ -1221,6 +1225,24 @@ def test_a_hands_touch_of_an_object_is_the_gripper_touching_it(tmp_path):
             GripperTouchingEvent(object="cube", is_active=False),
             TouchingEvent(object="gripper", reference="table", is_active=False),
         ],
+    ]
+
+
+def test_a_hands_touch_of_a_soft_object_is_the_gripper_touching_it(tmp_path):
+    simulator = _HandSimulator()
+    simulator.soft_objects = ("bag",)
+    simulator.hand_contacts = [frozenset({("left_index", "bag")})]
+
+    frames = _hand_steps(tmp_path, simulator, 2)
+
+    touches = [
+        [event for event in events if isinstance(event, (GripperTouchingEvent, TouchingEvent))]
+        for events in frames
+    ]
+    assert touches == [
+        [],
+        [GripperTouchingEvent(object="bag", is_active=True)],
+        [GripperTouchingEvent(object="bag", is_active=False)],
     ]
 
 
