@@ -60,8 +60,10 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
+    from manifold.benchmark._task_names import TaskTarget
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.benchmark.simulators import Simulator
     from manifold.core.values import Observation
@@ -80,6 +82,23 @@ _TOUCH_GAP_STEPS = 2
 _REST_SPEED = 0.05
 # The number of steps an object stays still before it is at rest.
 _REST_STEPS = 3
+
+
+def _with_display_names(
+    bodies: tuple[ReplaySceneBody, ...], display_names: Mapping[str, str]
+) -> tuple[ReplaySceneBody, ...]:
+    """`bodies`, each with the words that `display_names` has for its task name.
+
+    Raises:
+        ValueError: If `display_names` has words for a name that no body has.
+    """
+    unknown = sorted(set(display_names) - {body.object for body in bodies})
+    if unknown:
+        raise ValueError(f"display names for names that no scene body has: {unknown}")
+    return tuple(
+        replace(body, display=display_names[body.object]) if body.object in display_names else body
+        for body in bodies
+    )
 
 
 def _boxed(body: ReplaySceneBody) -> ReplaySceneBody:
@@ -204,11 +223,19 @@ class _ReplayRecorder:
         observation: Observation,
         attributes: dict[str, str],
         events: tuple[ManifoldEvent, ...],
+        task_names: Mapping[str, TaskTarget],
+        display_names: Mapping[str, str],
     ) -> None:
         """Open the episode's log, and write its scene and its first frame.
 
         The scalars of the first frame become the log's channels. Later frames write
-        the same scalars.
+        the same scalars. `task_names` and `display_names` are the reset's: the scene
+        names the bodies they refer to, and carries the words for each task name.
+
+        Raises:
+            ValueError: If `task_names` is not empty for a benchmark without a
+                simulator, or `display_names` has words for a name that no scene
+                body has.
         """
         self._step = 0
         self._latest = {}
@@ -220,8 +247,14 @@ class _ReplayRecorder:
         self._succeeded = False
         self._previous = None
         self._touching = frozenset()
-        bodies = self._simulator.replay_bodies(self._env_id) if self._simulator is not None else ()
-        bodies = tuple(_boxed(body) for body in bodies)
+        if self._simulator is None and task_names:
+            raise ValueError("a benchmark without a simulator has no scene to give task names")
+        bodies = (
+            self._simulator.replay_bodies(self._env_id, task_names)
+            if self._simulator is not None
+            else ()
+        )
+        bodies = tuple(_boxed(body) for body in _with_display_names(bodies, display_names))
         self._object_bodies = {
             body.name: body.object
             for body in bodies

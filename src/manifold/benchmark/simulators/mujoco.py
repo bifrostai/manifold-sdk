@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
+from manifold.benchmark._task_names import TaskBody, TaskSite
 from manifold.benchmark.simulators import (
     ARM,
     GRIPPER,
@@ -33,6 +34,7 @@ from manifold.benchmark.simulators import (
     Simulator,
 )
 from manifold.core.conventions import CameraAxes
+from manifold.lib.compat import assert_never
 from manifold.lib.rotation import convert_camera_axes, wxyz_to_xyzw, xyzw_from_rotation_matrix
 from manifold.replay import (
     ReplayMesh,
@@ -46,7 +48,9 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
+
+    from manifold.benchmark._task_names import TaskTarget
 
 
 _logger = logging.getLogger(__name__)
@@ -82,7 +86,8 @@ class _MujocoEpisodeCache:
 
     `parts` maps each body of the arm and of the gripper to `ARM` or `GRIPPER`.
     `things` maps each body that the task names to the name and to whether the body is
-    an object, for the bodies that a robot part can touch.
+    an object, for the bodies that a robot part can touch. `sites` maps the scene name
+    of each site that the task names to the id of the body the site moves with.
     """
 
     body_ids: tuple[int, ...]
@@ -96,6 +101,7 @@ class _MujocoEpisodeCache:
     contacts: dict[str, int]
     parts: dict[int, str]
     things: dict[int, tuple[str, bool]]
+    sites: dict[str, int]
 
 
 class BenchmarkMujocoSimulatorConfig(BaseModel):
@@ -162,12 +168,22 @@ class MujocoSimulator(Simulator):
     def post_step(self) -> None:
         """Keep nothing, because each replay method reads the env when it is called."""
 
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
-        """Each body with a drawn geom, read again at the start of each episode.
+    def replay_bodies(
+        self, env_id: int, task_names: Mapping[str, TaskTarget]
+    ) -> tuple[ReplaySceneBody, ...]:
+        """Each body with a drawn geom, and each site that `task_names` refers to.
 
         A task can lay out its objects again on each reset. This method therefore
         also reads the joints, the objects and the contact bodies again, and caches
-        them for the episode.
+        them for the episode. A body that `task_names` refers to takes the task's
+        name, and so do the parts of a named fixture: the bodies under it in the
+        model's body tree.
+
+        Raises:
+            ValueError: If `task_names` refers to a body or a site that the model
+                lacks, to the world or the robot, or to a site of a shape that the
+                scene does not draw, or if it gives one body two names or gives a body
+                a name that another body has.
         """
         sim = self._sim(env_id)
         model = sim.model
@@ -204,6 +220,9 @@ class MujocoSimulator(Simulator):
             )
             for body_id, name in enumerate(names)
         }
+        labels, named_by, parents = self._task_labels(model, names, labels, task_names)
+        sites = self._task_sites(model, names, labels, named_by, task_names)
+        self._check_task_names_distinct(labels, named_by, sites)
         cache = _MujocoEpisodeCache(
             body_ids=tuple(sorted(parts)),
             arm_qpos=qpos["arm"],
@@ -226,16 +245,21 @@ class MujocoSimulator(Simulator):
                 for body_id, (role, name) in labels.items()
                 if name is not None
             },
+            sites={body.name: parent_id for body, parent_id in sites},
         )
         self._caches[env_id] = cache
-        return tuple(
-            ReplaySceneBody(
-                name=self._body_name(model, body_id),
-                parts=tuple(parts[body_id]),
-                role=labels[body_id][0],
-                object=labels[body_id][1],
-            )
-            for body_id in cache.body_ids
+        return (
+            *(
+                ReplaySceneBody(
+                    name=self._body_name(model, body_id),
+                    parts=tuple(parts[body_id]),
+                    role=labels[body_id][0],
+                    object=labels[body_id][1],
+                    parent=parents.get(body_id),
+                )
+                for body_id in cache.body_ids
+            ),
+            *(body for body, _ in sites),
         )
 
     def replay_poses(self, env_id: int) -> dict[str, ReplayPose]:
@@ -246,13 +270,21 @@ class MujocoSimulator(Simulator):
         """
         sim = self._sim(env_id)
         data = sim.data
-        return {
+        cache = self._caches[env_id]
+        poses = {
             self._body_name(sim.model, body_id): ReplayPose(
                 position=np.asarray(data.xpos[body_id], dtype=np.float32),
                 orientation=wxyz_to_xyzw(data.xquat[body_id]).astype(np.float32),
             )
-            for body_id in self._caches[env_id].body_ids
+            for body_id in cache.body_ids
         }
+        # A site's part is posed in its body's frame, so the site moves with the body.
+        for site_name, body_id in cache.sites.items():
+            poses[site_name] = ReplayPose(
+                position=np.asarray(data.xpos[body_id], dtype=np.float32),
+                orientation=wxyz_to_xyzw(data.xquat[body_id]).astype(np.float32),
+            )
+        return poses
 
     def replay_extrinsics(self, env_id: int) -> dict[str, ReplayPose]:
         """Each camera that the config maps, as its camera-to-world pose in OpenCV axes.
@@ -434,6 +466,203 @@ class MujocoSimulator(Simulator):
         found = {name[: -len(suffix)] for name in names if name.endswith(suffix) and name != suffix}
         return tuple(sorted(found, key=len, reverse=True))
 
+    def _task_labels(
+        self,
+        model: Any,
+        names: list[str],
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        task_names: Mapping[str, TaskTarget],
+    ) -> tuple[dict[int, tuple[ReplaySceneBodyRole, str | None]], dict[int, str], dict[int, str]]:
+        """`labels` with each body that `task_names` refers to named for the task.
+
+        Also return the task name that names each such body, and the fixture's task name
+        for each part of a named fixture. A named object's body takes the task name. A
+        named fixture's parts are the bodies under it in the model's body tree, such as
+        its doors, shelves and knobs, and they take the fixture's role. A part with a name
+        of its own takes the task name with the rest of that name, so
+        `stove_1_knob_front_left` becomes `stove_knob_front_left`. A part that the default
+        labels name after the fixture, or leave unnamed with a name that does not start
+        with the fixture's, takes the task name.
+        """
+        renamed = dict(labels)
+        named_by: dict[int, str] = {}
+        parents: dict[int, str] = {}
+        parent_ids = np.asarray(model.body_parentid, dtype=np.int64)
+        for task_name, target in task_names.items():
+            if isinstance(target, TaskBody):
+                target_id = self._task_body_id(names, labels, task_name, target)
+                role = labels[target_id][0]
+                members = [target_id]
+                if role is ReplaySceneBodyRole.FIXTURE:
+                    members += self._descendants(parent_ids, target_id)
+                owner = self._root_name(target.body)
+                for body_id in members:
+                    if body_id in named_by:
+                        raise ValueError(
+                            f"task names {named_by[body_id]!r} and {task_name!r} both name "
+                            f"body {names[body_id]!r}"
+                        )
+                    named_by[body_id] = task_name
+                    if body_id == target_id:
+                        renamed[body_id] = (role, task_name)
+                        continue
+                    part_name = self._task_part_name(
+                        task_name, owner, names[body_id], labels[body_id][1]
+                    )
+                    renamed[body_id] = (role, part_name)
+                    parents[body_id] = task_name
+            elif isinstance(target, TaskSite):
+                continue
+            else:
+                assert_never(target)
+        return renamed, named_by, parents
+
+    @staticmethod
+    def _task_body_id(
+        names: list[str],
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        task_name: str,
+        target: TaskBody,
+    ) -> int:
+        """The id of the body that `target` refers to, which must be outside the robot.
+
+        Body 0 is MuJoCo's world, whose geoms span the whole room.
+        """
+        if target.body not in names:
+            raise ValueError(
+                f"task name {task_name!r} refers to body {target.body!r}, which the model lacks"
+            )
+        body_id = names.index(target.body)
+        if body_id == 0 or labels[body_id][0] is ReplaySceneBodyRole.ROBOT:
+            raise ValueError(
+                f"task name {task_name!r} refers to body {target.body!r}, which is the world "
+                "or the robot"
+            )
+        return body_id
+
+    @staticmethod
+    def _descendants(parent_ids: np.ndarray, root_id: int) -> list[int]:
+        """The ids of the bodies under body `root_id` in the model's body tree."""
+        found = []
+        for body_id in range(1, len(parent_ids)):
+            ancestor = int(parent_ids[body_id])
+            while ancestor not in (0, root_id):
+                ancestor = int(parent_ids[ancestor])
+            if body_id != root_id and ancestor == root_id:
+                found.append(body_id)
+        return found
+
+    def _root_name(self, body_name: str) -> str:
+        """`body_name` without the suffix that names an object's or a fixture's root body."""
+        suffix = self._config.object_body_suffix
+        return body_name[: -len(suffix)] if body_name.endswith(suffix) else body_name
+
+    def _task_part_name(
+        self, task_name: str, owner: str, body_name: str, body_object: str | None
+    ) -> str:
+        """The task's name for a part of the fixture whose root body is named `owner`."""
+        prefix = f"{owner}_"
+        if body_object is not None and body_object.startswith(prefix):
+            return task_name + body_object[len(owner) :]
+        if body_object is None and body_name.startswith(prefix):
+            return task_name + self._root_name(body_name)[len(owner) :]
+        return task_name
+
+    def _task_sites(
+        self,
+        model: Any,
+        names: list[str],
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        named_by: dict[int, str],
+        task_names: Mapping[str, TaskTarget],
+    ) -> list[tuple[ReplaySceneBody, int]]:
+        """A scene body for each site that `task_names` refers to, with its body's id.
+
+        The body is named after the site, takes the task name and the role of the body
+        that the site moves with, and holds one part: the site's shape, posed in that
+        body's frame. When a task name names that body too, the site is its part.
+        """
+        sites = []
+        named_sites: dict[str, str] = {}
+        for task_name, target in task_names.items():
+            if isinstance(target, TaskSite):
+                if target.site in named_sites:
+                    raise ValueError(
+                        f"task names {named_sites[target.site]!r} and {task_name!r} both name "
+                        f"site {target.site!r}"
+                    )
+                named_sites[target.site] = task_name
+                sites.append(self._task_site(model, names, labels, named_by, task_name, target))
+            elif isinstance(target, TaskBody):
+                continue
+            else:
+                assert_never(target)
+        return sites
+
+    def _task_site(
+        self,
+        model: Any,
+        names: list[str],
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        named_by: dict[int, str],
+        task_name: str,
+        target: TaskSite,
+    ) -> tuple[ReplaySceneBody, int]:
+        if target.site in names:
+            raise ValueError(f"site {target.site!r} has the name of a body")
+        try:
+            site_id = int(model.site(target.site).id)
+        except KeyError as error:
+            raise ValueError(
+                f"task name {task_name!r} refers to site {target.site!r}, which the model lacks"
+            ) from error
+        mesh = self._primitive_mesh(
+            int(model.site_type[site_id]), np.asarray(model.site_size[site_id], dtype=np.float32)
+        )
+        if mesh is None:
+            raise ValueError(f"site {target.site!r} has a shape that the scene does not draw")
+        body_id = int(model.site_bodyid[site_id])
+        role = labels[body_id][0]
+        if body_id == 0 or role is ReplaySceneBodyRole.ROBOT:
+            raise ValueError(f"site {target.site!r} moves with the world or the robot")
+        red, green, blue, alpha = (float(value) for value in model.site_rgba[site_id])
+        part = ReplayScenePart(
+            mesh=mesh,
+            position=np.asarray(model.site_pos[site_id], dtype=np.float32),
+            orientation=wxyz_to_xyzw(model.site_quat[site_id]).astype(np.float32),
+            color=(red, green, blue, alpha),
+        )
+        body = ReplaySceneBody(
+            name=target.site,
+            parts=(part,),
+            role=role,
+            object=task_name,
+            parent=named_by.get(body_id),
+        )
+        return body, body_id
+
+    @staticmethod
+    def _check_task_names_distinct(
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        named_by: dict[int, str],
+        sites: list[tuple[ReplaySceneBody, int]],
+    ) -> None:
+        """Raise if a task name gives a body or a site a name that another body has.
+
+        The grader matches a fact to the scene by name, so a name that two unrelated
+        bodies share would link a fact to the wrong body.
+        """
+        sources: dict[str, set[str | None]] = {}
+        for body_id, (role, name) in labels.items():
+            if name is not None and role is not ReplaySceneBodyRole.ROBOT:
+                sources.setdefault(name, set()).add(named_by.get(body_id))
+        for body, _ in sites:
+            if body.object is not None:
+                sources.setdefault(body.object, set()).add(body.object)
+        clashes = sorted(name for name, by in sources.items() if len(by) > 1 and by - {None})
+        if clashes:
+            raise ValueError(f"task names give names that other bodies have: {clashes}")
+
     def _robot_parts(self, model: Any) -> dict[int, str]:
         """Each body of the gripper as `GRIPPER`, and each body of the arm as `ARM`."""
         parts = {}
@@ -481,13 +710,10 @@ class MujocoSimulator(Simulator):
         import mujoco  # ty: ignore[unresolved-import]
 
         kind = int(model.geom_type[geom_id])
-        size = np.asarray(model.geom_size[geom_id], dtype=np.float32)
-        if kind == mujoco.mjtGeom.mjGEOM_BOX:
-            return ReplayMesh.box([float(value) for value in size[:3]])
-        if kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
-            return ReplayMesh.cylinder(radius=float(size[0]), half_length=float(size[1]))
         if kind != mujoco.mjtGeom.mjGEOM_MESH:
-            return None
+            return MujocoSimulator._primitive_mesh(
+                kind, np.asarray(model.geom_size[geom_id], dtype=np.float32)
+            )
         mesh_id = int(model.geom_dataid[geom_id])
         vertex_start = int(model.mesh_vertadr[mesh_id])
         face_start = int(model.mesh_faceadr[mesh_id])
@@ -498,6 +724,21 @@ class MujocoSimulator(Simulator):
             model.mesh_face[face_start : face_start + int(model.mesh_facenum[mesh_id])]
         ).reshape(-1, 3)
         return ReplayMesh(vertices=vertices, faces=faces.astype(np.uint32))
+
+    @staticmethod
+    def _primitive_mesh(kind: int, size: np.ndarray) -> ReplayMesh | None:
+        """The triangles of a box or a cylinder of MuJoCo type `kind`, or None for another type.
+
+        A geom and a site of the same type store their size in the same way.
+        """
+        # The SDK does not depend on `mujoco`, so this import is local.
+        import mujoco  # ty: ignore[unresolved-import]
+
+        if kind == mujoco.mjtGeom.mjGEOM_BOX:
+            return ReplayMesh.box([float(value) for value in size[:3]])
+        if kind == mujoco.mjtGeom.mjGEOM_CYLINDER:
+            return ReplayMesh.cylinder(radius=float(size[0]), half_length=float(size[1]))
+        return None
 
     @staticmethod
     def _texture_mean(model: Any, texture_id: int) -> tuple[float, float, float] | None:

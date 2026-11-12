@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from manifold.benchmark import TaskBody
 from manifold.benchmark.config import BenchmarkConfig
 from manifold.benchmark.simulators import Simulator
 from manifold.benchmark.simulators.isaacsim import (
@@ -349,7 +350,7 @@ def _attached(
     simulator = IsaacSimSimulator(_CONFIG, _benchmark(spec_cameras))
     simulator.attach(env, env_ids)
     for env_id in env_ids:
-        simulator.replay_bodies(env_id)
+        simulator.replay_bodies(env_id, {})
     return simulator, scene
 
 
@@ -761,7 +762,7 @@ def test_start_keeps_a_higher_file_limit(
 
 def test_the_scene_groups_drawn_prims_under_their_rigid_bodies(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0, 1])
-    bodies = {body.name: body for body in simulator.replay_bodies(1)}
+    bodies = {body.name: body for body in simulator.replay_bodies(1, {})}
     assert list(bodies) == ["base_link", "finger", "banana", "bowl", "top"]
     assert isinstance(simulator, Simulator)
     # The table has no rigid body, so its cube is a body named for its own prim. The
@@ -772,7 +773,7 @@ def test_the_scene_groups_drawn_prims_under_their_rigid_bodies(isaac: SimpleName
 
 def test_each_body_has_its_role_and_a_fixture_keeps_its_own_name(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
-    labels = {body.name: (body.role, body.object) for body in simulator.replay_bodies(0)}
+    labels = {body.name: (body.role, body.object) for body in simulator.replay_bodies(0, {})}
     assert labels == {
         "base_link": (ReplaySceneBodyRole.ROBOT, None),
         "finger": (ReplaySceneBodyRole.ROBOT, None),
@@ -786,7 +787,7 @@ def test_a_parts_colour_comes_from_its_material_then_its_display_colour(
     isaac: SimpleNamespace,
 ) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
-    bodies = {body.name: body for body in simulator.replay_bodies(0)}
+    bodies = {body.name: body for body in simulator.replay_bodies(0, {})}
     assert bodies["banana"].parts[0].color == (1.0, 1.0, 0.0, 1.0)
     assert bodies["base_link"].parts[0].color == (1.0, 0.0, 0.0, 1.0)
     assert bodies["top"].parts[0].color == (0.7, 0.7, 0.7, 1.0)
@@ -797,7 +798,7 @@ def test_a_parts_colour_comes_from_its_material_then_its_display_colour(
 
 def test_the_vertices_are_in_their_bodys_frame(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached({}, ["over_shoulder_left"], [0, 1])
-    bodies = {body.name: body for body in simulator.replay_bodies(1)}
+    bodies = {body.name: body for body in simulator.replay_bodies(1, {})}
     vertices = np.asarray(bodies["finger"].parts[1].mesh.vertices)
     np.testing.assert_allclose(vertices.min(axis=0), [0.0, 0.0, 0.0], atol=1e-6)
     np.testing.assert_allclose(vertices.max(axis=0), [1.0, 1.0, 0.0], atol=1e-6)
@@ -808,7 +809,7 @@ def test_a_heavy_fixed_body_is_drawn_as_its_box_but_a_rigid_object_is_not(
 ) -> None:
     monkeypatch.setattr("manifold.benchmark.simulators.isaacsim.BOX_VERTICES", 3)
     simulator, _ = _attached({}, ["over_shoulder_left"], [0])
-    bodies = {body.name: body for body in simulator.replay_bodies(0)}
+    bodies = {body.name: body for body in simulator.replay_bodies(0, {})}
     assert [len(part.mesh.vertices) for part in bodies["finger"].parts] == [8]
     np.testing.assert_allclose(bodies["finger"].parts[0].position, [0.5, 0.5, 0.0])
     assert [len(part.mesh.vertices) for part in bodies["bowl"].parts] == [4]
@@ -951,3 +952,10 @@ def test_a_spec_camera_that_matches_no_sensor_name_takes_the_next_unmatched_sens
 def test_no_camera_pose_is_read(isaac: SimpleNamespace) -> None:
     simulator, _ = _attached(_sensors(), ["over_shoulder_left", "wrist"], [0])
     assert simulator.replay_extrinsics(0) == {}
+
+
+def test_the_isaac_sim_simulator_refuses_task_names():
+    simulator = IsaacSimSimulator(_CONFIG, _benchmark(["over_shoulder_left"]))
+
+    with pytest.raises(ValueError, match="does not apply task names"):
+        simulator.replay_bodies(0, {"stove": TaskBody("stove_1_main")})

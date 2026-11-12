@@ -17,10 +17,11 @@ from manifold.lib.compat import assert_never
 from manifold.replay import ReplayMesh, ReplayScenePart
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import numpy as np
 
+    from manifold.benchmark._task_names import TaskTarget
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.replay import ReplayPose, ReplaySceneBody, RerunScalar
 
@@ -112,8 +113,19 @@ class Simulator(ABC):
         """
 
     @abstractmethod
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
-        """Each body of env `env_id`'s scene with its meshes, read at the start of an episode."""
+    def replay_bodies(
+        self, env_id: int, task_names: Mapping[str, TaskTarget]
+    ) -> tuple[ReplaySceneBody, ...]:
+        """Each body of env `env_id`'s scene with its meshes, read at the start of an episode.
+
+        `task_names` is the episode's `ResetResult.task_names`. Each body or site it
+        refers to takes the task's name in the scene.
+
+        Raises:
+            ValueError: If `task_names` refers to a body or site that the scene lacks,
+                or names one with a name that another body already has, or if this
+                simulator cannot apply task names.
+        """
 
     @abstractmethod
     def replay_poses(self, env_id: int) -> dict[str, ReplayPose]:

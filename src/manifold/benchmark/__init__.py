@@ -13,6 +13,7 @@ server and the episode record from here.
 from __future__ import annotations
 
 from manifold.benchmark._service import ResetResult, StepResult
+from manifold.benchmark._task_names import TaskBody, TaskSite, TaskTarget
 from manifold.benchmark._worker import WorkerEpisodeRecord, WorkerSession, WorkerTask
 from manifold.benchmark.config import (
     BenchmarkBatchedServiceConfig,
@@ -53,6 +54,9 @@ __all__ = [
     "ResetResult",
     "SingleServiceHooks",
     "StepResult",
+    "TaskBody",
+    "TaskSite",
+    "TaskTarget",
     "WorkerEpisodeRecord",
     "WorkerSession",
     "WorkerTask",

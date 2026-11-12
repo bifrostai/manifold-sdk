@@ -7,6 +7,7 @@ from typing import Any, cast
 import numpy as np
 import pytest
 
+from manifold.benchmark import TaskBody
 from manifold.benchmark.simulators import BOX_VERTICES, Simulator
 from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig, SapienSimulator
 
@@ -110,7 +111,7 @@ def test_a_shape_is_scaled_and_posed_in_its_entitys_frame():
     box = _shape(unit_box, half_size=np.array([0.5, 0.25, 2.0]))
     simulator = _attached(_env([_entity("table", 1, [_RenderBodyComponent([box])])]))
 
-    (body,) = simulator.replay_bodies(0)
+    (body,) = simulator.replay_bodies(0, {})
 
     assert isinstance(simulator, Simulator)
     assert body.name == "table"
@@ -130,7 +131,7 @@ def test_a_plane_is_left_out_and_a_large_mesh_becomes_its_box():
         )
     )
 
-    bodies = simulator.replay_bodies(0)
+    bodies = simulator.replay_bodies(0, {})
 
     assert [body.name for body in bodies] == ["fixture"]
     assert len(bodies[0].parts) == 1
@@ -147,7 +148,7 @@ def test_two_entities_with_one_name_are_told_apart_by_scene_id():
             ]
         )
     )
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     poses = simulator.replay_poses(0)
 
@@ -162,7 +163,7 @@ def test_a_camera_pose_is_in_opencv_axes():
     model[:3, 3] = [0.0, 0.5, 1.5]
     camera = _RenderCameraComponent("head_camera", model)
     simulator = _attached(_env([_entity("head_camera", 1, [camera])]))
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     (pose,) = simulator.replay_extrinsics(0).values()
 
@@ -173,7 +174,7 @@ def test_a_camera_pose_is_in_opencv_axes():
 
 def test_the_readings_are_the_arm_and_gripper_joints_of_the_robot():
     simulator = _attached(_env([]))
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     scalars = {scalar.name: scalar.value for scalar in simulator.replay_scalars(0, None)}
 
@@ -185,7 +186,7 @@ def test_the_readings_are_the_arm_and_gripper_joints_of_the_robot():
 
 def test_a_joint_name_with_the_scene_and_robot_in_front_matches_its_config_name():
     simulator = _attached(_env([], joint_prefix="scene-0-panda_"))
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     scalars = {scalar.name: scalar.value for scalar in simulator.replay_scalars(0, None)}
 
@@ -231,7 +232,7 @@ def test_a_sapien_2_scene_gives_its_actors_and_links_with_each_shape_scaled_by_i
     )
     simulator = _attached(SimpleNamespace(task_env=SimpleNamespace(scene=scene)))
 
-    bodies = {body.name: body for body in simulator.replay_bodies(0)}
+    bodies = {body.name: body for body in simulator.replay_bodies(0, {})}
 
     assert sorted(bodies) == ["ball", "box", "hand"]
     assert bodies["box"].parts[0].mesh.vertices[0].tolist() == pytest.approx([0.1, 0.2, 0.3])
@@ -239,3 +240,10 @@ def test_a_sapien_2_scene_gives_its_actors_and_links_with_each_shape_scaled_by_i
     assert bodies["hand"].parts[0].mesh.vertices[0].tolist() == [2.0, 2.0, 2.0]
     assert simulator.replay_poses(0)["ball"].position.tolist() == [1.0, 0.0, 0.0]
     assert list(simulator.replay_extrinsics(0)) == ["head"]
+
+
+def test_the_sapien_simulator_refuses_task_names():
+    simulator = SapienSimulator(_CONFIG)
+
+    with pytest.raises(ValueError, match="does not apply task names"):
+        simulator.replay_bodies(0, {"stove": TaskBody("stove_1_main")})

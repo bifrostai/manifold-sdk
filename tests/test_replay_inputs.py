@@ -85,7 +85,7 @@ def _record(
 ) -> None:
     """Record an episode with a first frame and a frame for each action, and read it back."""
     recorder = _recorder(embodiment)
-    recorder.begin(tmp_path, 0, _observation(states[0]), {}, ())
+    recorder.begin(tmp_path, 0, _observation(states[0]), {}, (), {}, {})
     for step, (state, action) in enumerate(zip(states[1:], actions, strict=True)):
         recorder.record(
             None if action is None else Action(values=action),

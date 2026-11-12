@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any, cast
 
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from collections.abc import Hashable, Mapping, MutableMapping
     from logging import Logger, LoggerAdapter
 
+    from manifold.benchmark._task_names import TaskTarget
     from manifold.benchmark._worker import WorkerTask
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.benchmark.simulators import Simulator
@@ -115,6 +116,14 @@ class ResetResult:
     benchmark sets `config.run.max_steps` to null. The Client raises an error if both
     the hooks and the config set a limit. A benchmark whose tasks use the config's
     limit passes None.
+
+    `task_names` maps a name that the hooks' facts use to the scene body or site it
+    refers to in this episode, for a task that picks its fixtures for each episode,
+    such as `{"cab": TaskBody("cab_2_main_group_main")}`. The replay's scene gives the
+    body that name in place of the name the simulator would give it. `display_names`
+    maps a task name to the words a person reads for it in this episode, such as
+    `{"obj": "beer"}`. A benchmark whose simulator already gives each body the task's
+    name, and whose names read well, leaves both empty.
     """
 
     observation: Observation
@@ -123,6 +132,10 @@ class ResetResult:
     attributes: dict[str, str]
     events: tuple[ManifoldEvent, ...]
     max_steps: int | None
+    # Empty for most benchmarks: only a task that picks its fixtures for each episode
+    # names them.
+    task_names: dict[str, TaskTarget] = field(default_factory=dict)
+    display_names: dict[str, str] = field(default_factory=dict)
 
 
 def _log_unsupported_versions(simulator: Simulator) -> None:
