@@ -480,6 +480,41 @@ def test_a_scene_body_keeps_its_role_and_the_tasks_name_for_it(tmp_path):
     ]
 
 
+def test_a_scene_body_keeps_its_words_and_the_fixture_it_is_a_part_of(tmp_path):
+    path = tmp_path / "episode.replay"
+    box = (ReplayScenePart(mesh=ReplayMesh.box([0.1, 0.1, 0.1])),)
+    with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
+        log.write_scene(
+            (
+                ReplaySceneBody(
+                    name="obj_main",
+                    parts=box,
+                    role=ReplaySceneBodyRole.OBJECT,
+                    object="obj",
+                    display="beer",
+                ),
+                ReplaySceneBody(
+                    name="cab_1_door_main",
+                    parts=box,
+                    role=ReplaySceneBodyRole.FIXTURE,
+                    object="cab_door",
+                    parent="cab",
+                ),
+                ReplaySceneBody(
+                    name="bowl_main", parts=box, role=ReplaySceneBodyRole.OBJECT, object="bowl"
+                ),
+            )
+        )
+
+    bodies = read_replay_log(path).bodies
+
+    assert [(body.display, body.parent) for body in bodies] == [
+        ("beer", None),
+        (None, "cab"),
+        (None, None),
+    ]
+
+
 def test_the_header_keeps_the_fingertip_pads(tmp_path):
     path = tmp_path / "episode.replay"
     pads = (

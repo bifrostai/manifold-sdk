@@ -256,12 +256,18 @@ class ReplaySceneBody:
     or is a fixture, such as a table. `object` is the task's name for the body, the
     name that the hooks' facts use, such as `akita_black_bowl_1`. Both are None when
     the simulator has no label for the body, and in a log written before they existed.
+    `display` is the words a person reads for the task's name in this episode, such as
+    `beer` for `obj`, or None when the task's name reads well as it is. `parent` is the
+    task's name for the fixture that the body is a part of, such as `stove` for
+    `stove_knob_front_left`, or None for a body that is not a part of a named fixture.
     """
 
     name: str
     parts: tuple[ReplayScenePart, ...]
     role: ReplaySceneBodyRole | None = None
     object: str | None = None
+    display: str | None = None
+    parent: str | None = None
 
 
 @dataclass(frozen=True, eq=False)
@@ -588,6 +594,8 @@ class ReplayLogWriter:
                         # Left out when unknown, so older readers still parse the scene.
                         **({"role": str(body.role)} if body.role is not None else {}),
                         **({"object": body.object} if body.object is not None else {}),
+                        **({"display": body.display} if body.display is not None else {}),
+                        **({"parent": body.parent} if body.parent is not None else {}),
                     }
                     for body in bodies
                 ]
@@ -1076,12 +1084,20 @@ def _read_scene(payload: dict[str, Any]) -> tuple[ReplaySceneBody, ...]:
             raise ValueError(f"unknown scene body role {role!r}")
         if name is not None and not isinstance(name, str):
             raise ValueError(f"a scene body's 'object' must be a string, not {name!r}")
+        display = node.get("display")
+        if display is not None and not isinstance(display, str):
+            raise ValueError(f"a scene body's 'display' must be a string, not {display!r}")
+        parent = node.get("parent")
+        if parent is not None and not isinstance(parent, str):
+            raise ValueError(f"a scene body's 'parent' must be a string, not {parent!r}")
         bodies.append(
             ReplaySceneBody(
                 name=node["name"],
                 parts=tuple(_read_part(part) for part in raw_parts),
                 role=ReplaySceneBodyRole(role) if role is not None else None,
                 object=name,
+                display=display,
+                parent=parent,
             )
         )
     return tuple(bodies)
