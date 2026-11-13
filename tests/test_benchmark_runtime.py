@@ -28,10 +28,10 @@ from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
 from manifold.core.benchmark import Benchmark
-from manifold.core.embodiment import JointActionSpace, UnifiedActionSpace
+from manifold.core.embodiment import CompositeActionSpace, JointActionSpace, UnifiedActionSpace
 from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
-from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE
+from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE, PANDA_OMRON_WHOLE_BODY
 from manifold.replay import (
     FailureEvent,
     FailureType,
@@ -781,6 +781,49 @@ def test_the_replay_records_the_gripper_commands_and_derives_each_grasp(tmp_path
     assert [step.scalars["grasp"] for step in log.steps] == [0.0, 0.0, 1.0, 0.0]
 
 
+class _WholeBodyGripper(_Policy):
+    """Answers a PandaOmron whole-body action whose arm opens, shuts, then opens its gripper.
+
+    The arm's 7 values come first, then the base's 3, the torso's 1 and the mode slot.
+    """
+
+    def __init__(self, address: str, benchmark: object, image_format: str) -> None:
+        super().__init__(address, benchmark, image_format)
+        self._commands = iter([-1.0, 1.0, -1.0])
+
+    def infer(self, observation: Observation) -> Action:
+        values = np.zeros(12, dtype=np.float32)
+        values[:3] = 0.25
+        values[6] = next(self._commands)
+        values[7:10] = 0.75
+        return Action(values=values)
+
+
+def test_the_replay_reads_the_gripper_from_a_whole_body_actions_arm(tmp_path, monkeypatch):
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**_SPEC, "embodiment": PANDA_OMRON_WHOLE_BODY.model_dump(mode="json")}
+    session = _Session(_task(tmp_path, (0,)))
+    _run_client(
+        BenchmarkConfig.model_validate(raw),
+        _touching_hooks(),
+        session,
+        monkeypatch,
+        _WholeBodyGripper,
+    )
+
+    ((_, artifacts),) = session.completed
+    log = read_replay_log(artifacts[0][0])
+    assert [[type(event).__name__ for event in step.events] for step in log.steps] == [
+        ["EpisodeStartedEvent"],
+        ["GripperTouchingEvent"],
+        ["GripperCommandedEvent", "NoteEvent", "GraspedEvent"],
+        ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
+    ]
+    # The arm's own values, not the base's, are its command.
+    assert [step.scalars["gripper"] for step in log.steps] == [0.0, -1.0, 1.0, -1.0]
+    assert [step.scalars["ee_pos_x"] for step in log.steps] == [0.0, 0.25, 0.25, 0.25]
+
+
 def test_the_replay_plots_the_action_the_robot_and_the_task(tmp_path, monkeypatch):
     session = _Session(_task(tmp_path, (0,)))
     _run_client(_config({"type": "single"}), _touching_hooks(), session, monkeypatch, _Gripper)
@@ -1054,6 +1097,21 @@ def test_the_upright_image_pipeline_turns_a_camera_upright_and_into_rgb(orientat
 
     np.testing.assert_array_equal(result.sensors[CameraName.AGENTVIEW], upright)
     np.testing.assert_array_equal(observation.sensors[CameraName.AGENTVIEW], stored)
+
+
+def test_the_replay_reads_the_arm_from_its_place_in_a_whole_body_action() -> None:
+    whole_body = PANDA_OMRON_WHOLE_BODY.action
+    assert isinstance(whole_body, CompositeActionSpace)
+    arm, base, torso = whole_body.groups
+    recorder = _recorder_for(whole_body.model_copy(update={"groups": (base, arm, torso)}))
+    # The base's 3 values come first, then the arm's 7, the torso's 1 and the mode slot.
+    values = np.array([9, 9, 9, 0.1, 0.2, 0.3, 0, 0, 0, 1.0, 9, 0], dtype=np.float32)
+
+    scalars = {
+        scalar.name: scalar.value for scalar in recorder._action_scalars(Action(values=values))
+    }
+
+    assert (scalars["gripper"], scalars["ee_pos_x"]) == (1.0, np.float32(0.1))
 
 
 def _recorder_for(action_space) -> _ReplayRecorder:
