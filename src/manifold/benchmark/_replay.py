@@ -227,7 +227,10 @@ class _ReplayRecorder:
             for body in bodies
             if body.role == ReplaySceneBodyRole.OBJECT and body.object is not None
         }
-        self._objects = frozenset(self._object_bodies.values())
+        soft = (
+            self._simulator.replay_soft_objects(self._env_id) if self._simulator is not None else ()
+        )
+        self._objects = frozenset(self._object_bodies.values()) | frozenset(soft)
         self._last_position = {}
         self._still_steps = {}
         self._rest_height = {}
