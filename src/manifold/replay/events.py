@@ -254,9 +254,9 @@ class StackedEvent(FactEvent):
 class StageReachedEvent(RelationFactEvent):
     """`object` reached `reference`, a named stage of the benchmark's own progress check.
 
-    A benchmark that scores partial credit through ordered stages records each stage
-    that its tracker marks reached. The fact holds from that step to the end of the
-    episode.
+    The fact holds while the benchmark's check holds. A benchmark whose tracker marks
+    each stage reached once, such as one that scores partial credit through ordered
+    stages, keeps the fact holding to the end of the episode.
     """
 
     event_type: Literal["stage_reached"] = "stage_reached"
