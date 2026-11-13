@@ -152,6 +152,18 @@ class TurnedOnEvent(ObjectFactEvent):
     event_type: Literal["turned_on"] = "turned_on"
 
 
+class MovedBySceneEvent(ObjectFactEvent):
+    """Something other than the robot is moving `object`.
+
+    A conveyor carrying it or the benchmark placing it are examples. While it holds, a
+    grader does not count the object's moves as the object moving on its own. A move
+    the robot touches still counts as the robot's. Set it while the scene moves the
+    object, and clear it once the scene lets go.
+    """
+
+    event_type: Literal["moved_by_scene"] = "moved_by_scene"
+
+
 class RelationFactEvent(FactEvent):
     """A fact about `object` compared with `reference` started or stopped holding."""
 
@@ -327,6 +339,7 @@ ManifoldEvent = Annotated[
     | OpenEvent
     | ClosedEvent
     | TurnedOnEvent
+    | MovedBySceneEvent
     | InsideEvent
     | OutsideEvent
     | OnEvent
