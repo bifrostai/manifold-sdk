@@ -219,6 +219,26 @@ class TouchingEvent(RelationFactEvent):
     event_type: Literal["touching"] = "touching"
 
 
+class NearEvent(RelationFactEvent):
+    """`object` is near `reference`, within the benchmark's own distance.
+
+    The benchmark decides the distance and the points it measures between, such as
+    the gripper's tip and an object's centre.
+    """
+
+    event_type: Literal["near"] = "near"
+
+
+class FacingEvent(RelationFactEvent):
+    """`object` faces `reference`, within the benchmark's own angle.
+
+    The benchmark decides the angle and the directions it compares, such as a robot
+    base's heading and the heading from which a fixture is reached.
+    """
+
+    event_type: Literal["facing"] = "facing"
+
+
 class StackedEvent(FactEvent):
     """`objects` are stacked on one another.
 
@@ -337,6 +357,8 @@ ManifoldEvent = Annotated[
     | InFrontOfEvent
     | BehindEvent
     | TouchingEvent
+    | NearEvent
+    | FacingEvent
     | StackedEvent
     | StageReachedEvent
     | GripperCommandedEvent
