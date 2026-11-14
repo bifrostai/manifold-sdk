@@ -53,7 +53,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 _logger = logging.getLogger(__name__)
 
@@ -139,12 +139,16 @@ class SapienSimulator(Simulator):
     def post_step(self) -> None:
         """Keep nothing, because each replay method reads the env when it is called."""
 
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
+    def replay_bodies(
+        self, env_id: int, task_bodies: Mapping[str, str]
+    ) -> tuple[ReplaySceneBody, ...]:
         """Each body with a drawn shape, read again at the start of each episode.
 
         A SAPIEN 3 scene has `get_entities`, and a SAPIEN 2 scene does not. This
         method also finds the cameras and the robot's joints, and caches them for the
         episode.
+
+        This simulator does not rename its bodies, so it ignores `task_bodies`.
         """
         scene = self._scene(env_id)
         if hasattr(scene, "get_entities"):

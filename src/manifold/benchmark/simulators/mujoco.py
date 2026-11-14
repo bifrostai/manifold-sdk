@@ -46,7 +46,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
 
 _logger = logging.getLogger(__name__)
@@ -162,12 +162,15 @@ class MujocoSimulator(Simulator):
     def post_step(self) -> None:
         """Keep nothing, because each replay method reads the env when it is called."""
 
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
+    def replay_bodies(
+        self, env_id: int, task_bodies: Mapping[str, str]
+    ) -> tuple[ReplaySceneBody, ...]:
         """Each body with a drawn geom, read again at the start of each episode.
 
         A task can lay out its objects again on each reset. This method therefore
         also reads the joints, the objects and the contact bodies again, and caches
-        them for the episode.
+        them for the episode. Each body in `task_bodies`, and each body under it in the
+        model's body tree, takes the task's name for it.
         """
         sim = self._sim(env_id)
         model = sim.model
@@ -204,6 +207,7 @@ class MujocoSimulator(Simulator):
             )
             for body_id, name in enumerate(names)
         }
+        labels = self._task_labels(model, names, labels, task_bodies)
         cache = _MujocoEpisodeCache(
             body_ids=tuple(sorted(parts)),
             arm_qpos=qpos["arm"],
@@ -433,6 +437,57 @@ class MujocoSimulator(Simulator):
         suffix = self._config.object_body_suffix
         found = {name[: -len(suffix)] for name in names if name.endswith(suffix) and name != suffix}
         return tuple(sorted(found, key=len, reverse=True))
+
+    @staticmethod
+    def _task_labels(
+        model: Any,
+        names: list[str],
+        labels: dict[int, tuple[ReplaySceneBodyRole, str | None]],
+        task_bodies: Mapping[str, str],
+    ) -> dict[int, tuple[ReplaySceneBodyRole, str | None]]:
+        """`labels` with each body in `task_bodies`, and each body under it, renamed.
+
+        Each takes the task's name for the body in `task_bodies`. The bodies under a
+        named fixture are its parts, such as its doors, handles and knobs. Each part
+        becomes a fixture with the fixture's name, a hinged or sliding part too, which
+        `_object_bodies` counts among the objects. The bodies of a named object keep
+        their roles. When the model has no body that `task_bodies` maps a name to, the
+        labels stay as they are, with a warning, because the labels only change the
+        replay.
+        """
+        ids = {name: body_id for body_id, name in enumerate(names)}
+        parent_ids = np.asarray(model.body_parentid, dtype=np.int64).reshape(-1)
+        renamed = dict(labels)
+        for name, body in task_bodies.items():
+            target = ids.get(body)
+            if target is None:
+                _logger.warning(
+                    "the scene keeps its labels for %r, because the model has no body %r",
+                    name,
+                    body,
+                )
+                continue
+            role = labels[target][0]
+            for member in (target, *MujocoSimulator._descendants(parent_ids, target)):
+                member_role = (
+                    ReplaySceneBodyRole.FIXTURE
+                    if role is ReplaySceneBodyRole.FIXTURE
+                    else labels[member][0]
+                )
+                renamed[member] = (member_role, name)
+        return renamed
+
+    @staticmethod
+    def _descendants(parent_ids: np.ndarray, body_id: int) -> list[int]:
+        """The ids of the bodies under `body_id` in the model's body tree.
+
+        MuJoCo numbers each body after its parent, so one pass in id order finds them.
+        """
+        under = {body_id}
+        for child in range(body_id + 1, len(parent_ids)):
+            if int(parent_ids[child]) in under:
+                under.add(child)
+        return sorted(under - {body_id})
 
     def _robot_parts(self, model: Any) -> dict[int, str]:
         """Each body of the gripper as `GRIPPER`, and each body of the arm as `ARM`."""

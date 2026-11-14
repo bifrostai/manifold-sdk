@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any, cast
 
@@ -115,6 +115,13 @@ class ResetResult:
     benchmark sets `config.run.max_steps` to null. The Client raises an error if both
     the hooks and the config set a limit. A benchmark whose tasks use the config's
     limit passes None.
+
+    `task_bodies` maps a name that the hooks' facts use to the simulator's name for the
+    body that the task picked for it in this episode, such as
+    `{"cab": "cab_2_main_group_main"}`. The replay's scene gives that body, and each
+    body under it, the task's name, so that the replay records a touch of a cabinet's
+    handle as a touch of `cab`. A benchmark whose simulator already labels each body
+    with the facts' names leaves it empty.
     """
 
     observation: Observation
@@ -123,6 +130,7 @@ class ResetResult:
     attributes: dict[str, str]
     events: tuple[ManifoldEvent, ...]
     max_steps: int | None
+    task_bodies: dict[str, str] = field(default_factory=dict)
 
 
 def _log_unsupported_versions(simulator: Simulator) -> None:

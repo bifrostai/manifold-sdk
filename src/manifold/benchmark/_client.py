@@ -367,6 +367,7 @@ class Client:
                 episode.upright_observation,
                 result.attributes,
                 self._events(result.events, episode.logger),
+                result.task_bodies,
             )
             self._publish_live_view(env_id, episode)
 

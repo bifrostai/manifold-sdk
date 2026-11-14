@@ -60,6 +60,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from manifold.benchmark.config import BenchmarkConfig
@@ -204,11 +205,13 @@ class _ReplayRecorder:
         observation: Observation,
         attributes: dict[str, str],
         events: tuple[ManifoldEvent, ...],
+        task_bodies: Mapping[str, str],
     ) -> None:
         """Open the episode's log, and write its scene and its first frame.
 
         The scalars of the first frame become the log's channels. Later frames write
-        the same scalars.
+        the same scalars. `task_bodies` is the reset's: the scene gives each body in it
+        the task's name for it.
         """
         self._step = 0
         self._latest = {}
@@ -220,7 +223,11 @@ class _ReplayRecorder:
         self._succeeded = False
         self._previous = None
         self._touching = frozenset()
-        bodies = self._simulator.replay_bodies(self._env_id) if self._simulator is not None else ()
+        bodies = (
+            self._simulator.replay_bodies(self._env_id, task_bodies)
+            if self._simulator is not None
+            else ()
+        )
         bodies = tuple(_boxed(body) for body in bodies)
         self._object_bodies = {
             body.name: body.object

@@ -52,10 +52,15 @@ _CONFIG = BenchmarkMujocoSimulatorConfig(
 )
 
 
-def _env(geoms: list[dict], joints: tuple[tuple[str, int], ...] = ()) -> SimpleNamespace:
+def _env(
+    geoms: list[dict],
+    joints: tuple[tuple[str, int], ...] = (),
+    parents: dict[int, int] | None = None,
+) -> SimpleNamespace:
     """An env whose handle holds `geoms`, each on its own body, and hinge `joints` on bodies.
 
-    Body 0 is the world. Geom `i` is on body `i + 1`.
+    Body 0 is the world. Geom `i` is on body `i + 1`. `parents` maps a body to the body
+    it hangs from, and any other body hangs from the world.
     """
     count = len(geoms)
     bodies = {0: "world", **{index + 1: geom["body"] for index, geom in enumerate(geoms)}}
@@ -78,6 +83,9 @@ def _env(geoms: list[dict], joints: tuple[tuple[str, int], ...] = ()) -> SimpleN
         geom_rgba=np.tile([0.5, 0.5, 0.5, 1.0], (count, 1)),
         geom_matid=np.full(count, -1),
         body_jntnum=jntnum,
+        body_parentid=np.array(
+            [0, *((parents or {}).get(body_id, 0) for body_id in range(1, count + 1))]
+        ),
         jnt_qposadr=np.arange(len(joints)),
         jnt_dofadr=np.arange(len(joints)),
         body=lambda body_id: SimpleNamespace(name=bodies.get(body_id, "")),
@@ -120,7 +128,7 @@ def test_the_scene_holds_the_bodies_with_a_geom_in_the_groups_given():
     simulator = _attached(env)
 
     assert isinstance(simulator, Simulator)
-    assert [body.name for body in simulator.replay_bodies(0)] == ["robot0_link0", "lid_handle"]
+    assert [body.name for body in simulator.replay_bodies(0, {})] == ["robot0_link0", "lid_handle"]
 
 
 def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
@@ -137,7 +145,7 @@ def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
         joints=(("robot0_joint1", 1), ("bowl_joint0", 2), ("drawer_slide", 4)),
     )
 
-    labels = {body.name: (body.role, body.object) for body in _attached(env).replay_bodies(0)}
+    labels = {body.name: (body.role, body.object) for body in _attached(env).replay_bodies(0, {})}
 
     assert labels == {
         "robot0_link0": (ReplaySceneBodyRole.ROBOT, None),
@@ -148,6 +156,61 @@ def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
         "stove_1_main": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
         "stove_1_burner": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
     }
+
+
+def _cabinet_env() -> SimpleNamespace:
+    """A robot, a cabinet whose door holds a handle and swings on a hinge, a counter and a lid."""
+    return _env(
+        [
+            {"body": "robot0_link0", "group": 1},
+            {"body": "cab_2_main", "group": 1},
+            {"body": "cab_2_hinge", "group": 1},
+            {"body": "cab_2_door_main", "group": 1},
+            {"body": "cab_2_door_handle_main", "group": 1},
+            {"body": "counter_1_main", "group": 1},
+            {"body": "lid_main", "group": 1},
+        ],
+        joints=(("robot0_joint1", 1), ("cab_2_hinge_joint", 3), ("lid_joint0", 7)),
+        parents={3: 2, 4: 3, 5: 4},
+    )
+
+
+def test_a_named_fixture_and_each_body_under_it_take_the_tasks_name():
+    simulator = _attached(_cabinet_env())
+
+    bodies = simulator.replay_bodies(0, {"cab": "cab_2_main"})
+
+    assert {body.name: (body.role, body.object) for body in bodies} == {
+        "robot0_link0": (ReplaySceneBodyRole.ROBOT, None),
+        "cab_2_main": (ReplaySceneBodyRole.FIXTURE, "cab"),
+        # The hinged door, which a scene without task names leaves unnamed.
+        "cab_2_hinge": (ReplaySceneBodyRole.FIXTURE, "cab"),
+        "cab_2_door_main": (ReplaySceneBodyRole.FIXTURE, "cab"),
+        "cab_2_door_handle_main": (ReplaySceneBodyRole.FIXTURE, "cab"),
+        "counter_1_main": (ReplaySceneBodyRole.FIXTURE, "counter_1"),
+        "lid_main": (ReplaySceneBodyRole.OBJECT, "lid"),
+    }
+
+
+def test_a_named_object_keeps_its_role():
+    simulator = _attached(_cabinet_env())
+
+    (lid,) = (
+        body
+        for body in simulator.replay_bodies(0, {"blender_lid": "lid_main"})
+        if body.name == "lid_main"
+    )
+
+    assert (lid.role, lid.object) == (ReplaySceneBodyRole.OBJECT, "blender_lid")
+
+
+def test_a_task_body_that_the_model_lacks_keeps_the_scenes_labels(caplog):
+    simulator = _attached(_cabinet_env())
+
+    bodies = simulator.replay_bodies(0, {"cab": "cab_9_main"})
+
+    assert {body.name: body.object for body in bodies}["cab_2_main"] == "cab_2"
+    assert "has no body 'cab_9_main'" in caplog.text
 
 
 def test_the_contacts_name_the_arm_and_the_gripper_and_what_each_presses_on(monkeypatch):
@@ -173,7 +236,7 @@ def test_the_contacts_name_the_arm_and_the_gripper_and_what_each_presses_on(monk
         sys.modules, "mujoco", SimpleNamespace(mjtGeom=mjtGeom, mj_contactForce=contact_force)
     )
     simulator = _attached(env)
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     # The gripper touching the bowl is the hooks' to report, and 0.05 N is no touch.
     assert simulator.replay_contacts(0) == {("arm", "bowl"), ("gripper", "table")}
@@ -182,12 +245,12 @@ def test_the_contacts_name_the_arm_and_the_gripper_and_what_each_presses_on(monk
 def test_a_drawn_plane_is_left_out_of_the_scene():
     simulator = _attached(_env([{"body": "floor", "group": 1, "type": _PLANE}]))
 
-    assert simulator.replay_bodies(0) == ()
+    assert simulator.replay_bodies(0, {}) == ()
 
 
 def test_the_poses_are_each_scene_bodys_world_pose_in_xyzw():
     simulator = _attached(_env([{"body": "link0", "group": 1}, {"body": "marker", "group": 3}]))
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     poses = simulator.replay_poses(0)
 
@@ -216,7 +279,7 @@ def test_the_readings_sort_the_joints_into_the_arm_the_gripper_and_the_objects()
         joints=(("robot0_joint1", 1), ("gripper0_finger_joint", 2), ("bowl_1_joint0", 3)),
     )
     simulator = _attached(env)
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
 
     scalars = {scalar.name: scalar for scalar in simulator.replay_scalars(0, np.zeros(3))}
 
@@ -231,7 +294,7 @@ def test_the_readings_sort_the_joints_into_the_arm_the_gripper_and_the_objects()
 def test_each_read_uses_the_handle_that_the_env_has_now():
     env = _env([{"body": "robot0_link0", "group": 1}])
     simulator = _attached(env)
-    simulator.replay_bodies(0)
+    simulator.replay_bodies(0, {})
     # robosuite builds a new handle on each reset, and frees the old one.
     replaced = _env([{"body": "robot0_link0", "group": 1}]).env.sim
     replaced.data.xpos = replaced.data.xpos + 10.0

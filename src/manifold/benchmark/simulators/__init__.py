@@ -17,7 +17,7 @@ from manifold.lib.compat import assert_never
 from manifold.replay import ReplayMesh, ReplayScenePart
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import numpy as np
 
@@ -112,8 +112,15 @@ class Simulator(ABC):
         """
 
     @abstractmethod
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
-        """Each body of env `env_id`'s scene with its meshes, read at the start of an episode."""
+    def replay_bodies(
+        self, env_id: int, task_bodies: Mapping[str, str]
+    ) -> tuple[ReplaySceneBody, ...]:
+        """Each body of env `env_id`'s scene with its meshes, read at the start of an episode.
+
+        `task_bodies` is the episode's `ResetResult.task_bodies`. Each body in it takes
+        the task's name for it in the scene, and so do the bodies under it. A simulator
+        that cannot rename its bodies ignores it.
+        """
 
     @abstractmethod
     def replay_poses(self, env_id: int) -> dict[str, ReplayPose]:

@@ -71,7 +71,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from manifold.benchmark.config import BenchmarkConfig
 
@@ -354,13 +354,17 @@ class IsaacSimSimulator(Simulator):
         """Drop the pose tensors copied to the host since the previous reset or step."""
         self._host_tensors.clear()
 
-    def replay_bodies(self, env_id: int) -> tuple[ReplaySceneBody, ...]:
+    def replay_bodies(
+        self, env_id: int, task_bodies: Mapping[str, str]
+    ) -> tuple[ReplaySceneBody, ...]:
         """Each body of the env's USD prim with its drawn parts, read again for each episode.
 
         Each part's vertices are in its body's frame. A body that Isaac Lab tracks
         is framed at the pose that Isaac Lab reports, and a fixed body at the
         pose of its prim on the stage. `replay_bodies` also fills the episode cache
         that the other replay methods read.
+
+        This simulator does not rename its bodies, so it ignores `task_bodies`.
         """
         # The SDK does not depend on Isaac Sim. An Isaac Sim benchmark image installs it.
         from pxr import Usd, UsdGeom, UsdPhysics, UsdShade  # ty: ignore[unresolved-import]
