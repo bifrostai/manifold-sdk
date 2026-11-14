@@ -26,6 +26,7 @@ import numpy as np
 from manifold.benchmark.simulators import GRIPPER, bounding_box_part
 from manifold.core.conventions import RotationFormat, ee_step_layout
 from manifold.core.embodiment.action_space import (
+    CompositeActionSpace,
     EEActionSpace,
     JointActionSpace,
 )
@@ -115,13 +116,19 @@ def _event_key(event: FactEvent) -> tuple[Any, ...]:
     return (type(event), *event.model_dump(exclude={"is_active"}).values())
 
 
-def _arm_action(action: Any) -> EEActionSpace | JointActionSpace | None:
-    """Return `action` if it is an end effector or joint action space, or None.
+def _arm_action(action: Any) -> tuple[EEActionSpace | JointActionSpace, slice] | None:
+    """Return the arm part of `action` and where its values sit in an action, or None.
 
-    For any other action, such as a unified action, the replay plots no command.
+    An end effector or joint action space is all arm. A whole-body action's arm is its first
+    end effector or joint group, such as a mobile robot's arm before its base and torso. For
+    any other action, such as a unified action, the replay plots no command.
     """
     if isinstance(action, (EEActionSpace, JointActionSpace)):
-        return action
+        return action, slice(0, action.expected_length())
+    if isinstance(action, CompositeActionSpace):
+        for group, (_, start, stop) in zip(action.groups, action.group_slices(), strict=True):
+            if isinstance(group, (EEActionSpace, JointActionSpace)):
+                return group, slice(start, stop)
     return None
 
 
@@ -159,7 +166,10 @@ class _ReplayRecorder:
         self._simulator = simulator
         self._env_id = env_id
         self._action = config.spec.embodiment.action
-        self._arm = _arm_action(self._action)
+        arm = _arm_action(self._action)
+        self._arm = arm[0] if arm is not None else None
+        # Where the arm's values sit in an action.
+        self._arm_slice = arm[1] if arm is not None else slice(0)
         self._gripper = self._arm.gripper if self._arm is not None else None
         self._log: ReplayLogWriter | None = None
         self._step = 0
@@ -527,7 +537,7 @@ class _ReplayRecorder:
         """The gripper command of the first arm, or None if the action has no gripper."""
         if action is None or self._gripper is None:
             return None
-        values = self._action_values(action)
+        values = self._action_values(action)[self._arm_slice]
         if isinstance(self._arm, EEActionSpace):
             position, rotation, _ = ee_step_layout(self._arm.rotation, self._arm.gripper)
             return float(values[position + rotation])
@@ -560,7 +570,7 @@ class _ReplayRecorder:
         `ee_rot_x` to `ee_rot_z`, or as `ee_rot/<i>` if the rotation has other than
         three values. A joint command plots `joint_cmd/<i>`.
         """
-        values = self._action_values(action)
+        values = self._action_values(action)[self._arm_slice]
         space = self._arm
         scalars = []
         if self._gripper is not None:
@@ -692,11 +702,13 @@ class _ReplayRecorder:
         For an end effector command, the commanded position is the command. If the
         command is a delta, the commanded position is the observed position plus the
         command. A joint command follows the same rule for joint angles, against the
-        observed `joint_pos`.
+        observed `joint_pos`. On the high side of a whole-body action's mode slot, a delta
+        adds to the arm's previous target rather than its observed position, so the
+        commanded line is off on those steps.
         """
         space = self._arm
         scalars: list[RerunScalar] = []
-        values = self._action_values(action)
+        values = self._action_values(action)[self._arm_slice]
         if isinstance(space, EEActionSpace) and ee is not None:
             wanted = ee[0] + values[:3] if space.delta else values[:3]
             for index, axis in enumerate("xyz"):
