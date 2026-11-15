@@ -33,6 +33,7 @@ from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE
 from manifold.replay import (
+    EpisodeStartedEvent,
     FailureEvent,
     FailureType,
     GraspedEvent,
@@ -1069,7 +1070,7 @@ def test_a_listed_failure_type_is_recorded_and_named_in_the_header(tmp_path) -> 
     recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
     drop = FailureEvent(failure_type=FailureType.SLIP_DROP, object="cube")
 
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {})
     recorder.record(None, _observation(1), (drop,), success=False, done=True)
     recorder.end()
     log = read_replay_log(replay_log_path(tmp_path, 0))
@@ -1110,7 +1111,7 @@ def test_the_replay_records_when_a_robot_part_starts_and_stops_touching_a_body(t
         BenchmarkConfig.model_validate(_raw_config({"type": "single"})), simulator, 0
     )
 
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {})
     for step in range(1, 4):
         recorder.record(None, _observation(step), (), success=False, done=step == 3)
     recorder.end()
@@ -1185,7 +1186,7 @@ def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[An
         "touch_links": _HAND_LINKS,
     }
     recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), simulator, 0)
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {})
     for step in range(1, steps + 1):
         recorder.record(None, _observation(step), (), success=False, done=step == steps)
     recorder.end()
@@ -1239,10 +1240,26 @@ def test_the_scene_names_the_bodies_that_the_reset_names(tmp_path):
         BenchmarkConfig.model_validate(_raw_config({"type": "single"})), simulator, 0
     )
 
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {"cab": "cab_2_main_group_main"})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {"cab": "cab_2_main_group_main"}, {})
     recorder.end()
 
     assert simulator.task_bodies == [{"cab": "cab_2_main_group_main"}]
+
+
+def test_the_episodes_start_carries_the_resets_display_names(tmp_path):
+    recorder = _ReplayRecorder(
+        BenchmarkConfig.model_validate(_raw_config({"type": "single"})), None, 0
+    )
+
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {"obj": "beer"})
+    recorder.end()
+
+    [started] = [
+        event
+        for event in read_replay_log(replay_log_path(tmp_path, 0)).steps[0].events
+        if isinstance(event, EpisodeStartedEvent)
+    ]
+    assert started.display_names == {"obj": "beer"}
 
 
 def test_the_replay_header_lists_the_configs_fingertip_pads_and_step_length(tmp_path):
@@ -1253,7 +1270,7 @@ def test_the_replay_header_lists_the_configs_fingertip_pads_and_step_length(tmp_
     ]
     recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
 
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {})
     recorder.end()
 
     log = read_replay_log(replay_log_path(tmp_path, 0))
@@ -1264,7 +1281,7 @@ def test_the_replay_header_lists_the_configs_fingertip_pads_and_step_length(tmp_
 def test_a_replay_without_action_plots_names_no_overview_group(tmp_path):
     recorder = _recorder_for(UnifiedActionSpace(width=32, payload=None))
 
-    recorder.begin(tmp_path, 0, _observation(0), {}, (), {})
+    recorder.begin(tmp_path, 0, _observation(0), {}, (), {}, {})
     recorder.end()
 
     assert read_replay_log(replay_log_path(tmp_path, 0)).overview_group is None

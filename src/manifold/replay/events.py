@@ -84,12 +84,15 @@ class EpisodeStartedEvent(_Event):
     """The episode began, with the instruction it was given.
 
     `attributes` names what varies between episodes of one task, such as a
-    perturbation's category and difficulty.
+    perturbation's category and difficulty. `display_names` gives the words a person
+    reads for each name that the task's facts use in this episode, such as `beer` for
+    `obj`.
     """
 
     event_type: Literal["episode_started"] = "episode_started"
     instruction: str
     attributes: dict[str, str] = Field(default_factory=dict)
+    display_names: dict[str, str] = Field(default_factory=dict)
 
 
 class EpisodeEndedEvent(_Event):

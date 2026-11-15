@@ -206,12 +206,14 @@ class _ReplayRecorder:
         attributes: dict[str, str],
         events: tuple[ManifoldEvent, ...],
         task_bodies: Mapping[str, str],
+        display_names: Mapping[str, str],
     ) -> None:
         """Open the episode's log, and write its scene and its first frame.
 
         The scalars of the first frame become the log's channels. Later frames write
-        the same scalars. `task_bodies` is the reset's: the scene gives each body in it
-        the task's name for it.
+        the same scalars. `task_bodies` and `display_names` are the reset's: the scene
+        gives each body in `task_bodies` the task's name for it, and the episode's
+        start carries `display_names`.
         """
         self._step = 0
         self._latest = {}
@@ -240,7 +242,11 @@ class _ReplayRecorder:
         self._rest_height = {}
         self._since_release = {}
         recorded = [
-            EpisodeStartedEvent(instruction=observation.instruction or "", attributes=attributes),
+            EpisodeStartedEvent(
+                instruction=observation.instruction or "",
+                attributes=attributes,
+                display_names=dict(display_names),
+            ),
             *self._events_to_write(events, None),
         ]
         scalars = self._frame_scalars(observation, None, success=False)

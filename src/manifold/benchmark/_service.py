@@ -122,6 +122,11 @@ class ResetResult:
     body under it, the task's name, so that the replay records a touch of a cabinet's
     handle as a touch of `cab`. A benchmark whose simulator already labels each body
     with the facts' names leaves it empty.
+
+    `display_names` maps a name that the hooks' facts use to the words a person reads
+    for it in this episode, such as `{"obj": "beer", "cab": "cabinet"}`. The replay's
+    `EpisodeStartedEvent` carries them, so that failure analysis can show the words in
+    place of the names. A benchmark whose names read well leaves it empty.
     """
 
     observation: Observation
@@ -131,6 +136,7 @@ class ResetResult:
     events: tuple[ManifoldEvent, ...]
     max_steps: int | None
     task_bodies: dict[str, str] = field(default_factory=dict)
+    display_names: dict[str, str] = field(default_factory=dict)
 
 
 def _log_unsupported_versions(simulator: Simulator) -> None:
