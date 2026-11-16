@@ -11,6 +11,8 @@ from __future__ import annotations
 from manifold.replay.events import (
     AboveEvent,
     BehindEvent,
+    BodyAction,
+    BodyCommandedEvent,
     CenteredOnEvent,
     ClosedEvent,
     EpisodeEndedEvent,
@@ -86,6 +88,8 @@ __all__ = [
     "RERUN_ROTATION_ROW",
     "AboveEvent",
     "BehindEvent",
+    "BodyAction",
+    "BodyCommandedEvent",
     "CenteredOnEvent",
     "ClosedEvent",
     "EpisodeEndedEvent",

@@ -28,11 +28,17 @@ from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
 from manifold.core.benchmark import Benchmark
-from manifold.core.embodiment import CompositeActionSpace, JointActionSpace, UnifiedActionSpace
+from manifold.core.embodiment import (
+    BodyPart,
+    CompositeActionSpace,
+    JointActionSpace,
+    UnifiedActionSpace,
+)
 from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE, PANDA_OMRON_WHOLE_BODY
 from manifold.replay import (
+    BodyAction,
     FailureEvent,
     FailureType,
     GraspedEvent,
@@ -815,7 +821,7 @@ def test_the_replay_reads_the_gripper_from_a_whole_body_actions_arm(tmp_path, mo
     log = read_replay_log(artifacts[0][0])
     assert [[type(event).__name__ for event in step.events] for step in log.steps] == [
         ["EpisodeStartedEvent"],
-        ["GripperTouchingEvent"],
+        ["BodyCommandedEvent", "GripperTouchingEvent"],
         ["GripperCommandedEvent", "NoteEvent", "GraspedEvent"],
         ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
     ]
@@ -1112,6 +1118,44 @@ def test_the_replay_reads_the_arm_from_its_place_in_a_whole_body_action() -> Non
     }
 
     assert (scalars["gripper"], scalars["ee_pos_x"]) == (1.0, np.float32(0.1))
+
+
+def test_the_replay_records_when_each_body_part_starts_and_stops_moving() -> None:
+    recorder = _recorder_for(PANDA_OMRON_WHOLE_BODY.action)
+    # The arm's 7 values, then the base's 3, the torso's 1 and the mode slot. A value of
+    # at most 0.1 is still, and the arm and the mode slot never move a body part.
+    commands = [
+        [0.0, 0.0, 0.0, 0.0],
+        [0.5, 0.0, 0.0, 0.0],
+        [0.5, 0.0, 0.0, -0.3],
+        [0.05, -0.08, 0.0, -0.3],
+        [0.0, 0.0, 0.0, 0.0],
+    ]
+
+    events = []
+    for base_and_torso in commands:
+        values = np.full(12, 0.9, dtype=np.float32)
+        values[7:11] = base_and_torso
+        events.append(
+            [
+                (event.part, event.action)
+                for event in recorder._body_commanded_events(Action(values=values))
+            ]
+        )
+
+    assert events == [
+        [],
+        [(BodyPart.MOBILE_BASE, BodyAction.MOVE)],
+        [(BodyPart.TORSO, BodyAction.MOVE)],
+        [(BodyPart.MOBILE_BASE, BodyAction.STOP)],
+        [(BodyPart.TORSO, BodyAction.STOP)],
+    ]
+
+
+def test_the_replay_records_no_body_part_for_an_arm_only_action() -> None:
+    recorder = _recorder_for(FRANKA_JOINT_ABSOLUTE.action)
+
+    assert recorder._body_commanded_events(Action(values=np.ones(8, dtype=np.float32))) == []
 
 
 def _recorder_for(action_space) -> _ReplayRecorder:

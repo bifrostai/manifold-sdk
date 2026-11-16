@@ -7,10 +7,13 @@ from typing import TYPE_CHECKING, get_args
 import numpy as np
 import pytest
 
+from manifold.core.embodiment import BodyPart
 from manifold.replay import (
     REPLAY_LOG_VERSION,
     AboveEvent,
     BehindEvent,
+    BodyAction,
+    BodyCommandedEvent,
     CenteredOnEvent,
     ClosedEvent,
     EpisodeEndedEvent,
@@ -92,6 +95,8 @@ EVERY_TYPE = (
         objects=("red_block", "blue_block"), is_active=True, order=StackOrder.BOTTOM_TO_TOP
     ),
     GripperCommandedEvent(action=GripperAction.CLOSE),
+    BodyCommandedEvent(part=BodyPart.MOBILE_BASE, action=BodyAction.MOVE),
+    BodyCommandedEvent(part=BodyPart.TORSO, action=BodyAction.STOP),
     *(cls(object="plate") for cls in (GripperHitEvent, ObjectTippedEvent, ObjectLeftSceneEvent)),
     ObjectDisplacedEvent(object="ketchup", distance=0.07),
     GripperFullyClosedEvent(),

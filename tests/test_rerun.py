@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from manifold.core.embodiment import BodyPart
 from manifold.replay import (
+    BodyAction,
+    BodyCommandedEvent,
     EpisodeEndedEvent,
     EpisodeStartedEvent,
     GraspedEvent,
@@ -37,6 +40,10 @@ def test_a_vector_becomes_a_scalar_for_each_value_on_one_chart():
         ),
         (EpisodeEndedEvent(success=True), "episode ended at step 7: SUCCESS"),
         (GripperCommandedEvent(action=GripperAction.CLOSE), "gripper close at step 7"),
+        (
+            BodyCommandedEvent(part=BodyPart.MOBILE_BASE, action=BodyAction.MOVE),
+            "mobile_base move at step 7",
+        ),
         (GraspedEvent(object="bowl", is_active=True), "grasp: bowl at step 7"),
         (GraspedEvent(object="bowl", is_active=False), "release at step 7"),
         (NoteEvent(text="sub-task passed", severity=Severity.WARN), "[WARN] sub-task passed"),
