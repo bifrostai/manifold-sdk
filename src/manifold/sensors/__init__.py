@@ -18,6 +18,7 @@ from manifold.sensors.cameras import (
     agentview_right,
     agentview_right_depth,
     over_shoulder_left,
+    over_shoulder_right,
     wrist,
     wrist_depth,
 )
@@ -31,6 +32,7 @@ __all__ = [
     "agentview_right",
     "agentview_right_depth",
     "over_shoulder_left",
+    "over_shoulder_right",
     "wrist",
     "wrist_depth",
 ]
