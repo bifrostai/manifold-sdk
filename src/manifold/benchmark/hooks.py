@@ -14,6 +14,10 @@ Protocol of its Service. It imports the file before the simulator starts, and
 `--check` imports it without a simulator. Some packages load only in a running
 simulator, such as Isaac Lab after Isaac Sim launches. A hooks file imports such a
 package inside each hook that uses it.
+
+`config.spec.sensors` lists only the cameras that the policy and the replay read. The
+hooks build only those cameras into the scene: the Isaac Sim replay records every
+scene camera that the spec does not list.
 """
 
 from __future__ import annotations

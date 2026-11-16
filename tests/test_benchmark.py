@@ -1,4 +1,4 @@
-"""Tests for `Benchmark.gripper_format` and `Benchmark.action_range`.
+"""Tests for `Benchmark.gripper_format`, `Benchmark.action_range` and `Benchmark.with_sensors`.
 
 The action space is a union (EE / joint / unified / composite); `gripper_format` must read
 the gripper convention out of whichever variant is in play, and raise when the
@@ -27,7 +27,7 @@ from manifold.core import (
     UnifiedActionSpace,
     check_compatibility,
 )
-from manifold.core.names import EmbodimentName
+from manifold.core.names import CameraName, EmbodimentName
 from tests._benchmarks import TABLETOP
 
 # The range of robosuite's OSC controller for an axis-angle action with a gripper.
@@ -169,3 +169,26 @@ def test_pairing_does_not_compare_the_gpu_architectures():
         instruction=benchmark.observation_space.instruction,
     )
     assert check_compatibility(policy, benchmark).status is Compatibility.COMPATIBLE
+
+
+def test_with_sensors_keeps_the_named_sensors_in_the_benchmark_order():
+    from manifold.sensors.cameras import agentview, agentview_depth, wrist
+
+    benchmark = _benchmark(EEActionSpace(rotation=RotationFormat.AXIS_ANGLE)).model_copy(
+        update={"sensors": [agentview((8, 8, 3)), agentview_depth((8, 8, 1)), wrist((8, 8, 3))]}
+    )
+
+    selected = benchmark.with_sensors({CameraName.WRIST, CameraName.AGENTVIEW})
+
+    assert [sensor.name for sensor in selected.sensors] == [CameraName.AGENTVIEW, CameraName.WRIST]
+
+
+def test_with_sensors_refuses_a_sensor_the_benchmark_does_not_publish():
+    from manifold.sensors.cameras import wrist
+
+    benchmark = _benchmark(EEActionSpace(rotation=RotationFormat.AXIS_ANGLE)).model_copy(
+        update={"sensors": [wrist((8, 8, 3))]}
+    )
+
+    with pytest.raises(ValueError, match=CameraName.HEAD):
+        benchmark.with_sensors({CameraName.WRIST, CameraName.HEAD})
