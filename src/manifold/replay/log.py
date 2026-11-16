@@ -405,11 +405,11 @@ class ReplayStep:
 
     # A hooks file leaves the index out, and the writer numbers each step it writes.
     index: int = 0
+    # Every body and every camera seen so far, on every step, even where the stored
+    # frame omitted an unchanged one: the reader fills those forward (see
+    # `read_replay_log`), so a consumer reads one pose per body and per camera on
+    # each step and never has to look backwards for the last one written.
     poses: dict[str, ReplayPose] = field(default_factory=dict)
-    # Every camera the log declares, on every step, even where the stored frame
-    # omitted an unchanged one: the reader fills those forward (see
-    # `read_replay_log`), so a consumer reads one pose per camera per step and
-    # never has to look backwards for the last one written.
     extrinsics: dict[str, ReplayPose] = field(default_factory=dict)
     images: dict[str, np.ndarray] = field(default_factory=dict)
     encoded_images: dict[str, ReplayEncodedImage] = field(default_factory=dict)
@@ -517,12 +517,13 @@ class ReplayLogWriter:
         _check_rows(self._channels)
         self._steps = 0
         self._seq = 0
-        # The last extrinsic written per camera, at the precision it was stored at,
-        # so `write_step` can omit one that has not moved. Quantised before the
-        # comparison because a difference float32 cannot hold is not a difference
-        # the log can record, and writing it anyway would store a row that reads
-        # back identical to the one before it.
+        # The last pose written per camera and per body, at the precision it was
+        # stored at, so `write_step` can omit one that has not moved. Quantised
+        # before the comparison because a difference float32 cannot hold is not a
+        # difference the log can record, and writing it anyway would store a row
+        # that reads back identical to the one before it.
         self._last_extrinsics: dict[str, tuple[bytes, bytes]] = {}
+        self._last_poses: dict[str, tuple[bytes, bytes]] = {}
         header: dict[str, Any] = {
             "version": REPLAY_LOG_VERSION,
             "episode_idx": episode_idx,
@@ -610,6 +611,10 @@ class ReplayLogWriter:
         there are none, so a log from a benchmark that records no events is
         byte-for-byte what it was before the field existed.
 
+        `poses` is each body's pose for this step. Pass the full set every step; only
+        the bodies whose pose changed are stored, and the reader fills the rest
+        forward, so a body that never moves stores one row per episode.
+
         `extrinsics` is each camera's camera-to-world pose for this step. Pass the
         full set every step; only the cameras whose pose CHANGED are stored, and
         the reader fills the rest forward. A scene camera bolted to the world
@@ -635,7 +640,9 @@ class ReplayLogWriter:
         self._check_declared(text, ReplayChannelKind.TEXT)
         payload: dict[str, Any] = {
             "index": self._steps,
-            "poses": {name: _pack_pose(pose) for name, pose in poses.items()},
+            "poses": {
+                name: _pack_pose(pose) for name, pose in _moved(poses, self._last_poses).items()
+            },
             "images": {
                 name: _pack_image(array, self._image_format, name=name)
                 for name, array in (images or {}).items()
@@ -643,30 +650,12 @@ class ReplayLogWriter:
             "scalars": {name: float(value) for name, value in (scalars or {}).items()},
             "text": dict(text or {}),
         }
-        moved = self._moved_extrinsics(extrinsics or {})
+        moved = _moved(extrinsics or {}, self._last_extrinsics)
         if moved:
             payload["extrinsics"] = {name: _pack_pose(pose) for name, pose in moved.items()}
         payload["events"] = [event.model_dump(mode="json") for event in events]
         self._write(ReplayFrameType.STEP, payload)
         self._steps += 1
-
-    def _moved_extrinsics(self, extrinsics: Mapping[str, ReplayPose]) -> dict[str, ReplayPose]:
-        """The subset whose stored form differs from the one last written.
-
-        Compared at `_POSE_DTYPE`, not as given: the quantised bytes are what the
-        log holds, so two poses that round to the same float32 are the same row and
-        writing the second would grow the file without telling a reader anything.
-        """
-        moved: dict[str, ReplayPose] = {}
-        for name, pose in extrinsics.items():
-            key = (
-                np.asarray(pose.position, dtype=_POSE_DTYPE).tobytes(),
-                np.asarray(pose.orientation, dtype=_POSE_DTYPE).tobytes(),
-            )
-            if self._last_extrinsics.get(name) != key:
-                self._last_extrinsics[name] = key
-                moved[name] = pose
-        return moved
 
     def close(self) -> None:
         """Close the file. Writing after this raises."""
@@ -710,6 +699,27 @@ def replay_log_path(output_dir: Path, episode_idx: int) -> Path:
     return directory / f"episode-{episode_idx:05d}{REPLAY_LOG_SUFFIX}"
 
 
+def _moved(
+    poses: Mapping[str, ReplayPose], last: dict[str, tuple[bytes, bytes]]
+) -> dict[str, ReplayPose]:
+    """The poses whose stored form differs from the one last written, recorded in `last`.
+
+    Compared at `_POSE_DTYPE`, not as given: the quantised bytes are what the
+    log holds, so two poses that round to the same float32 are the same row and
+    writing the second would grow the file without telling a reader anything.
+    """
+    moved: dict[str, ReplayPose] = {}
+    for name, pose in poses.items():
+        key = (
+            np.asarray(pose.position, dtype=_POSE_DTYPE).tobytes(),
+            np.asarray(pose.orientation, dtype=_POSE_DTYPE).tobytes(),
+        )
+        if last.get(name) != key:
+            last[name] = key
+            moved[name] = pose
+    return moved
+
+
 def read_replay_log(path: Path) -> ReplayLog:
     """Read a log back, stopping at the first incomplete frame.
 
@@ -718,10 +728,10 @@ def read_replay_log(path: Path) -> ReplayLog:
     is complete but malformed is an error, since that is corruption rather than a
     short tail.
 
-    A step's `extrinsics` are stored only where a camera moved (see
-    `ReplayLogWriter.write_step`), and this fills them forward: every step a
-    reader gets carries a pose for every camera seen so far, so a consumer never
-    walks backwards to find the last one written.
+    A step's `poses` and `extrinsics` are stored only where a body or a camera
+    moved (see `ReplayLogWriter.write_step`), and this fills them forward: every
+    step a reader gets carries a pose for every body and every camera seen so far,
+    so a consumer never walks backwards to find the last one written.
 
     Raises:
         ValueError: If the first frame is not a header, the version is one this
@@ -740,6 +750,7 @@ def read_replay_log(path: Path) -> ReplayLog:
         bodies: tuple[ReplaySceneBody, ...] = ()
         steps: list[ReplayStep] = []
         carried: dict[str, ReplayPose] = {}
+        carried_poses: dict[str, ReplayPose] = {}
         for frame in frames:
             kind = frame.get("type")
             payload = frame.get("payload", {})
@@ -749,9 +760,11 @@ def read_replay_log(path: Path) -> ReplayLog:
                 step = _read_step(payload, version)
                 _check_failures_listed(step.events, failure_types)
                 carried.update(step.extrinsics)
+                carried_poses.update(step.poses)
                 # A copy per step, not the shared dict: a consumer that mutates one
-                # step's extrinsics must not rewrite every later step's too.
+                # step's extrinsics or poses must not rewrite every later step's too.
                 step.extrinsics.update(carried)
+                step.poses.update(carried_poses)
                 steps.append(step)
     return ReplayLog(
         version=version,
