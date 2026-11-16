@@ -197,10 +197,11 @@ class MujocoSimulator(Simulator):
         objects = frozenset(object_ids.values())
         names = [self._body_name(model, body_id) for body_id in range(int(model.nbody))]
         owners = self._owners(names)
+        parts_of_fixtures = self._fixture_parts(names, objects, owners)
         labels = {
             body_id: (
-                self._body_role(name, body_id, objects),
-                self._object_name(name, body_id, objects, owners),
+                self._body_role(name, body_id, objects - parts_of_fixtures),
+                self._object_name(name, body_id, objects - parts_of_fixtures, owners),
             )
             for body_id, name in enumerate(names)
         }
@@ -427,6 +428,25 @@ class MujocoSimulator(Simulator):
         if body_id in objects:
             return None
         return next((owner for owner in owners if name.startswith(f"{owner}_")), TABLE)
+
+    def _fixture_parts(
+        self, names: list[str], objects: frozenset[int], owners: tuple[str, ...]
+    ) -> frozenset[int]:
+        """The bodies with a joint that are parts of a fixture, such as a knob or a door.
+
+        A fixture's root body has no joint. A body with a joint and no root suffix that
+        starts with a fixture's name moves on that fixture, so the scene names it for the
+        fixture, as it names the fixture's other bodies.
+        """
+        suffix = self._config.object_body_suffix
+        roots = {name: body_id for body_id, name in enumerate(names)}
+        fixtures = tuple(owner for owner in owners if roots.get(f"{owner}{suffix}") not in objects)
+        return frozenset(
+            body_id
+            for body_id in objects
+            if not names[body_id].endswith(suffix)
+            and any(names[body_id].startswith(f"{owner}_") for owner in fixtures)
+        )
 
     def _owners(self, names: list[str]) -> tuple[str, ...]:
         """The names of the model's root bodies, the longest first."""
