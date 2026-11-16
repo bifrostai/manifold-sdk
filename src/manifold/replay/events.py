@@ -116,14 +116,24 @@ class ObjectFactEvent(FactEvent):
     object: _Name
 
 
-class GraspedEvent(ObjectFactEvent):
-    """The gripper holds `object`, closed on it."""
+class _GripperFactEvent(ObjectFactEvent):
+    """A fact about one gripper and `object` started or stopped holding.
+
+    `gripper` names the gripper: its arm's position among the action's arms, from
+    `"0"`, or the name of a dexterous hand.
+    """
+
+    gripper: _Name
+
+
+class GraspedEvent(_GripperFactEvent):
+    """`gripper` holds `object`, closed on it."""
 
     event_type: Literal["grasped"] = "grasped"
 
 
-class GripperTouchingEvent(ObjectFactEvent):
-    """The gripper is in contact with `object`, whether or not it is closed."""
+class GripperTouchingEvent(_GripperFactEvent):
+    """`gripper` is in contact with `object`, whether or not it is closed."""
 
     event_type: Literal["gripper_touching"] = "gripper_touching"
 
@@ -255,9 +265,10 @@ class StageReachedEvent(RelationFactEvent):
 
 
 class GripperCommandedEvent(_Event):
-    """The policy commanded the gripper open or closed."""
+    """The policy commanded `gripper` open or closed, named by its arm's position from `"0"`."""
 
     event_type: Literal["gripper_commanded"] = "gripper_commanded"
+    gripper: _Name
     action: GripperAction
 
 

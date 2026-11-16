@@ -35,6 +35,7 @@ from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
 from manifold.core.benchmark import Benchmark
+from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import CompositeActionSpace, JointActionSpace, UnifiedActionSpace
 from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
@@ -43,6 +44,7 @@ from manifold.replay import (
     FailureEvent,
     FailureType,
     GraspedEvent,
+    GripperCommandedEvent,
     GripperTouchingEvent,
     NavigatingEvent,
     NoteEvent,
@@ -745,7 +747,7 @@ def _touching_hooks() -> types.SimpleNamespace:
             instruction="lift the toy",
             task_id=task_config["task_id"],
             attributes={"category": "camera"},
-            events=(GripperTouchingEvent(object="toy", is_active=False),),
+            events=(GripperTouchingEvent(gripper="0", object="toy", is_active=False),),
             max_steps=None,
         )
 
@@ -757,7 +759,7 @@ def _touching_hooks() -> types.SimpleNamespace:
             _observation(env.value),
             success=done,
             done=done,
-            events=(GripperTouchingEvent(object="toy", is_active=True), *notes),
+            events=(GripperTouchingEvent(gripper="0", object="toy", is_active=True), *notes),
         )
 
     return types.SimpleNamespace(
@@ -783,8 +785,9 @@ def test_the_replay_records_the_gripper_commands_and_derives_each_grasp(tmp_path
     assert [step.text.get("events") for step in log.steps] == [
         "episode started [category: camera]: lift the toy",
         None,
-        "gripper close at step 2 / [INFO] sub-task passed / grasp: toy at step 2",
-        "gripper open at step 3 / release at step 3 / episode ended at step 3: SUCCESS",
+        "gripper 0 close at step 2 / [INFO] sub-task passed / grasp: toy by gripper 0 at step 2",
+        "gripper 0 open at step 3 / release: toy by gripper 0 at step 3"
+        " / episode ended at step 3: SUCCESS",
     ]
     assert [step.scalars["grasp"] for step in log.steps] == [0.0, 0.0, 1.0, 0.0]
 
@@ -828,7 +831,7 @@ def test_the_replay_reads_the_gripper_from_a_whole_body_actions_arm(tmp_path, mo
         ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
     ]
     # The arm's own values, not the base's, are its command.
-    assert [step.scalars["gripper"] for step in log.steps] == [0.0, -1.0, 1.0, -1.0]
+    assert [step.scalars["gripper/0"] for step in log.steps] == [0.0, -1.0, 1.0, -1.0]
     assert [step.scalars["ee_pos_x"] for step in log.steps] == [0.0, 0.25, 0.25, 0.25]
 
 
@@ -840,13 +843,13 @@ def test_the_replay_plots_the_action_the_robot_and_the_task(tmp_path, monkeypatc
     log = read_replay_log(artifacts[0][0])
     groups = {channel.name: (channel.group, channel.row) for channel in log.channels}
     assert log.overview_group == "Action"
-    assert groups["gripper"] == ("Action", 0)
+    assert groups["gripper/0"] == ("Action", 0)
     assert groups["joint_cmd/6"] == ("Action", 1)
     assert groups["track_j0/commanded"] == ("Robot", None)
-    assert groups["facts/toy_gripper_touching"] == ("Task", None)
+    assert groups["facts/toy_gripper_touching_0"] == ("Task", None)
     assert [step.scalars["joint_cmd/0"] for step in log.steps] == [0.0, 0.5, 0.5, 0.5]
     assert [step.scalars["track_j0/observed"] for step in log.steps] == [0.0, 1.0, 2.0, 3.0]
-    assert [step.scalars["facts/toy_gripper_touching"] for step in log.steps] == [
+    assert [step.scalars["facts/toy_gripper_touching_0"] for step in log.steps] == [
         0.0,
         1.0,
         1.0,
@@ -1263,7 +1266,65 @@ def test_the_replay_reads_the_arm_from_its_place_in_a_whole_body_action() -> Non
         scalar.name: scalar.value for scalar in recorder._action_scalars(Action(values=values))
     }
 
-    assert (scalars["gripper"], scalars["ee_pos_x"]) == (1.0, np.float32(0.1))
+    assert (scalars["gripper/0"], scalars["ee_pos_x"]) == (1.0, np.float32(0.1))
+
+
+# Two arms of 6 joints, each followed by its gripper, as on RoboTwin's ALOHA AgileX.
+_TWO_ARMS = JointActionSpace(dof=12, gripper=GripperFormat.UNSIGNED, arm_count=2)
+
+
+def _two_arm_action(left: float, right: float) -> Action:
+    values = np.zeros(14, dtype=np.float32)
+    values[6], values[13] = left, right
+    return Action(values=values)
+
+
+def test_the_replay_records_each_arms_gripper_and_its_own_grasps(tmp_path):
+    recorder = _recorder_for(_TWO_ARMS)
+    # The right gripper touches the can throughout. The left gripper shuts first, then the
+    # right one, then both open.
+    touch = (
+        GripperTouchingEvent(gripper="0", object="can", is_active=False),
+        GripperTouchingEvent(gripper="1", object="can", is_active=True),
+    )
+    recorder.begin(tmp_path, 0, _observation(0), {}, touch)
+    commands = [(1.0, 1.0), (0.0, 1.0), (0.0, 0.0), (1.0, 1.0)]
+    for step, (left, right) in enumerate(commands, start=1):
+        recorder.record(
+            _two_arm_action(left, right),
+            _observation(step),
+            touch,
+            success=False,
+            done=step == len(commands),
+        )
+    recorder.end()
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+
+    gripper_events = [
+        [
+            (type(event).__name__, event.gripper)
+            for event in step.events
+            if isinstance(event, (GripperCommandedEvent, GraspedEvent))
+        ]
+        for step in log.steps
+    ]
+    # The left gripper's close grasps nothing, because only the right gripper touches the can.
+    assert gripper_events == [
+        [],
+        [],
+        [("GripperCommandedEvent", "0")],
+        [("GripperCommandedEvent", "1"), ("GraspedEvent", "1")],
+        [("GripperCommandedEvent", "0"), ("GripperCommandedEvent", "1"), ("GraspedEvent", "1")],
+    ]
+    assert [step.scalars["gripper/1"] for step in log.steps] == [0.0, 1.0, 1.0, 0.0, 1.0]
+
+
+def test_a_touch_by_a_gripper_the_action_lacks_is_refused(tmp_path):
+    recorder = _recorder_for(_TWO_ARMS)
+    touch = (GripperTouchingEvent(gripper="2", object="can", is_active=True),)
+
+    with pytest.raises(ValueError, match="gripper '2'"):
+        recorder.begin(tmp_path, 0, _observation(0), {}, touch)
 
 
 def _recorder_for(action_space) -> _ReplayRecorder:
@@ -1458,9 +1519,9 @@ def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[An
     return [list(step.events) for step in read_replay_log(replay_log_path(tmp_path, 0)).steps]
 
 
-def _grasps(frames: list[list[Any]]) -> list[tuple[int, bool]]:
+def _grasps(frames: list[list[Any]]) -> list[tuple[int, str, bool]]:
     return [
-        (index, event.is_active)
+        (index, event.gripper, event.is_active)
         for index, events in enumerate(frames)
         for event in events
         if isinstance(event, GraspedEvent)
@@ -1480,11 +1541,11 @@ def test_a_hands_touch_of_an_object_is_the_gripper_touching_it(tmp_path):
     assert touches == [
         [],
         [
-            GripperTouchingEvent(object="cube", is_active=True),
+            GripperTouchingEvent(gripper="left", object="cube", is_active=True),
             TouchingEvent(object="gripper", reference="table", is_active=True),
         ],
         [
-            GripperTouchingEvent(object="cube", is_active=False),
+            GripperTouchingEvent(gripper="left", object="cube", is_active=False),
             TouchingEvent(object="gripper", reference="table", is_active=False),
         ],
     ]
@@ -1503,8 +1564,8 @@ def test_a_hands_touch_of_a_soft_object_is_the_gripper_touching_it(tmp_path):
     ]
     assert touches == [
         [],
-        [GripperTouchingEvent(object="bag", is_active=True)],
-        [GripperTouchingEvent(object="bag", is_active=False)],
+        [GripperTouchingEvent(gripper="left", object="bag", is_active=True)],
+        [GripperTouchingEvent(gripper="left", object="bag", is_active=False)],
     ]
 
 
@@ -1590,7 +1651,7 @@ def test_a_hand_grasps_a_lifted_object_that_its_thumb_and_a_finger_touch(tmp_pat
 
     # The grasp starts once the cube is 2 cm above its rest height, and ends when the hand
     # lets go.
-    assert _grasps(frames) == [(3, True), (5, False)]
+    assert _grasps(frames) == [(3, "left", True), (5, "left", False)]
 
 
 def test_one_finger_alone_never_grasps(tmp_path):
@@ -1607,7 +1668,7 @@ def test_both_hands_grasp_a_lifted_object_without_a_thumb(tmp_path):
     both = frozenset({("left_index", "cube"), ("right_index", "cube")})
     simulator.hand_contacts = [both, both]
 
-    assert _grasps(_hand_steps(tmp_path, simulator, 2)) == [(2, True)]
+    assert _grasps(_hand_steps(tmp_path, simulator, 2)) == [(2, "left", True), (2, "right", True)]
 
 
 def test_a_hand_grasps_again_after_a_short_gap_with_no_new_lift(tmp_path):
@@ -1620,10 +1681,10 @@ def test_a_hand_grasps_again_after_a_short_gap_with_no_new_lift(tmp_path):
     simulator.hand_contacts = [held, held, none, none, held, none, none, none]
 
     assert _grasps(_hand_steps(tmp_path, simulator, 8)) == [
-        (2, True),
-        (3, False),
-        (5, True),
-        (6, False),
+        (2, "left", True),
+        (3, "left", False),
+        (5, "left", True),
+        (6, "left", False),
     ]
 
     # One finger that touches the object within the gap does not hold it.
@@ -1632,4 +1693,7 @@ def test_a_hand_grasps_again_after_a_short_gap_with_no_new_lift(tmp_path):
     brush = frozenset({("left_index", "cube")})
     simulator.hand_contacts = [held, held, held, none, brush, none, none, none]
 
-    assert _grasps(_hand_steps(tmp_path / "brush", simulator, 8)) == [(2, True), (4, False)]
+    assert _grasps(_hand_steps(tmp_path / "brush", simulator, 8)) == [
+        (2, "left", True),
+        (4, "left", False),
+    ]

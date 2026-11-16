@@ -38,6 +38,12 @@ that only the changes. It uses the same object names as the task, and calls the
 gripper `gripper`. `grasped` means the gripper is closed on the object and holds
 it. `gripper_touching` means the gripper is in contact with the object.
 
+A robot can have several grippers, so `grasped`, `gripper_touching` and
+`gripper_commanded` name theirs in a required `gripper` field. An arm's gripper is
+named by the arm's position among the action's arms, from `"0"`, and a dexterous
+hand by its name in the config's touch links. The recorder reads each arm's command
+from the action and derives each gripper's grasps from its own touches and commands.
+
 ## Failures
 
 A benchmark can record a failure event with one of the types listed below.
