@@ -15,12 +15,12 @@ import numpy as np
 
 from manifold.lib.compat import StrEnum
 from manifold.replay.events import (
-    BodyCommandedEvent,
     EpisodeEndedEvent,
     EpisodeStartedEvent,
     GraspedEvent,
     GripperCommandedEvent,
     ManifoldEvent,
+    NavigatingEvent,
     NoteEvent,
 )
 
@@ -83,8 +83,8 @@ def rerun_panel_line(event: ManifoldEvent, step: int) -> str | None:
         return f"episode ended at step {step}: {'SUCCESS' if event.success else 'FAILURE'}"
     if isinstance(event, GripperCommandedEvent):
         return f"gripper {event.action.value} at step {step}"
-    if isinstance(event, BodyCommandedEvent):
-        return f"{event.part.value} {event.action.value} at step {step}"
+    if isinstance(event, NavigatingEvent):
+        return f"navigating {'started' if event.is_active else 'stopped'} at step {step}"
     if isinstance(event, GraspedEvent):
         return (
             f"grasp: {event.object} at step {step}"

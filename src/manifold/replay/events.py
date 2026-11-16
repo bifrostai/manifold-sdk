@@ -14,7 +14,6 @@ from typing import Annotated, Literal
 
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, field_validator
 
-from manifold.core.embodiment.action_space import BodyPart
 from manifold.lib.compat import StrEnum
 
 # The name every benchmark gives the robot's gripper.
@@ -36,13 +35,6 @@ class GripperAction(StrEnum):
 
     OPEN = "open"
     CLOSE = "close"
-
-
-class BodyAction(StrEnum):
-    """Whether the policy commanded a body part, such as a mobile base, to move or to stop."""
-
-    MOVE = "move"
-    STOP = "stop"
 
 
 class StackOrder(StrEnum):
@@ -257,15 +249,15 @@ class GripperCommandedEvent(_Event):
     action: GripperAction
 
 
-class BodyCommandedEvent(_Event):
-    """The policy commanded `part`, such as the mobile base or the torso, to move or to stop.
+class NavigatingEvent(_Event):
+    """The mobile base started (`is_active`) or stopped navigating: travelling or turning.
 
-    Each part starts an episode still.
+    The base starts an episode still. A base still navigating when the episode ends gets
+    no closing event.
     """
 
-    event_type: Literal["body_commanded"] = "body_commanded"
-    part: BodyPart
-    action: BodyAction
+    event_type: Literal["navigating"] = "navigating"
+    is_active: StrictBool
 
 
 class ObjectOccurrenceEvent(_Event):
@@ -359,7 +351,7 @@ ManifoldEvent = Annotated[
     | StackedEvent
     | StageReachedEvent
     | GripperCommandedEvent
-    | BodyCommandedEvent
+    | NavigatingEvent
     | GripperHitEvent
     | ObjectTippedEvent
     | ObjectLeftSceneEvent

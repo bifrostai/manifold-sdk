@@ -28,21 +28,16 @@ from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
 from manifold.core.benchmark import Benchmark
-from manifold.core.embodiment import (
-    BodyPart,
-    CompositeActionSpace,
-    JointActionSpace,
-    UnifiedActionSpace,
-)
+from manifold.core.embodiment import CompositeActionSpace, JointActionSpace, UnifiedActionSpace
 from manifold.core.sensor import Camera, CameraOrientation, ChannelOrder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_JOINT_ABSOLUTE, PANDA_OMRON_WHOLE_BODY
 from manifold.replay import (
-    BodyAction,
     FailureEvent,
     FailureType,
     GraspedEvent,
     GripperTouchingEvent,
+    NavigatingEvent,
     NoteEvent,
     OnEvent,
     ReplayMesh,
@@ -821,7 +816,7 @@ def test_the_replay_reads_the_gripper_from_a_whole_body_actions_arm(tmp_path, mo
     log = read_replay_log(artifacts[0][0])
     assert [[type(event).__name__ for event in step.events] for step in log.steps] == [
         ["EpisodeStartedEvent"],
-        ["BodyCommandedEvent", "GripperTouchingEvent"],
+        ["GripperTouchingEvent"],
         ["GripperCommandedEvent", "NoteEvent", "GraspedEvent"],
         ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
     ]
@@ -1120,49 +1115,63 @@ def test_the_replay_reads_the_arm_from_its_place_in_a_whole_body_action() -> Non
     assert (scalars["gripper"], scalars["ee_pos_x"]) == (1.0, np.float32(0.1))
 
 
-def test_the_replay_records_when_each_body_part_starts_and_stops_moving() -> None:
-    recorder = _recorder_for(PANDA_OMRON_WHOLE_BODY.action)
-    # The arm's 7 values, then the base's 3, the torso's 1 and the mode slot. A value of
-    # at most 0.1 is still, and the arm and the mode slot never move a body part.
-    commands = [
-        [0.0, 0.0, 0.0, 0.0],
-        [0.5, 0.0, 0.0, 0.0],
-        [0.5, 0.0, 0.0, -0.3],
-        [0.05, -0.08, 0.0, -0.3],
-        [0.0, 0.0, 0.0, 0.0],
-    ]
-
-    events = []
-    for base_and_torso in commands:
-        values = np.full(12, 0.9, dtype=np.float32)
-        values[7:11] = base_and_torso
-        events.append(
-            [
-                (event.part, event.action)
-                for event in recorder._body_commanded_events(Action(values=values))
-            ]
-        )
-
-    assert events == [
-        [],
-        [(BodyPart.MOBILE_BASE, BodyAction.MOVE)],
-        [(BodyPart.TORSO, BodyAction.MOVE)],
-        [(BodyPart.MOBILE_BASE, BodyAction.STOP)],
-        [(BodyPart.TORSO, BodyAction.STOP)],
-    ]
-
-
-def test_the_replay_records_no_body_part_for_an_arm_only_action() -> None:
-    recorder = _recorder_for(FRANKA_JOINT_ABSOLUTE.action)
-
-    assert recorder._body_commanded_events(Action(values=np.ones(8, dtype=np.float32))) == []
-
-
 def _recorder_for(action_space) -> _ReplayRecorder:
     embodiment = FRANKA_JOINT_ABSOLUTE.model_copy(update={"action": action_space})
     raw = _raw_config({"type": "single"})
     raw["spec"] = {**raw["spec"], "embodiment": embodiment.model_dump(mode="json")}
     return _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+
+
+def _base(x: float, yaw: float = 0.0) -> Observation:
+    """A PandaOmron observation whose base sits at `x` metres, turned `yaw` radians."""
+    quaternion = [0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)]
+    return Observation(
+        sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
+        state={"base_pose": np.array([x, 0.0, 0.0, *quaternion])},
+    )
+
+
+def _navigating(tmp_path, embodiment, observations) -> list[list[bool]]:
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "embodiment": embodiment.model_dump(mode="json")}
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+    recorder.begin(tmp_path, 0, observations[0], {}, ())
+    for index, observation in enumerate(observations[1:], start=1):
+        recorder.record(None, observation, (), success=False, done=index == len(observations) - 1)
+    recorder.end()
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+    return [
+        [event.is_active for event in step.events if isinstance(event, NavigatingEvent)]
+        for step in log.steps
+    ]
+
+
+def test_the_replay_marks_when_the_base_starts_and_stops_navigating(tmp_path):
+    # At 0.05 s a step, 2 cm a step is 0.4 m/s, and 0.1 radians a step is 115 degrees/s.
+    observations = [_base(0), _base(0), _base(0.02), _base(0.04), _base(0.04), _base(0.04, 0.1)]
+
+    assert _navigating(tmp_path, PANDA_OMRON_WHOLE_BODY, observations) == [
+        [],
+        [],
+        [True],
+        [],
+        [False],
+        [True],
+    ]
+
+
+def test_a_base_that_creeps_slower_than_a_drive_is_not_navigating(tmp_path):
+    # 0.1 mm a step is 2 mm/s, the speed a parked RoboCasa365 base reaches when its arm
+    # pushes on something.
+    observations = [_base(0.0001 * step) for step in range(5)]
+
+    assert _navigating(tmp_path, PANDA_OMRON_WHOLE_BODY, observations) == [[]] * 5
+
+
+def test_a_robot_that_reports_no_base_pose_never_navigates(tmp_path):
+    observations = [_base(0.1 * step) for step in range(3)]
+
+    assert _navigating(tmp_path, FRANKA_JOINT_ABSOLUTE, observations) == [[]] * 3
 
 
 def test_a_listed_failure_type_is_recorded_and_named_in_the_header(tmp_path) -> None:
