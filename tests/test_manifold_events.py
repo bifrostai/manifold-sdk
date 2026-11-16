@@ -64,10 +64,12 @@ EVERY_TYPE = (
         attributes={"category": "camera", "difficulty": "3"},
     ),
     *(
+        cls(gripper="1", object="bowl", is_active=True)
+        for cls in (GraspedEvent, GripperTouchingEvent)
+    ),
+    *(
         cls(object="bowl", is_active=True)
         for cls in (
-            GraspedEvent,
-            GripperTouchingEvent,
             UprightEvent,
             OpenEvent,
             ClosedEvent,
@@ -94,7 +96,7 @@ EVERY_TYPE = (
     StackedEvent(
         objects=("red_block", "blue_block"), is_active=True, order=StackOrder.BOTTOM_TO_TOP
     ),
-    GripperCommandedEvent(action=GripperAction.CLOSE),
+    GripperCommandedEvent(gripper="1", action=GripperAction.CLOSE),
     NavigatingEvent(is_active=True),
     *(cls(object="plate") for cls in (GripperHitEvent, ObjectTippedEvent, ObjectLeftSceneEvent)),
     ObjectDisplacedEvent(object="ketchup", distance=0.07),
@@ -145,8 +147,8 @@ def test_every_type_of_event_round_trips(tmp_path):
 def test_events_stay_on_the_step_they_were_written_on(tmp_path):
     path = tmp_path / "episode.replay"
     grasp, release = (
-        GraspedEvent(object="bowl", is_active=True),
-        GraspedEvent(object="bowl", is_active=False),
+        GraspedEvent(gripper="0", object="bowl", is_active=True),
+        GraspedEvent(gripper="0", object="bowl", is_active=False),
     )
     with ReplayLogWriter(path, episode_idx=0, channels=CHANNELS) as log:
         log.write_step({"bowl": _pose()}, events=[grasp])
@@ -211,7 +213,20 @@ def test_the_stored_type_is_the_facts_name(tmp_path):
 
 def test_a_fact_about_an_object_needs_a_name():
     with pytest.raises(ValueError, match="non-empty"):
-        GraspedEvent(object=" ", is_active=True)
+        GraspedEvent(gripper="0", object=" ", is_active=True)
+
+
+@pytest.mark.parametrize(
+    ("event_class", "fields"),
+    [
+        (GraspedEvent, {"object": "bowl", "is_active": True}),
+        (GripperTouchingEvent, {"object": "bowl", "is_active": True}),
+        (GripperCommandedEvent, {"action": "close"}),
+    ],
+)
+def test_a_gripper_event_names_its_gripper(event_class, fields):
+    with pytest.raises(ValueError, match="gripper"):
+        event_class.model_validate(fields)
 
 
 def test_a_relation_needs_a_named_reference():
@@ -237,7 +252,8 @@ def test_a_stored_event_of_unknown_type_is_refused(tmp_path):
 
 def test_a_stored_fact_with_a_malformed_field_is_refused(tmp_path):
     path = _log_with_step(
-        tmp_path, [{"event_type": "grasped", "object": "bowl", "is_active": "yes"}]
+        tmp_path,
+        [{"event_type": "grasped", "gripper": "0", "object": "bowl", "is_active": "yes"}],
     )
     with pytest.raises(ValueError, match="is_active"):
         read_replay_log(path)
