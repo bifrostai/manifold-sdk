@@ -13,7 +13,13 @@ from manifold.core.adapter import (
     ActionAdapter,
     ObservationAdapter,
 )
-from manifold.core.benchmark import ActionRange, Benchmark, GpuArchitecture
+from manifold.core.benchmark import (
+    ActionRange,
+    Benchmark,
+    EndEffector,
+    EndEffectorType,
+    GpuArchitecture,
+)
 from manifold.core.check import Compatibility, Report, check_compatibility
 from manifold.core.conventions import CameraAxes, Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
@@ -98,6 +104,8 @@ __all__ = [
     "EEObservationSpec",
     "Embodiment",
     "EmbodimentName",
+    "EndEffector",
+    "EndEffectorType",
     "Frame",
     "GpuArchitecture",
     "GripperFormat",

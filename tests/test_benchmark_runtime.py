@@ -249,7 +249,7 @@ def test_the_spec_may_leave_out_the_gpu_architectures():
     assert spec.gpu_architectures == ("sm_86", "compute_86")
 
 
-def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
+def test_the_hello_leaves_out_the_gpu_architectures_and_end_effectors(monkeypatch):
     sent = []
     replies = [{"type": FrameType.READY, "payload": {}}]
     channel = types.SimpleNamespace(
@@ -262,7 +262,11 @@ def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
     )
     monkeypatch.setattr(_client.FrameChannel, "from_socket", staticmethod(lambda _s: channel))
     raw = _raw_config({"type": "single"})
-    raw["spec"] = {**raw["spec"], "gpu_architectures": ["sm_86"]}
+    raw["spec"] = {
+        **raw["spec"],
+        "gpu_architectures": ["sm_86"],
+        "end_effectors": [{"name": "gripper", "end_effector_type": "gripper"}],
+    }
     benchmark = BenchmarkConfig.model_validate(raw).spec
 
     _ClientPolicyConnection("policy:9000", benchmark, "raw")
@@ -270,6 +274,7 @@ def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
     ((frame_type, payload),) = sent
     assert frame_type is FrameType.HELLO
     assert "gpu_architectures" not in payload["benchmark"]
+    assert "end_effectors" not in payload["benchmark"]
 
 
 def test_a_hooks_file_must_define_its_services_hooks():

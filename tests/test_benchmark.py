@@ -18,6 +18,8 @@ from manifold.core import (
     Compatibility,
     EEActionSpace,
     Embodiment,
+    EndEffector,
+    EndEffectorType,
     GpuArchitecture,
     GripperFormat,
     JointActionSpace,
@@ -158,6 +160,51 @@ def test_gpu_architectures_must_be_a_nonempty_list_of_listed_architectures(
 def test_a_repeated_gpu_architecture_is_kept_once():
     benchmark = _tabletop_with_gpu_architectures(["sm_86", "compute_86", "sm_86"])
     assert benchmark.gpu_architectures == (GpuArchitecture.SM_86, GpuArchitecture.COMPUTE_86)
+
+
+def _tabletop_with_end_effectors(end_effectors: object) -> Benchmark:
+    return Benchmark.model_validate(
+        {**TABLETOP.model_dump(mode="json"), "end_effectors": end_effectors}
+    )
+
+
+def test_a_benchmark_declares_no_end_effectors_by_default():
+    assert TABLETOP.end_effectors is None
+    assert TABLETOP.model_dump(mode="json")["end_effectors"] is None
+
+
+def test_end_effectors_round_trip_through_json():
+    benchmark = _tabletop_with_end_effectors(
+        [
+            {"name": "left", "end_effector_type": "hand"},
+            {"name": "right", "end_effector_type": "hand"},
+        ]
+    )
+    assert benchmark.end_effectors == (
+        EndEffector(name="left", end_effector_type=EndEffectorType.HAND),
+        EndEffector(name="right", end_effector_type=EndEffectorType.HAND),
+    )
+    assert Benchmark.model_validate_json(benchmark.model_dump_json()) == benchmark
+
+
+def test_an_empty_list_declares_a_robot_without_end_effectors():
+    assert _tabletop_with_end_effectors([]).end_effectors == ()
+
+
+@pytest.mark.parametrize(
+    "end_effectors",
+    [
+        [{"name": "left", "end_effector_type": "suction"}],
+        [{"name": "", "end_effector_type": "gripper"}],
+        [
+            {"name": "arm", "end_effector_type": "gripper"},
+            {"name": "arm", "end_effector_type": "hand"},
+        ],
+    ],
+)
+def test_end_effectors_need_a_listed_type_and_distinct_names(end_effectors):
+    with pytest.raises(ValidationError):
+        _tabletop_with_end_effectors(end_effectors)
 
 
 def test_pairing_does_not_compare_the_gpu_architectures():
