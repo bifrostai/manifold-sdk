@@ -155,6 +155,21 @@ def over_shoulder_left(
     )
 
 
+def over_shoulder_right(
+    shape: tuple[int, ...],
+    calibration: CameraCalibration | None = None,
+    orientation: CameraOrientation = CameraOrientation.UPRIGHT,
+) -> Camera:
+    """The scene camera behind and to the right of the arm, at the given shape."""
+    return Camera(
+        name=CameraName.OVER_SHOULDER_RIGHT,
+        shape=shape,
+        calibration=calibration,
+        orientation=orientation,
+        mount=Mount.SCENE,
+    )
+
+
 def wrist(
     shape: tuple[int, ...],
     calibration: CameraCalibration | None = None,
@@ -195,6 +210,7 @@ __all__ = [
     "agentview_right",
     "agentview_right_depth",
     "over_shoulder_left",
+    "over_shoulder_right",
     "wrist",
     "wrist_depth",
 ]

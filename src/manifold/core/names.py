@@ -31,6 +31,7 @@ class CameraName(_Name):
     HEAD_RIGHT = "head_right"
     LEFT_WRIST = "left_wrist"
     OVER_SHOULDER_LEFT = "over_shoulder_left"
+    OVER_SHOULDER_RIGHT = "over_shoulder_right"
     RIGHT_WRIST = "right_wrist"
     WRIST = "wrist"
     WRIST_DEPTH = "wrist_depth"

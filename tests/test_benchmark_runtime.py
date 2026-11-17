@@ -3,7 +3,9 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import socket
 import sys
+import threading
 import types
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -21,8 +23,13 @@ from manifold.benchmark import (
     _client,
     load_config,
 )
-from manifold.benchmark.__main__ import _log_by_level, main
-from manifold.benchmark._client import Client, _ClientPolicyConnection, _upright_image_pipeline
+from manifold.benchmark.__main__ import _log_by_level, _render_only_policy_cameras, main
+from manifold.benchmark._client import (
+    Client,
+    _ClientPolicyConnection,
+    _upright_image_pipeline,
+    request_policy_cameras,
+)
 from manifold.benchmark._replay import _boxed, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
@@ -53,7 +60,7 @@ from manifold.replay import (
     replay_log_path,
 )
 from manifold.sensors import CameraName
-from manifold.wire import FrameType, bridge
+from manifold.wire import FrameChannel, FrameType, bridge
 
 if TYPE_CHECKING:
     from manifold.benchmark import WorkerSession
@@ -972,6 +979,150 @@ def test_check_reads_the_config_and_the_hooks_and_writes_the_spec(tmp_path, monk
     spec = Benchmark.model_validate_json((tmp_path / "spec.json").read_text())
     assert spec.name == "toy"
     assert (spec.step_seconds, spec.max_steps, spec.image_format) == (0.05, 5, "jpeg")
+
+
+def _raw_two_camera_config() -> dict:
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {
+        **_SPEC,
+        "sensors": [
+            {"name": "agentview", "shape": [4, 4, 3]},
+            {"name": "over_shoulder_right", "shape": [4, 4, 3]},
+            {"name": "wrist", "shape": [4, 4, 3]},
+        ],
+    }
+    return raw
+
+
+def _two_camera_config() -> BenchmarkConfig:
+    return BenchmarkConfig.model_validate(_raw_two_camera_config())
+
+
+def _sensor_names(config: BenchmarkConfig) -> list[str]:
+    return [str(sensor.name) for sensor in config.spec.sensors]
+
+
+def test_the_spec_keeps_the_cameras_that_the_policy_and_the_replay_read(monkeypatch, caplog):
+    monkeypatch.setattr(
+        "manifold.benchmark.__main__.request_policy_cameras",
+        lambda address: frozenset({"wrist"}),
+    )
+
+    with caplog.at_level(logging.INFO, logger="manifold"):
+        config = _render_only_policy_cameras(_two_camera_config(), "ws://policy:1")
+
+    assert _sensor_names(config) == ["agentview", "wrist"]
+    # The runner's log shows INFO only from the `manifold` loggers.
+    assert {record.name for record in caplog.records} == {"manifold.benchmark"}
+    assert [record.getMessage() for record in caplog.records] == [
+        "the spec publishes the cameras agentview, over_shoulder_right, wrist",
+        "the policy reads the cameras wrist",
+        "rendering agentview, wrist, and dropping over_shoulder_right",
+    ]
+
+
+@pytest.mark.parametrize(
+    "cameras",
+    [None, frozenset({"wrist", "head"}), frozenset({"wrist", "thermal"})],
+    ids=[
+        "a policy that sends no signature",
+        "a listed camera that the spec does not publish",
+        "a camera that this SDK does not list",
+    ],
+)
+def test_the_spec_stays_whole(monkeypatch, caplog, cameras):
+    monkeypatch.setattr(
+        "manifold.benchmark.__main__.request_policy_cameras", lambda address: cameras
+    )
+
+    with caplog.at_level(logging.INFO, logger="manifold"):
+        config = _render_only_policy_cameras(_two_camera_config(), "ws://policy:1")
+
+    assert _sensor_names(config) == ["agentview", "over_shoulder_right", "wrist"]
+    assert caplog.records[-1].getMessage().endswith("so every camera is rendered")
+
+
+def test_the_hooks_start_with_the_cameras_that_the_policy_reads(tmp_path, monkeypatch):
+    (tmp_path / "config.json").write_text(json.dumps(_raw_two_camera_config()))
+    (tmp_path / "hooks.py").write_text(
+        "def on_start(config, logger):\n"
+        "    raise SystemExit([str(sensor.name) for sensor in config.spec.sensors])\n"
+        "def on_load(config, task_config, logger): ...\n"
+        "def on_reset(config, env, task_config, episode_idx, logger): ...\n"
+        "def on_step(config, env, task_config, action, logger): ...\n"
+    )
+    monkeypatch.setattr(sys, "argv", ["manifold.benchmark", str(tmp_path / "config.json")])
+    monkeypatch.setenv("MANIFOLD_SERVER_URL", "ws://policy:1")
+    monkeypatch.setattr(
+        "manifold.benchmark.__main__.request_policy_cameras",
+        lambda address: frozenset({"over_shoulder_right"}),
+    )
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == ["agentview", "over_shoulder_right"]
+
+
+def test_policy_cameras_returns_the_cameras_in_the_policy_signature():
+    from manifold.core import PolicySignature
+    from manifold.embodiments import FRANKA_EE_DELTA
+    from manifold.recipes import serve
+    from manifold.sensors import wrist
+
+    signature = PolicySignature(
+        action_space=FRANKA_EE_DELTA.action, cameras=[wrist((8, 8, 3))], instruction=False
+    )
+    endpoint = types.SimpleNamespace(signature=signature, session=None)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    listening = threading.Event()
+    threading.Thread(
+        target=serve,
+        args=(endpoint,),
+        kwargs={
+            "port": port,
+            "on_event": lambda event: event.startswith("listening on") and listening.set(),
+        },
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    assert request_policy_cameras(f"ws://127.0.0.1:{port}") == {"wrist"}
+
+
+def test_policy_cameras_returns_none_when_the_policy_closes_the_connection():
+    # A policy on an SDK older than GET_SIGNATURE expects HELLO, and closes the
+    # connection on any other frame.
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+
+        def close_on_the_first_frame() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                FrameChannel.from_socket(conn).recv()
+
+        threading.Thread(target=close_on_the_first_frame, daemon=True).start()
+        assert request_policy_cameras(f"127.0.0.1:{listener.getsockname()[1]}") is None
+
+
+def test_request_policy_cameras_refuses_a_reply_other_than_a_signature():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+
+        def reply_with_bye() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                channel = FrameChannel.from_socket(conn)
+                channel.recv()
+                channel.send(FrameType.BYE, {})
+
+        threading.Thread(target=reply_with_bye, daemon=True).start()
+        with pytest.raises(RuntimeError, match="replied to GET_SIGNATURE with 'bye'"):
+            request_policy_cameras(f"127.0.0.1:{listener.getsockname()[1]}")
 
 
 def test_records_below_error_go_to_stdout_and_the_rest_to_stderr(monkeypatch, capsys):

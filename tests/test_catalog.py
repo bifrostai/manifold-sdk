@@ -80,6 +80,7 @@ def test_camera_names_keep_the_strings_that_registered_versions_pair_on():
         "head_right",
         "left_wrist",
         "over_shoulder_left",
+        "over_shoulder_right",
         "right_wrist",
         "wrist",
         "wrist_depth",

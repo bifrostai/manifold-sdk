@@ -89,6 +89,32 @@ def _parse_policy_address(url: str) -> tuple[str, int]:
     return host, int(port)
 
 
+def request_policy_cameras(address: str) -> frozenset[str] | None:
+    """Ask the policy at `address` for its signature, and return the cameras that it reads.
+
+    The benchmark asks before it builds its scene, so that it builds only those cameras.
+    The function returns None when the policy closes the connection, as a policy on an
+    SDK older than GET_SIGNATURE does.
+
+    Raises:
+        RuntimeError: If the policy replies with a frame other than SIGNATURE.
+    """
+    host, port = _parse_policy_address(address)
+    with socket.create_connection((host, port)) as sock:
+        channel = FrameChannel.from_socket(sock)
+        channel.send(FrameType.GET_SIGNATURE, {})
+        reply = channel.recv()
+    if reply is None:
+        return None
+    if reply.get("type") != FrameType.SIGNATURE:
+        raise RuntimeError(
+            f"policy replied to GET_SIGNATURE with {reply.get('type')!r}, not a signature"
+        )
+    # The names stay strings, because a newer policy may read a camera that this SDK
+    # does not list.
+    return frozenset(camera["name"] for camera in reply["payload"]["signature"]["cameras"])
+
+
 class _ClientPolicyConnection:
     """A connection from an env to the policy server, open for the whole run.
 
