@@ -1108,6 +1108,23 @@ def test_policy_cameras_returns_none_when_the_policy_closes_the_connection():
         assert request_policy_cameras(f"127.0.0.1:{listener.getsockname()[1]}") is None
 
 
+def test_request_policy_cameras_refuses_a_reply_other_than_a_signature():
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+
+        def reply_with_bye() -> None:
+            conn, _ = listener.accept()
+            with conn:
+                channel = FrameChannel.from_socket(conn)
+                channel.recv()
+                channel.send(FrameType.BYE, {})
+
+        threading.Thread(target=reply_with_bye, daemon=True).start()
+        with pytest.raises(RuntimeError, match="replied to GET_SIGNATURE with 'bye'"):
+            request_policy_cameras(f"127.0.0.1:{listener.getsockname()[1]}")
+
+
 def test_records_below_error_go_to_stdout_and_the_rest_to_stderr(monkeypatch, capsys):
     monkeypatch.setattr(logging.getLogger(), "handlers", [])
     _log_by_level()
