@@ -133,8 +133,16 @@ def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
             {"body": "study_table", "group": 1},
             {"body": "stove_1_main", "group": 1},
             {"body": "stove_1_burner", "group": 1},
+            {"body": "stove_1_knob_front_left", "group": 1},
+            {"body": "bowl_lid", "group": 1},
         ],
-        joints=(("robot0_joint1", 1), ("bowl_joint0", 2), ("drawer_slide", 4)),
+        joints=(
+            ("robot0_joint1", 1),
+            ("bowl_joint0", 2),
+            ("drawer_slide", 4),
+            ("stove_1_knob_joint", 8),
+            ("bowl_lid_hinge", 9),
+        ),
     )
 
     labels = {body.name: (body.role, body.object) for body in _attached(env).replay_bodies(0)}
@@ -147,6 +155,10 @@ def test_each_body_has_its_role_and_the_tasks_name_for_an_object():
         "study_table": (ReplaySceneBodyRole.FIXTURE, "table"),
         "stove_1_main": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
         "stove_1_burner": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
+        # A knob turns on the stove, so it is a part of the stove, not an object.
+        "stove_1_knob_front_left": (ReplaySceneBodyRole.FIXTURE, "stove_1"),
+        # A hinged part of an object stays an object with no name of its own.
+        "bowl_lid": (ReplaySceneBodyRole.OBJECT, None),
     }
 
 
@@ -247,3 +259,29 @@ def test_a_mujoco_handle_holds_one_env():
 
     with pytest.raises(ValueError, match="one env"):
         simulator.attach(_env([]), [0, 1])
+
+
+def test_a_touch_of_a_fixtures_knob_is_a_touch_of_the_fixture(monkeypatch):
+    env = _env(
+        [
+            {"body": "gripper0_finger", "group": 1},
+            {"body": "stove_1_main", "group": 1},
+            {"body": "stove_1_knob_front_left", "group": 1},
+        ],
+        joints=(("stove_1_knob_joint", 3),),
+    )
+    # Geom i is on body i + 1: the finger, the stove and its knob.
+    data = env.env.sim.data
+    data.ncon = 1
+    data.contact = [SimpleNamespace(geom1=0, geom2=2)]
+
+    def contact_force(_model, _data, _index, wrench):
+        wrench[0] = 1.0
+
+    monkeypatch.setitem(
+        sys.modules, "mujoco", SimpleNamespace(mjtGeom=mjtGeom, mj_contactForce=contact_force)
+    )
+    simulator = _attached(env)
+    simulator.replay_bodies(0)
+
+    assert simulator.replay_contacts(0) == {("gripper", "stove_1")}

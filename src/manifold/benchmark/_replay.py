@@ -18,7 +18,7 @@ This module writes the hooks' events and the events it derives from each step.
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -26,6 +26,7 @@ import numpy as np
 from manifold.benchmark.simulators import GRIPPER, bounding_box_part
 from manifold.core.conventions import RotationFormat, ee_step_layout
 from manifold.core.embodiment.action_space import (
+    CompositeActionSpace,
     EEActionSpace,
     JointActionSpace,
 )
@@ -42,6 +43,7 @@ from manifold.replay import (
     GripperAction,
     GripperCommandedEvent,
     GripperTouchingEvent,
+    NavigatingEvent,
     ReplayCameraPinhole,
     ReplayChannel,
     ReplayChannelKind,
@@ -64,6 +66,7 @@ if TYPE_CHECKING:
 
     from manifold.benchmark.config import BenchmarkConfig
     from manifold.benchmark.simulators import Simulator
+    from manifold.core.conventions import GripperFormat
     from manifold.core.values import Observation
     from manifold.replay import ManifoldEvent, ReplayPose
 
@@ -115,14 +118,73 @@ def _event_key(event: FactEvent) -> tuple[Any, ...]:
     return (type(event), *event.model_dump(exclude={"is_active"}).values())
 
 
-def _arm_action(action: Any) -> EEActionSpace | JointActionSpace | None:
-    """Return `action` if it is an end effector or joint action space, or None.
+@dataclass(frozen=True)
+class _Gripper:
+    """One gripper of the action: its name, its command's place in an action, and its encoding."""
 
-    For any other action, such as a unified action, the replay plots no command.
+    name: str
+    index: int
+    encoding: GripperFormat
+
+
+def _grippers(action: Any) -> tuple[_Gripper, ...]:
+    """Each arm's gripper in `action`, named by the arm's position among its arms, from `"0"`.
+
+    An end effector or joint action space holds `arm_count` arms, and each arm's values
+    end with its gripper's command. A whole-body action holds the arms of each of its end
+    effector and joint groups, in the groups' order.
     """
     if isinstance(action, (EEActionSpace, JointActionSpace)):
-        return action
+        arms = [(action, 0)]
+    elif isinstance(action, CompositeActionSpace):
+        arms = [
+            (group, start)
+            for group, (_, start, _) in zip(action.groups, action.group_slices(), strict=True)
+            if isinstance(group, (EEActionSpace, JointActionSpace))
+        ]
+    else:
+        arms = []
+    grippers = []
+    position = 0
+    for space, start in arms:
+        width = space.per_arm_length()
+        for arm in range(space.arm_count):
+            if space.gripper is not None:
+                index = start + (arm + 1) * width - 1
+                grippers.append(_Gripper(str(position), index, space.gripper))
+            position += 1
+    return tuple(grippers)
+
+
+def _arm_action(action: Any) -> tuple[EEActionSpace | JointActionSpace, slice] | None:
+    """Return the arm part of `action` and where its values sit in an action, or None.
+
+    An end effector or joint action space is all arm. A whole-body action's arm is its first
+    end effector or joint group, such as a mobile robot's arm before its base and torso. For
+    any other action, such as a unified action, the replay plots no command.
+    """
+    if isinstance(action, (EEActionSpace, JointActionSpace)):
+        return action, slice(0, action.expected_length())
+    if isinstance(action, CompositeActionSpace):
+        for group, (_, start, stop) in zip(action.groups, action.group_slices(), strict=True):
+            if isinstance(group, (EEActionSpace, JointActionSpace)):
+                return group, slice(start, stop)
     return None
+
+
+# The mobile base navigates while it travels faster than this, in metres per second, or
+# turns faster than `_NAVIGATING_TURN`, in degrees per second. Measured on RoboCasa365's
+# PandaOmron: a parked base moves at most 2.3 mm/s and 0.2 degrees/s when its arm pushes
+# on something, a normal drive travels at 0.25 m/s, and the slowest turn measured is
+# 1.4 degrees/s.
+_NAVIGATING_SPEED = 0.01
+_NAVIGATING_TURN = 1.0
+
+
+def _yaw(quaternion: np.ndarray) -> float:
+    """The heading of an `xyzw` quaternion about the vertical axis, in radians."""
+    x, y, z, w = quaternion
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
 
 
 def _fitted(values: Any, length: int) -> np.ndarray:
@@ -148,6 +210,8 @@ def _plot_name(event: FactEvent) -> str:
         return "_".join([kind, *fields["objects"]])
     if "reference" in fields:
         return f"{fields['object']}_{kind}_{fields['reference']}"
+    if "gripper" in fields:
+        return f"{fields['object']}_{kind}_{fields['gripper']}"
     return f"{fields['object']}_{kind}"
 
 
@@ -159,8 +223,10 @@ class _ReplayRecorder:
         self._simulator = simulator
         self._env_id = env_id
         self._action = config.spec.embodiment.action
-        self._arm = _arm_action(self._action)
-        self._gripper = self._arm.gripper if self._arm is not None else None
+        arm = _arm_action(self._action)
+        self._arm = arm[0] if arm is not None else None
+        self._arm_slice = arm[1] if arm is not None else slice(0)
+        self._grippers = _grippers(self._action)
         self._log: ReplayLogWriter | None = None
         self._step = 0
         self._latest: dict[tuple[Any, ...], FactEvent] = {}
@@ -169,23 +235,27 @@ class _ReplayRecorder:
         self._charted: frozenset[tuple[Any, ...]] | None = None
         self._warned_uncharted = False
         self._warned_unreadable = False
-        self._grasped: dict[str, bool] = {}
-        self._commanded_shut: bool | None = None
+        # Whether each gripper holds each object, by gripper name and object.
+        self._grasped: dict[tuple[str, str], bool] = {}
+        # Whether each gripper was last commanded shut, by gripper name.
+        self._commanded_shut: dict[str, bool] = {}
+        # The base's last position and heading, and whether it is navigating.
+        self._base: tuple[np.ndarray, float] | None = None
+        self._navigating = False
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
         self._touching: frozenset[tuple[str, str]] = frozenset()
         touch_links = getattr(config.simulator, "touch_links", None) or {}
         # The hand and the thumb flag of each hand link. When the config has hand links,
-        # the recorder records the hands' touches and grasps of the task's objects as the
-        # gripper's, and the hooks record none of the gripper's touches or grasps. The
-        # recorder records both hands of a two-handed robot as one gripper, because grading
-        # models a single gripper.
+        # the recorder records each hand's touches and grasps of the task's objects as that
+        # hand's, named by the hand, and the hooks record none of the grippers' touches or
+        # grasps.
         self._hand_links = {
             link: (part.hand, part.thumb)
             for link, part in touch_links.items()
             if not isinstance(part, str)
         }
-        self._hands = bool(self._hand_links)
+        self._hands = sorted({hand for hand, _ in self._hand_links.values()})
         # The task's object for each object body in the episode's scene, set by `begin`.
         self._object_bodies: dict[str, str] = {}
         self._objects: frozenset[str] = frozenset()
@@ -216,7 +286,9 @@ class _ReplayRecorder:
         self._warned_uncharted = False
         self._warned_unreadable = False
         self._grasped = {}
-        self._commanded_shut = None
+        self._commanded_shut = {}
+        self._base = self._base_pose(observation)
+        self._navigating = False
         self._succeeded = False
         self._previous = None
         self._touching = frozenset()
@@ -294,6 +366,7 @@ class _ReplayRecorder:
         poses = self._simulator.replay_poses(self._env_id) if self._simulator is not None else {}
         recorded = [
             *self._gripper_commanded_events(action),
+            *self._navigating_events(observation),
             *self._events_to_write((*events, *self._hand_facts(contacts)), action),
             *self._hand_grasp_events(contacts, poses),
             *self._touch_events(contacts),
@@ -344,28 +417,29 @@ class _ReplayRecorder:
         return frozenset(self._simulator.replay_contacts(self._env_id))
 
     def _hand_facts(self, contacts: frozenset[tuple[str, str]]) -> tuple[ManifoldEvent, ...]:
-        """`GripperTouchingEvent` for each of the task's objects, active while a hand touches it."""
-        if not self._hands:
-            return ()
+        """`GripperTouchingEvent` for each hand and each task object, active while it touches."""
         touched = {
-            thing for part, thing in contacts if part in self._hand_links and thing in self._objects
+            (self._hand_links[part][0], thing)
+            for part, thing in contacts
+            if part in self._hand_links and thing in self._objects
         }
         return tuple(
-            GripperTouchingEvent(object=thing, is_active=thing in touched)
+            GripperTouchingEvent(gripper=hand, object=thing, is_active=(hand, thing) in touched)
+            for hand in self._hands
             for thing in sorted(self._objects)
         )
 
     def _hand_grasp_events(
         self, contacts: frozenset[tuple[str, str]], poses: dict[str, ReplayPose]
     ) -> list[ManifoldEvent]:
-        """`GraspedEvent` for each of the task's objects that a hand started or stopped grasping.
+        """`GraspedEvent` for each hand that started or stopped grasping one of the task's objects.
 
-        A hand grasps an object once the object has risen `_LIFT_METRES` above where it
+        The hands grasp an object once the object has risen `_LIFT_METRES` above where it
         last came to rest, while the thumb and another link of one hand touch it, or
         while both hands touch it. The grasp ends on the first step that no hand touches
-        the object. When the hand holds the object again within `_TOUCH_GAP_STEPS` steps,
+        the object. When the hands hold the object again within `_TOUCH_GAP_STEPS` steps,
         the object is grasped again without a new lift, and grading merges the two grasps
-        into one.
+        into one. While the object is grasped, each hand that touches it grasps it.
         """
         if not self._hands:
             return []
@@ -379,7 +453,7 @@ class _ReplayRecorder:
             if pose is None:
                 continue
             touching = links.get(thing, set())
-            held = self._grasped.get(thing, False)
+            held = any(self._grasped.get((hand, thing), False) for hand in self._hands)
             height = self._rested_height(
                 thing,
                 np.asarray(pose.position, dtype=np.float64),
@@ -401,9 +475,9 @@ class _ReplayRecorder:
                 self._since_release.pop(thing, None)
             elif thing in self._since_release:
                 self._since_release[thing] += 1
-            if grasped != held:
-                events.append(GraspedEvent(object=thing, is_active=grasped))
-            self._grasped[thing] = grasped
+            holders = {self._hand_links[link][0] for link in touching} if grasped else set()
+            for hand in self._hands:
+                events += self._grasp_change(hand, thing, grasped=hand in holders)
         return events
 
     def _rested_height(self, thing: str, position: np.ndarray, *, still_free: bool) -> float:
@@ -476,21 +550,61 @@ class _ReplayRecorder:
         return images
 
     def _gripper_commanded_events(self, action: Any) -> list[ManifoldEvent]:
-        """`GripperCommandedEvent` if the commanded gripper changes direction.
+        """`GripperCommandedEvent` for each gripper whose command changes direction.
 
-        The first command of an episode sets the direction and produces no event. If
-        `is_gripper_shut` returns None for a command, the direction stays the same.
+        A gripper's first command of an episode sets its direction and produces no event.
+        If `is_gripper_shut` returns None for a command, the direction stays the same.
         """
-        value = self._gripper_command(action)
-        if value is None or self._gripper is None:
+        if action is None:
             return []
-        shut = is_gripper_shut(value, self._gripper)
-        if shut is None:
+        values = self._action_values(action)
+        events: list[ManifoldEvent] = []
+        for gripper in self._grippers:
+            shut = is_gripper_shut(float(values[gripper.index]), gripper.encoding)
+            if shut is None:
+                continue
+            previous = self._commanded_shut.get(gripper.name)
+            self._commanded_shut[gripper.name] = shut
+            if previous is not None and previous != shut:
+                action_taken = GripperAction.CLOSE if shut else GripperAction.OPEN
+                events.append(GripperCommandedEvent(gripper=gripper.name, action=action_taken))
+        return events
+
+    def _navigating_events(self, observation: Observation) -> list[NavigatingEvent]:
+        """`NavigatingEvent` when the mobile base starts or stops navigating.
+
+        The base navigates while it travels or turns faster than the thresholds above,
+        measured between this step's base pose and the last one's. A robot that reports
+        no base pose produces no event.
+        """
+        base, previous = self._base_pose(observation), self._base
+        self._base = base
+        if base is None or previous is None:
             return []
-        previous, self._commanded_shut = self._commanded_shut, shut
-        if previous is None or previous == shut:
+        seconds = self._config.run.step_seconds
+        speed = float(np.linalg.norm(base[0] - previous[0])) / seconds
+        turn = (base[1] - previous[1] + np.pi) % (2 * np.pi) - np.pi
+        turning = float(abs(np.degrees(turn))) / seconds
+        navigating = speed > _NAVIGATING_SPEED or turning > _NAVIGATING_TURN
+        if navigating == self._navigating:
             return []
-        return [GripperCommandedEvent(action=GripperAction.CLOSE if shut else GripperAction.OPEN)]
+        self._navigating = navigating
+        return [NavigatingEvent(is_active=navigating)]
+
+    def _base_pose(self, observation: Observation) -> tuple[np.ndarray, float] | None:
+        """The mobile base's position and heading, or None if the robot reports no base pose."""
+        spec = self._config.spec.embodiment.proprioception.base_pose
+        if spec is None:
+            return None
+        position, rotation, _ = ee_step_layout(spec.rotation, None)
+        values = self._state_values(observation, "base_pose", position + rotation)
+        try:
+            quaternion = np.asarray(
+                convert(values[position:].tolist(), spec.rotation, RotationFormat.QUATERNION)
+            )
+        except ValueError:
+            return values[:position], float("nan")
+        return values[:position], _yaw(quaternion)
 
     def _events_to_write(
         self, events: tuple[ManifoldEvent, ...], action: Any
@@ -498,15 +612,21 @@ class _ReplayRecorder:
         """The fact events that changed, the other events, and `GraspedEvent`.
 
         This method writes a `FactEvent` on the first frame if it is active, and later
-        when its `is_active` changes. An object is grasped while its
-        `GripperTouchingEvent` is active and the policy commands the gripper shut. This
-        method writes a `GraspedEvent` when that state changes.
+        when its `is_active` changes. A gripper grasps an object while its
+        `GripperTouchingEvent` for the object is active and the policy commands that
+        gripper shut. This method writes a `GraspedEvent` when that state changes.
+
+        Raises:
+            ValueError: If a gripper event names a gripper that the action and the hands
+                do not have.
         """
         recorded: list[ManifoldEvent] = []
         for event in events:
             if not isinstance(event, FactEvent):
                 recorded.append(event)
                 continue
+            if isinstance(event, (GraspedEvent, GripperTouchingEvent)):
+                self._check_gripper(event.gripper)
             key = _event_key(event)
             last = self._latest.get(key)
             if (last.is_active if last is not None else False) != event.is_active:
@@ -516,27 +636,28 @@ class _ReplayRecorder:
             # `_hand_grasp_events` records a hand's grasps, because a hand has no gripper
             # command to derive them from.
             return recorded
-        shut = self._commanded_shut is True
         for latest in self._latest.values():
             if not isinstance(latest, GripperTouchingEvent):
                 continue
-            grasped = latest.is_active and shut
-            if self._grasped.get(latest.object, False) != grasped:
-                recorded.append(GraspedEvent(object=latest.object, is_active=grasped))
-            self._grasped[latest.object] = grasped
+            grasped = latest.is_active and self._commanded_shut.get(latest.gripper, False)
+            recorded += self._grasp_change(latest.gripper, latest.object, grasped=grasped)
         return recorded
 
-    def _gripper_command(self, action: Any) -> float | None:
-        """The gripper command of the first arm, or None if the action has no gripper."""
-        if action is None or self._gripper is None:
-            return None
-        values = self._action_values(action)
-        if isinstance(self._arm, EEActionSpace):
-            position, rotation, _ = ee_step_layout(self._arm.rotation, self._arm.gripper)
-            return float(values[position + rotation])
-        if isinstance(self._arm, JointActionSpace):
-            return float(values[self._arm.dof // self._arm.arm_count])
-        return None
+    def _grasp_change(self, gripper: str, thing: str, *, grasped: bool) -> list[ManifoldEvent]:
+        """Set whether `gripper` grasps `thing`, and return `GraspedEvent` if that changed."""
+        changed = self._grasped.get((gripper, thing), False) != grasped
+        self._grasped[(gripper, thing)] = grasped
+        return [GraspedEvent(gripper=gripper, object=thing, is_active=grasped)] if changed else []
+
+    def _check_gripper(self, name: str) -> None:
+        """Raise if no gripper of the action and no hand has the name `name`."""
+        names = [gripper.name for gripper in self._grippers] + self._hands
+        if name not in names:
+            raise ValueError(
+                f"a gripper event names gripper {name!r}, but this benchmark's grippers are "
+                f"{names}: each arm's gripper is named by the arm's position in the action, "
+                "from '0', and each hand by its name in `simulator.touch_links`"
+            )
 
     def _frame_scalars(
         self, observation: Observation, action: Any, *, success: bool
@@ -561,21 +682,21 @@ class _ReplayRecorder:
 
         An end effector command plots `ee_pos_x` to `ee_pos_z` and the rotation as
         `ee_rot_x` to `ee_rot_z`, or as `ee_rot/<i>` if the rotation has other than
-        three values. A joint command plots `joint_cmd/<i>`.
+        three values. A joint command plots `joint_cmd/<i>`. Each gripper's command is
+        `gripper/<name>`.
         """
-        values = self._action_values(action)
+        every_value = self._action_values(action)
+        values = every_value[self._arm_slice]
         space = self._arm
-        scalars = []
-        if self._gripper is not None:
-            command = self._gripper_command(action)
-            scalars.append(
-                RerunScalar(
-                    "gripper",
-                    RerunTab.ACTION,
-                    command if command is not None else 0.0,
-                    RERUN_GRIPPER_ROW,
-                )
+        scalars = [
+            RerunScalar(
+                f"gripper/{gripper.name}",
+                RerunTab.ACTION,
+                float(every_value[gripper.index]),
+                RERUN_GRIPPER_ROW,
             )
+            for gripper in self._grippers
+        ]
         if isinstance(space, EEActionSpace):
             position, rotation, _ = ee_step_layout(space.rotation, space.gripper)
             scalars += [
@@ -695,11 +816,13 @@ class _ReplayRecorder:
         For an end effector command, the commanded position is the command. If the
         command is a delta, the commanded position is the observed position plus the
         command. A joint command follows the same rule for joint angles, against the
-        observed `joint_pos`.
+        observed `joint_pos`. On the high side of a whole-body action's mode slot, a delta
+        adds to the arm's previous target rather than its observed position, so the
+        commanded line is off on those steps.
         """
         space = self._arm
         scalars: list[RerunScalar] = []
-        values = self._action_values(action)
+        values = self._action_values(action)[self._arm_slice]
         if isinstance(space, EEActionSpace) and ee is not None:
             wanted = ee[0] + values[:3] if space.delta else values[:3]
             for index, axis in enumerate("xyz"):
