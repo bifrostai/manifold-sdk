@@ -261,6 +261,17 @@ class GripperCommandedEvent(_Event):
     action: GripperAction
 
 
+class NavigatingEvent(_Event):
+    """The mobile base started (`is_active`) or stopped navigating: travelling or turning.
+
+    The base starts an episode still. A base still navigating when the episode ends gets
+    no closing event.
+    """
+
+    event_type: Literal["navigating"] = "navigating"
+    is_active: StrictBool
+
+
 class ObjectOccurrenceEvent(_Event):
     """Something happened to `object`."""
 
@@ -353,6 +364,7 @@ ManifoldEvent = Annotated[
     | StackedEvent
     | StageReachedEvent
     | GripperCommandedEvent
+    | NavigatingEvent
     | GripperHitEvent
     | ObjectTippedEvent
     | ObjectLeftSceneEvent

@@ -28,6 +28,7 @@ from manifold.replay import (
     LeftOfEvent,
     ManifoldEvent,
     MovedBySceneEvent,
+    NavigatingEvent,
     NoteEvent,
     ObjectDisplacedEvent,
     ObjectLeftSceneEvent,
@@ -94,6 +95,7 @@ EVERY_TYPE = (
         objects=("red_block", "blue_block"), is_active=True, order=StackOrder.BOTTOM_TO_TOP
     ),
     GripperCommandedEvent(action=GripperAction.CLOSE),
+    NavigatingEvent(is_active=True),
     *(cls(object="plate") for cls in (GripperHitEvent, ObjectTippedEvent, ObjectLeftSceneEvent)),
     ObjectDisplacedEvent(object="ketchup", distance=0.07),
     GripperFullyClosedEvent(),

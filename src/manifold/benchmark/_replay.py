@@ -43,6 +43,7 @@ from manifold.replay import (
     GripperAction,
     GripperCommandedEvent,
     GripperTouchingEvent,
+    NavigatingEvent,
     ReplayCameraPinhole,
     ReplayChannel,
     ReplayChannelKind,
@@ -132,6 +133,21 @@ def _arm_action(action: Any) -> tuple[EEActionSpace | JointActionSpace, slice] |
     return None
 
 
+# The mobile base navigates while it travels faster than this, in metres per second, or
+# turns faster than `_NAVIGATING_TURN`, in degrees per second. Measured on RoboCasa365's
+# PandaOmron: a parked base moves at most 2.3 mm/s and 0.2 degrees/s when its arm pushes
+# on something, a normal drive travels at 0.25 m/s, and the slowest turn measured is
+# 1.4 degrees/s.
+_NAVIGATING_SPEED = 0.01
+_NAVIGATING_TURN = 1.0
+
+
+def _yaw(quaternion: np.ndarray) -> float:
+    """The heading of an `xyzw` quaternion about the vertical axis, in radians."""
+    x, y, z, w = quaternion
+    return float(np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z)))
+
+
 def _fitted(values: Any, length: int) -> np.ndarray:
     """Return `values` as a flat float array of `length` values.
 
@@ -180,6 +196,9 @@ class _ReplayRecorder:
         self._warned_unreadable = False
         self._grasped: dict[str, bool] = {}
         self._commanded_shut: bool | None = None
+        # The base's last position and heading, and whether it is navigating.
+        self._base: tuple[np.ndarray, float] | None = None
+        self._navigating = False
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
         self._touching: frozenset[tuple[str, str]] = frozenset()
@@ -226,6 +245,8 @@ class _ReplayRecorder:
         self._warned_unreadable = False
         self._grasped = {}
         self._commanded_shut = None
+        self._base = self._base_pose(observation)
+        self._navigating = False
         self._succeeded = False
         self._previous = None
         self._touching = frozenset()
@@ -303,6 +324,7 @@ class _ReplayRecorder:
         poses = self._simulator.replay_poses(self._env_id) if self._simulator is not None else {}
         recorded = [
             *self._gripper_commanded_events(action),
+            *self._navigating_events(observation),
             *self._events_to_write((*events, *self._hand_facts(contacts)), action),
             *self._hand_grasp_events(contacts, poses),
             *self._touch_events(contacts),
@@ -500,6 +522,42 @@ class _ReplayRecorder:
         if previous is None or previous == shut:
             return []
         return [GripperCommandedEvent(action=GripperAction.CLOSE if shut else GripperAction.OPEN)]
+
+    def _navigating_events(self, observation: Observation) -> list[NavigatingEvent]:
+        """`NavigatingEvent` when the mobile base starts or stops navigating.
+
+        The base navigates while it travels or turns faster than the thresholds above,
+        measured between this step's base pose and the last one's. A robot that reports
+        no base pose produces no event.
+        """
+        base, previous = self._base_pose(observation), self._base
+        self._base = base
+        if base is None or previous is None:
+            return []
+        seconds = self._config.run.step_seconds
+        speed = float(np.linalg.norm(base[0] - previous[0])) / seconds
+        turn = (base[1] - previous[1] + np.pi) % (2 * np.pi) - np.pi
+        turning = float(abs(np.degrees(turn))) / seconds
+        navigating = speed > _NAVIGATING_SPEED or turning > _NAVIGATING_TURN
+        if navigating == self._navigating:
+            return []
+        self._navigating = navigating
+        return [NavigatingEvent(is_active=navigating)]
+
+    def _base_pose(self, observation: Observation) -> tuple[np.ndarray, float] | None:
+        """The mobile base's position and heading, or None if the robot reports no base pose."""
+        spec = self._config.spec.embodiment.proprioception.base_pose
+        if spec is None:
+            return None
+        position, rotation, _ = ee_step_layout(spec.rotation, None)
+        values = self._state_values(observation, "base_pose", position + rotation)
+        try:
+            quaternion = np.asarray(
+                convert(values[position:].tolist(), spec.rotation, RotationFormat.QUATERNION)
+            )
+        except ValueError:
+            return values[:position], float("nan")
+        return values[:position], _yaw(quaternion)
 
     def _events_to_write(
         self, events: tuple[ManifoldEvent, ...], action: Any

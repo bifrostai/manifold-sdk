@@ -44,6 +44,7 @@ from manifold.replay import (
     FailureType,
     GraspedEvent,
     GripperTouchingEvent,
+    NavigatingEvent,
     NoteEvent,
     OnEvent,
     ReplayMesh,
@@ -1270,6 +1271,58 @@ def _recorder_for(action_space) -> _ReplayRecorder:
     raw = _raw_config({"type": "single"})
     raw["spec"] = {**raw["spec"], "embodiment": embodiment.model_dump(mode="json")}
     return _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+
+
+def _base(x: float, yaw: float = 0.0) -> Observation:
+    """A PandaOmron observation whose base sits at `x` metres, turned `yaw` radians."""
+    quaternion = [0.0, 0.0, np.sin(yaw / 2), np.cos(yaw / 2)]
+    return Observation(
+        sensors={"agentview": np.zeros((4, 4, 3), dtype=np.uint8)},
+        state={"base_pose": np.array([x, 0.0, 0.0, *quaternion])},
+    )
+
+
+def _navigating(tmp_path, embodiment, observations) -> list[list[bool]]:
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = {**raw["spec"], "embodiment": embodiment.model_dump(mode="json")}
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), None, 0)
+    recorder.begin(tmp_path, 0, observations[0], {}, ())
+    for index, observation in enumerate(observations[1:], start=1):
+        recorder.record(None, observation, (), success=False, done=index == len(observations) - 1)
+    recorder.end()
+    log = read_replay_log(replay_log_path(tmp_path, 0))
+    return [
+        [event.is_active for event in step.events if isinstance(event, NavigatingEvent)]
+        for step in log.steps
+    ]
+
+
+def test_the_replay_marks_when_the_base_starts_and_stops_navigating(tmp_path):
+    # At 0.05 s a step, 2 cm a step is 0.4 m/s, and 0.1 radians a step is 115 degrees/s.
+    observations = [_base(0), _base(0), _base(0.02), _base(0.04), _base(0.04), _base(0.04, 0.1)]
+
+    assert _navigating(tmp_path, PANDA_OMRON_WHOLE_BODY, observations) == [
+        [],
+        [],
+        [True],
+        [],
+        [False],
+        [True],
+    ]
+
+
+def test_a_base_that_creeps_slower_than_a_drive_is_not_navigating(tmp_path):
+    # 0.1 mm a step is 2 mm/s, the speed a parked RoboCasa365 base reaches when its arm
+    # pushes on something.
+    observations = [_base(0.0001 * step) for step in range(5)]
+
+    assert _navigating(tmp_path, PANDA_OMRON_WHOLE_BODY, observations) == [[]] * 5
+
+
+def test_a_robot_that_reports_no_base_pose_never_navigates(tmp_path):
+    observations = [_base(0.1 * step) for step in range(3)]
+
+    assert _navigating(tmp_path, FRANKA_JOINT_ABSOLUTE, observations) == [[]] * 3
 
 
 def test_a_listed_failure_type_is_recorded_and_named_in_the_header(tmp_path) -> None:
