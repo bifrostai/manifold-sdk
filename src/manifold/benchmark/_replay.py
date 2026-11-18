@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
-from manifold.benchmark.simulators import GRIPPER, bounding_box_part
+from manifold.benchmark.simulators import HAND, bounding_box_part
 from manifold.core.conventions import RotationFormat, ee_step_layout
 from manifold.core.embodiment.action_space import (
     CompositeActionSpace,
@@ -62,6 +62,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from manifold.benchmark.config import BenchmarkConfig
@@ -202,15 +203,19 @@ def _fitted(values: Any, length: int) -> np.ndarray:
     return fitted
 
 
-def _plot_name(event: FactEvent) -> str:
-    """The fact event's plot name, such as `bowl_1_on_plate_1`."""
-    fields = event.model_dump(mode="json", exclude={"is_active", "order"})
+def _plot_name(event: FactEvent, end_effector_types: Mapping[str, str]) -> str:
+    """The fact event's plot name, such as `bowl_1_on_plate_1` or `cup_hand_touching_left`.
+
+    A gripper event of a declared hand, such as `left`, reads `hand` in place of `gripper`.
+    """
+    fields = event.model_dump(mode="json", exclude={"is_active", "order", "end_effector"})
     kind = fields.pop("event_type")
     if "objects" in fields:
         return "_".join([kind, *fields["objects"]])
     if "reference" in fields:
         return f"{fields['object']}_{kind}_{fields['reference']}"
     if "gripper" in fields:
+        kind = kind.replace("gripper", end_effector_types.get(fields["gripper"], "gripper"))
         return f"{fields['object']}_{kind}_{fields['gripper']}"
     return f"{fields['object']}_{kind}"
 
@@ -223,6 +228,11 @@ class _ReplayRecorder:
         self._simulator = simulator
         self._env_id = env_id
         self._action = config.spec.embodiment.action
+        # The type of each declared end effector, such as `hand`, by its name.
+        self._end_effector_types = {
+            end_effector.name: end_effector.end_effector_type.value
+            for end_effector in config.spec.end_effectors or ()
+        }
         arm = _arm_action(self._action)
         self._arm = arm[0] if arm is not None else None
         self._arm_slice = arm[1] if arm is not None else slice(0)
@@ -244,7 +254,7 @@ class _ReplayRecorder:
         self._navigating = False
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
-        self._touching: frozenset[tuple[str, str]] = frozenset()
+        self._touching: frozenset[tuple[str, str, str]] = frozenset()
         touch_links = getattr(config.simulator, "touch_links", None) or {}
         # The hand and the thumb flag of each hand link. When the config has hand links,
         # the recorder records each hand's touches and grasps of the task's objects as that
@@ -393,7 +403,9 @@ class _ReplayRecorder:
         if self._log is None:
             return
         lines = [
-            line for event in events if (line := rerun_panel_line(event, self._step)) is not None
+            line
+            for event in events
+            if (line := rerun_panel_line(event, self._step, self._end_effector_types)) is not None
         ]
         text = {"instruction": observation.instruction or ""}
         if lines:
@@ -515,22 +527,28 @@ class _ReplayRecorder:
         """`TouchingEvent` for each robot part that started or stopped touching a body.
 
         The result leaves out a hand's touches of the task's objects, because `_hand_facts`
-        records them as the gripper touching the object. The result records a hand's other
-        touches as touches by `GRIPPER`.
+        records them as that hand touching the object. The result records a hand's other
+        touches as touches by `HAND`, with the hand's name.
         """
         touching = frozenset(
-            (GRIPPER if part in self._hand_links else part, thing)
+            (HAND, self._hand_links[part][0], thing)
+            if part in self._hand_links
+            else (part, "", thing)
             for part, thing in contacts
             if not (part in self._hand_links and thing in self._objects)
         )
         events: list[ManifoldEvent] = [
             *(
-                TouchingEvent(object=part, reference=thing, is_active=True)
-                for part, thing in sorted(touching - self._touching)
+                TouchingEvent(
+                    object=part, reference=thing, end_effector=hand or None, is_active=True
+                )
+                for part, hand, thing in sorted(touching - self._touching)
             ),
             *(
-                TouchingEvent(object=part, reference=thing, is_active=False)
-                for part, thing in sorted(self._touching - touching)
+                TouchingEvent(
+                    object=part, reference=thing, end_effector=hand or None, is_active=False
+                )
+                for part, hand, thing in sorted(self._touching - touching)
             ),
         ]
         self._touching = touching
@@ -868,7 +886,7 @@ class _ReplayRecorder:
         ]
         scalars += [
             RerunScalar(
-                f"facts/{_plot_name(event)}",
+                f"facts/{_plot_name(event, self._end_effector_types)}",
                 RerunTab.TASK,
                 float(event.is_active),
                 None,
@@ -880,7 +898,9 @@ class _ReplayRecorder:
             []
             if self._charted is None
             else [
-                _plot_name(event) for key, event in self._latest.items() if key not in self._charted
+                _plot_name(event, self._end_effector_types)
+                for key, event in self._latest.items()
+                if key not in self._charted
             ]
         )
         if uncharted and not self._warned_uncharted:

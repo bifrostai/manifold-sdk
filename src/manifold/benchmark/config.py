@@ -33,7 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorConfig
 from manifold.benchmark.simulators.mujoco import BenchmarkMujocoSimulatorConfig
 from manifold.benchmark.simulators.sapien import BenchmarkSapienSimulatorConfig
-from manifold.core.benchmark import Benchmark
+from manifold.core.benchmark import Benchmark, EndEffectorType
 from manifold.replay.events import FailureType
 from manifold.wire import ImageFormat
 
@@ -205,6 +205,27 @@ class BenchmarkConfig(_BenchmarkConfigBase):
                     "spec": {**spec, **{key: run[key] for key in _RUN_KEYS_IN_SPEC if key in run}},
                 }
         return data
+
+    @model_validator(mode="after")
+    def _check_hands_are_declared(self) -> BenchmarkConfig:
+        """Require each hand of `simulator.touch_links` to be a declared hand.
+
+        A config that declares no end effectors is not checked.
+        """
+        declared = self.spec.end_effectors
+        touch_links = getattr(self.simulator, "touch_links", None) or {}
+        if declared is None:
+            return self
+        hands = {e.name for e in declared if e.end_effector_type is EndEffectorType.HAND}
+        undeclared = sorted(
+            {part.hand for part in touch_links.values() if not isinstance(part, str)} - hands
+        )
+        if undeclared:
+            raise ValueError(
+                f"simulator.touch_links names the hands {undeclared}, which spec.end_effectors "
+                f"does not declare as hands; it declares the hands {sorted(hands)}"
+            )
+        return self
 
     @model_validator(mode="after")
     def _check_replay_cameras(self) -> BenchmarkConfig:
