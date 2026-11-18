@@ -30,7 +30,7 @@ from manifold.benchmark._client import (
     _upright_image_pipeline,
     request_policy_cameras,
 )
-from manifold.benchmark._replay import _boxed, _plot_name, _ReplayRecorder
+from manifold.benchmark._recorder import _boxed, _plot_name, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator, make_simulator
