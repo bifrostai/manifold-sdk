@@ -915,6 +915,89 @@ class _Simulator(Simulator):
         return [RerunScalar("joint_torques/0", RerunTab.PHYSICS, self._x, None)]
 
 
+class _PadSimulator(_Simulator):
+    """A simulator that reports its finger pads' contacts, one set from `pad_contacts` per step."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.pad_contacts: list[frozenset[tuple[str, str]]] = []
+
+    def replay_finger_pads(self):
+        return ("left_pad", "right_pad")
+
+    def replay_contacts(self, env_id):
+        return self.pad_contacts.pop(0) if self.pad_contacts else frozenset()
+
+
+class _ShutGripper(_Gripper):
+    """Tells the gripper to open, then to close for the rest of the episode."""
+
+    def __init__(self, address: str, benchmark: object, image_format: str) -> None:
+        super().__init__(address, benchmark, image_format)
+        self._commands = iter([1.0, 0.0, 0.0])
+
+
+def _pad_grasps(tmp_path, monkeypatch, pad_contacts, policy=_Gripper) -> list[list[str]]:
+    """The event names of each frame of `_touching_hooks`, with pad contacts as listed."""
+    simulator = _PadSimulator()
+    simulator.pad_contacts = list(pad_contacts)
+    session = _Session(_task(tmp_path, (0,)))
+    _run_client(
+        _config({"type": "single"}),
+        _touching_hooks(),
+        session,
+        monkeypatch,
+        policy,
+        simulator=simulator,
+    )
+    ((_, artifacts),) = session.completed
+    log = read_replay_log(artifacts[0][0])
+    return [[type(event).__name__ for event in step.events] for step in log.steps]
+
+
+_BOTH_PADS = frozenset({("left_pad", "toy"), ("right_pad", "toy")})
+
+
+def test_a_gripper_with_pads_grasps_what_both_pads_touch_while_shut(tmp_path, monkeypatch):
+    # The gripper is told to close at step 2 and to open at step 3.
+    events = _pad_grasps(tmp_path, monkeypatch, [_BOTH_PADS] * 3)
+
+    assert events == [
+        ["EpisodeStartedEvent"],
+        ["GripperTouchingEvent"],
+        ["GripperCommandedEvent", "NoteEvent", "GraspedEvent"],
+        ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
+    ]
+
+
+def test_one_pad_on_an_object_is_no_grasp(tmp_path, monkeypatch):
+    # The hooks still say the gripper touches the toy, but only one pad does.
+    events = _pad_grasps(tmp_path, monkeypatch, [frozenset({("left_pad", "toy")})] * 3)
+
+    assert "GraspedEvent" not in {name for step in events for name in step}
+
+
+def test_a_grasp_ends_when_a_pad_lets_go_while_the_gripper_is_still_shut(tmp_path, monkeypatch):
+    events = _pad_grasps(
+        tmp_path,
+        monkeypatch,
+        [_BOTH_PADS, _BOTH_PADS, frozenset({("right_pad", "toy")})],
+        _ShutGripper,
+    )
+
+    # The gripper is still told to close at step 3, so the grasp ends only because the left
+    # pad lets go.
+    assert [step.count("GraspedEvent") for step in events] == [0, 0, 1, 1]
+    assert "GripperCommandedEvent" not in events[3]
+    grasps = [
+        event.is_active
+        for step in read_replay_log(replay_log_path(tmp_path, 0)).steps
+        for event in step.events
+        if isinstance(event, GraspedEvent)
+    ]
+    assert grasps == [True, False]
+
+
 def test_make_simulator_gives_a_mujoco_simulator_the_configs_finger_pads():
     raw = _raw_config({"type": "single"})
     raw["replay"]["finger_pads"] = [
@@ -937,6 +1020,14 @@ def test_make_simulator_gives_a_mujoco_simulator_the_configs_finger_pads():
 
     assert simulator is not None
     assert simulator.replay_finger_pads() == ("left_finger", "right_finger")
+
+
+def test_a_pads_touches_write_no_touch_lines(tmp_path, monkeypatch):
+    events = _pad_grasps(
+        tmp_path, monkeypatch, [frozenset({("left_pad", "table"), ("right_pad", "toy")})] * 3
+    )
+
+    assert "TouchingEvent" not in {name for step in events for name in step}
 
 
 def test_the_replay_holds_the_simulators_scene_images_and_scalars(tmp_path, monkeypatch):
