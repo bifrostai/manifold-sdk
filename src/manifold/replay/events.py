@@ -236,9 +236,14 @@ class BehindEvent(RelationFactEvent):
 
 
 class TouchingEvent(RelationFactEvent):
-    """`object` is in contact with `reference`."""
+    """`object` is in contact with `reference`.
+
+    When `object` is a hand, `end_effector` names which hand, such as `left`. It is None
+    for the other robot parts and for scene objects.
+    """
 
     event_type: Literal["touching"] = "touching"
+    end_effector: _Name | None = None
 
 
 class StackedEvent(FactEvent):

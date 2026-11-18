@@ -174,8 +174,9 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     scene's other assets. The sensor on a `gripper` link leaves out the task's objects,
     because the hooks record those touches. A hand link, such as
     `{"hand": "left", "thumb": false}`, is a link of a dexterous hand on a robot that has no
-    gripper command. The replay records a hand link's touches of objects as the gripper
-    touching them, and records a grasp from which links of which hand touch an object. On
+    gripper command. The replay records a hand link's touches as touches by that hand,
+    and records a grasp from which links of which hand touch an object. `spec.end_effectors`
+    declares each hand that the links name. On
     Newton physics, the replay reads the touches from the contacts that the solver already
     computes, in place of adding a sensor. Null adds no sensors, and the replay then records
     no contacts.

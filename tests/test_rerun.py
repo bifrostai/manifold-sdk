@@ -57,3 +57,9 @@ def test_a_vector_becomes_a_scalar_for_each_value_on_one_chart():
 )
 def test_each_event_has_its_line_in_the_events_panel(event, line):
     assert rerun_panel_line(event, 7) == line
+
+
+def test_a_declared_hand_reads_hand_in_the_events_panel():
+    event = GraspedEvent(gripper="left", object="bowl", is_active=True)
+
+    assert rerun_panel_line(event, 7, {"left": "hand"}) == "grasp: bowl by hand left at step 7"
