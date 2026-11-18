@@ -33,7 +33,7 @@ from manifold.benchmark._client import (
 from manifold.benchmark._replay import _boxed, _plot_name, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
-from manifold.benchmark.simulators import Simulator
+from manifold.benchmark.simulators import Simulator, make_simulator
 from manifold.core.benchmark import Benchmark
 from manifold.core.conventions import GripperFormat
 from manifold.core.embodiment import CompositeActionSpace, JointActionSpace, UnifiedActionSpace
@@ -913,6 +913,30 @@ class _Simulator(Simulator):
 
     def replay_scalars(self, env_id, ee_position):
         return [RerunScalar("joint_torques/0", RerunTab.PHYSICS, self._x, None)]
+
+
+def test_make_simulator_gives_a_mujoco_simulator_the_configs_finger_pads():
+    raw = _raw_config({"type": "single"})
+    raw["replay"]["finger_pads"] = [
+        {"body": "left_finger", "offset": [0.0, 0.0, 0.04]},
+        {"body": "right_finger", "offset": [0.0, 0.0, 0.04]},
+    ]
+    raw["simulator"] = {
+        "name": "mujoco",
+        "path": "sim",
+        "cameras": {},
+        "geom_groups": [1],
+        "arm_prefix": "robot0_",
+        "gripper_prefix": "gripper0_",
+        "robot_prefixes": ["robot0_", "gripper0_"],
+        "contact_prefixes": ["gripper0_"],
+        "object_body_suffix": "_main",
+    }
+
+    simulator = make_simulator(BenchmarkConfig.model_validate(raw))
+
+    assert simulator is not None
+    assert simulator.replay_finger_pads() == ("left_finger", "right_finger")
 
 
 def test_the_replay_holds_the_simulators_scene_images_and_scalars(tmp_path, monkeypatch):

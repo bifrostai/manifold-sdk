@@ -140,13 +140,24 @@ class Simulator(ABC):
         An extra camera is in the scene but absent from the spec.
         """
 
+    def replay_finger_pads(self) -> tuple[str, ...]:
+        """The body names of the gripper's finger pads, if `replay_contacts` reports them.
+
+        A simulator that reports them lists each pad's contacts under the pad's body name,
+        including contacts with the task's objects. A simulator that does not report them
+        returns an empty tuple.
+        """
+        return ()
+
     @abstractmethod
     def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
         """Each robot part that touches a scene body in env `env_id` now, with the body.
 
-        A part is `ARM`, `GRIPPER`, or the name of a hand link, and a body is its scene
-        name. The result leaves out the gripper touching the task's objects, because the
-        hooks record those as events, but includes a hand link's touches of them.
+        A part is `ARM`, `GRIPPER`, the name of a hand link, or the name of a finger pad
+        from `replay_finger_pads`, and a body is its scene name. The result leaves out
+        contacts between `GRIPPER` and the task's objects, because the hooks record those
+        as events. It includes contacts between a hand link or a finger pad and those
+        objects.
         """
 
     @abstractmethod
@@ -172,7 +183,9 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
     if simulator is None:
         return None
     if isinstance(simulator, BenchmarkMujocoSimulatorConfig):
-        return MujocoSimulator(simulator)
+        return MujocoSimulator(
+            simulator, finger_pads=tuple(pad.body for pad in config.replay.finger_pads)
+        )
     if isinstance(simulator, BenchmarkIsaacSimSimulatorConfig):
         return IsaacSimSimulator(simulator, config)
     if isinstance(simulator, BenchmarkSapienSimulatorConfig):
