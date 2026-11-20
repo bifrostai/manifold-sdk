@@ -24,7 +24,7 @@ from manifold.adapters.observation import (
     Rotate180Cameras,
     SwapChannelOrder,
 )
-from manifold.benchmark._replay import _ReplayRecorder
+from manifold.benchmark._recorder import _ReplayRecorder
 from manifold.benchmark._service import _HooksLogger
 from manifold.benchmark._worker import WorkerEpisodeRecord
 from manifold.core.pipeline import Pipeline

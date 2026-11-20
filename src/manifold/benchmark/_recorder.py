@@ -1,4 +1,4 @@
-"""The replay that the Client writes for each episode of a benchmark.
+"""The recorder that writes a replay for each episode of a benchmark.
 
 Each frame contains the config's cameras, the instruction, the events panel, the
 scalars and the events. If the config has a simulator, a frame also contains the

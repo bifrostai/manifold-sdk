@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 
 from manifold.benchmark import BenchmarkConfig
-from manifold.benchmark._replay import _ReplayRecorder
+from manifold.benchmark._recorder import _ReplayRecorder
 from manifold.core.values import Action, Observation
 from manifold.embodiments import DROID_JOINT_ABSOLUTE, FRANKA_EE_DELTA, WIDOWX_EE_DELTA
 from manifold.replay import read_replay_log, replay_log_path
