@@ -82,7 +82,9 @@ class _MujocoEpisodeCache:
 
     `parts` maps each body of the arm and of the gripper to `ARM` or `GRIPPER`.
     `things` maps each body that the task names to the name and to whether the body is
-    an object, for the bodies that a robot part can touch.
+    an object, for the bodies that a robot part can touch. `pads` maps each body of a
+    finger pad to the pad's body name. A pad's bodies are the body named after the pad
+    and every body attached below that body.
     """
 
     body_ids: tuple[int, ...]
@@ -96,6 +98,7 @@ class _MujocoEpisodeCache:
     contacts: dict[str, int]
     parts: dict[int, str]
     things: dict[int, tuple[str, bool]]
+    pads: dict[int, str]
 
 
 class BenchmarkMujocoSimulatorConfig(BaseModel):
@@ -128,8 +131,11 @@ class BenchmarkMujocoSimulatorConfig(BaseModel):
 class MujocoSimulator(Simulator):
     """Simulator that reads the scene, poses and scalars from a MuJoCo handle for each env."""
 
-    def __init__(self, config: BenchmarkMujocoSimulatorConfig) -> None:
+    def __init__(
+        self, config: BenchmarkMujocoSimulatorConfig, finger_pads: tuple[str, ...] = ()
+    ) -> None:
         self._config = config
+        self._finger_pads = finger_pads
         # Map each env id to the env that `on_load` returned.
         self._envs: dict[int, Any] = {}
         self._caches: dict[int, _MujocoEpisodeCache] = {}
@@ -227,6 +233,7 @@ class MujocoSimulator(Simulator):
                 for body_id, (role, name) in labels.items()
                 if name is not None
             },
+            pads=self._pad_bodies(model, names),
         )
         self._caches[env_id] = cache
         return tuple(
@@ -280,10 +287,15 @@ class MujocoSimulator(Simulator):
         """An empty dict, because a MuJoCo benchmark sends the policy each camera of its replay."""
         return {}
 
+    def replay_finger_pads(self) -> tuple[str, ...]:
+        """The body names of the finger pads in the benchmark's config."""
+        return self._finger_pads
+
     def replay_contacts(self, env_id: int) -> frozenset[tuple[str, str]]:
         """Each robot part that touches a named body at the last physics step, with the body.
 
-        A touch that starts and ends between two actions is missed.
+        The contacts of a finger pad's bodies also appear under the pad's body name. A
+        touch that starts and ends between two actions is missed.
         """
         sim = self._sim(env_id)
         cache = self._caches[env_id]
@@ -295,12 +307,20 @@ class MujocoSimulator(Simulator):
             contact = data.contact[index]
             first, second = int(geom_body[contact.geom1]), int(geom_body[contact.geom2])
             for mine, other in ((first, second), (second, first)):
-                part = cache.parts.get(mine)
                 thing = cache.things.get(other)
-                if part is None or thing is None or (part == GRIPPER and thing[1]):
+                if thing is None:
                     continue
-                if self._normal_force(model, data, index) >= _TOUCH_NEWTONS:
-                    touching.add((part, thing[0]))
+                part = cache.parts.get(mine)
+                pad = cache.pads.get(mine)
+                # The hooks record contacts between the gripper and the task's objects.
+                # They do not record a finger pad's contacts.
+                found = [
+                    name
+                    for name in (part, pad)
+                    if name is not None and not (name == GRIPPER and thing[1])
+                ]
+                if found and self._normal_force(model, data, index) >= _TOUCH_NEWTONS:
+                    touching.update((name, thing[0]) for name in found)
         return frozenset(touching)
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
@@ -453,6 +473,32 @@ class MujocoSimulator(Simulator):
         suffix = self._config.object_body_suffix
         found = {name[: -len(suffix)] for name in names if name.endswith(suffix) and name != suffix}
         return tuple(sorted(found, key=len, reverse=True))
+
+    def _pad_bodies(self, model: Any, names: list[str]) -> dict[int, str]:
+        """Each body of a finger pad, with the pad's body name.
+
+        A pad's bodies are the body named after the pad and every body attached below it.
+
+        Raises:
+            ValueError: If the model has no body named after a configured finger pad.
+        """
+        if not self._finger_pads:
+            return {}
+        ids = {name: body_id for body_id, name in enumerate(names)}
+        missing = [pad for pad in self._finger_pads if pad not in ids]
+        if missing:
+            raise ValueError(f"the model has no finger pad body {', '.join(missing)}")
+        pads = {ids[pad]: pad for pad in self._finger_pads}
+        parents = np.asarray(model.body_parentid, dtype=np.int64).reshape(-1)
+        found = {}
+        for body_id in range(len(names)):
+            node = body_id
+            # Body 0 is the world, the root of every body.
+            while node > 0 and node not in pads:
+                node = int(parents[node])
+            if node in pads:
+                found[body_id] = pads[node]
+        return found
 
     def _robot_parts(self, model: Any) -> dict[int, str]:
         """Each body of the gripper as `GRIPPER`, and each body of the arm as `ARM`."""

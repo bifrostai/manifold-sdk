@@ -127,7 +127,10 @@ class BenchmarkReplayConfig(_BenchmarkConfigBase):
 
     `cameras` lists camera names from the spec, and the live view streams `cameras[0]`.
     `finger_pads` lists the gripper's two fingertip pads for each replay's header, and is
-    empty when the gripper has no pads or the replay has no scene. `failure_types` lists
+    empty when the gripper has no pads or the replay has no scene. A MuJoCo simulator also
+    reports each pad's contacts. The replay then counts a grasp only when both pads touch
+    the object, and the episode stops if the model has no body with a pad's name.
+    `failure_types` lists
     the failure types that the hooks can record as `FailureEvent`s. Each replay's header
     holds a copy of the list, and the replay log rejects a `FailureEvent` of any other type.
     """

@@ -191,6 +191,56 @@ def test_the_contacts_name_the_arm_and_the_gripper_and_what_each_presses_on(monk
     assert simulator.replay_contacts(0) == {("arm", "bowl"), ("gripper", "table")}
 
 
+def test_each_finger_pad_names_its_touches_of_the_tasks_objects_too(monkeypatch):
+    env = _env(
+        [
+            {"body": "gripper0_leftfinger", "group": 1},
+            {"body": "gripper0_finger_joint1_tip", "group": 1},
+            {"body": "gripper0_rightfinger", "group": 1},
+            {"body": "bowl_main", "group": 1},
+            {"body": "study_table", "group": 1},
+        ],
+        joints=(("bowl_joint0", 4),),
+    )
+    # The tip, body 2, is attached below the left finger, body 1.
+    env.env.sim.model.body_parentid = np.array([0, 0, 1, 0, 0, 0])
+    # Geom i is on body i + 1: the left finger, its tip, the right finger, the bowl and
+    # the table.
+    pairs = [(1, 3), (2, 3), (0, 4)]
+    data = env.env.sim.data
+    data.ncon = len(pairs)
+    data.contact = [SimpleNamespace(geom1=first, geom2=second) for first, second in pairs]
+
+    def contact_force(_model, _data, index, wrench):
+        wrench[0] = 1.0
+
+    monkeypatch.setitem(
+        sys.modules, "mujoco", SimpleNamespace(mjtGeom=mjtGeom, mj_contactForce=contact_force)
+    )
+    simulator = MujocoSimulator(
+        _CONFIG, finger_pads=("gripper0_leftfinger", "gripper0_rightfinger")
+    )
+    simulator.attach(env, [0])
+    simulator.replay_bodies(0)
+
+    assert simulator.replay_finger_pads() == ("gripper0_leftfinger", "gripper0_rightfinger")
+    # The gripper's other contacts are reported as before: the table, but not the bowl.
+    assert simulator.replay_contacts(0) == {
+        ("gripper0_leftfinger", "bowl"),
+        ("gripper0_rightfinger", "bowl"),
+        ("gripper0_leftfinger", "table"),
+        ("gripper", "table"),
+    }
+
+
+def test_a_finger_pad_missing_from_the_model_is_an_error():
+    simulator = MujocoSimulator(_CONFIG, finger_pads=("gripper0_leftfinger", "gripper0_pad"))
+    simulator.attach(_env([{"body": "gripper0_leftfinger", "group": 1}]), [0])
+
+    with pytest.raises(ValueError, match="gripper0_pad"):
+        simulator.replay_bodies(0)
+
+
 def test_a_drawn_plane_is_left_out_of_the_scene():
     simulator = _attached(_env([{"body": "floor", "group": 1, "type": _PLANE}]))
 
