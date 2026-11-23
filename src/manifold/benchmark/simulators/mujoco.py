@@ -31,6 +31,7 @@ from manifold.benchmark.simulators import (
     GRIPPER,
     TABLE,
     Simulator,
+    touches,
 )
 from manifold.core.conventions import CameraAxes
 from manifold.lib.rotation import convert_camera_axes, wxyz_to_xyzw, xyzw_from_rotation_matrix
@@ -306,21 +307,9 @@ class MujocoSimulator(Simulator):
         for index in range(int(data.ncon)):
             contact = data.contact[index]
             first, second = int(geom_body[contact.geom1]), int(geom_body[contact.geom2])
-            for mine, other in ((first, second), (second, first)):
-                thing = cache.things.get(other)
-                if thing is None:
-                    continue
-                part = cache.parts.get(mine)
-                pad = cache.pads.get(mine)
-                # The hooks record contacts between the gripper and the task's objects.
-                # They do not record a finger pad's contacts.
-                found = [
-                    name
-                    for name in (part, pad)
-                    if name is not None and not (name == GRIPPER and thing[1])
-                ]
-                if found and self._normal_force(model, data, index) >= _TOUCH_NEWTONS:
-                    touching.update((name, thing[0]) for name in found)
+            found = touches(first, second, cache.things, cache.parts, cache.pads)
+            if found and self._normal_force(model, data, index) >= _TOUCH_NEWTONS:
+                touching.update(found)
         return frozenset(touching)
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:

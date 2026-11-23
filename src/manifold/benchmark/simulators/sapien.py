@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict
 
 from manifold.benchmark.simulators import (
     BOX_VERTICES,
+    GREY,
     Simulator,
     bounding_box_part,
 )
@@ -56,9 +57,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 _logger = logging.getLogger(__name__)
-
-# The colour of a part without a material.
-_GREY = (0.7, 0.7, 0.7, 1.0)
 
 
 @dataclass(frozen=True)
@@ -330,7 +328,7 @@ class SapienSimulator(Simulator):
         parts = []
         for vertices, faces, material in meshes:
             scaled = np.asarray(vertices, dtype=np.float64) * scale
-            colour = _GREY
+            colour = GREY
             if material is not None:
                 red, green, blue, alpha = (float(c) for c in material.base_color)
                 colour = (red, green, blue, alpha)
