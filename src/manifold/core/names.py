@@ -59,6 +59,7 @@ class EmbodimentName(_Name):
     DROID_JOINT_ABSOLUTE = "droid_joint_absolute"
     FRANKA_EE_DELTA = "franka_ee_delta"
     FRANKA_JOINT_ABSOLUTE = "franka_joint_absolute"
+    FRANKA_MOBILE_WHOLE_BODY = "franka_mobile_whole_body"
     PANDA_OMRON_WHOLE_BODY = "panda_omron_whole_body"
     RBY1_WUJI2_JOINT_ABSOLUTE = "rby1_wuji2_joint_absolute"
     WIDOWX_EE_DELTA = "widowx_ee_delta"

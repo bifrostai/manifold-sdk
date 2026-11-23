@@ -199,6 +199,18 @@ def test_a_composite_with_another_mode_cut_is_refused() -> None:
     assert report.status.value == "incompatible"
 
 
+def test_a_base_counted_from_the_mount_point_is_refused_against_the_world() -> None:
+    def base_in(frame: Frame) -> CompositeActionSpace:
+        base = BodyActionSpace(
+            part=BodyPart.MOBILE_BASE, dof=3, command=Command.ABSOLUTE, frame=frame
+        )
+        return CompositeActionSpace(groups=(base, _RC365.groups[0]))
+
+    report = check_compatibility(_policy(base_in(Frame.WORLD)), _benchmark(base_in(Frame.MOUNT)))
+
+    assert report.status.value == "incompatible"
+
+
 def test_an_identical_rc365_pairing_verifies_every_group() -> None:
     report = verify(_policy(_RC365), _benchmark(_RC365), Pipeline())
 

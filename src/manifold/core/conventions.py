@@ -99,6 +99,9 @@ class Frame(StrEnum):
     # reorientation of BASE, not a kinematic transform. GR00T/RLDX's
     # WidowXBridgeEnv reads its proprio euler in this frame.
     WIDOWX_BRIDGE_EE = "widowx_bridge_ee"
+    # Fixed frame at the point where the robot is mounted in the scene. Unlike BASE,
+    # it stays in place when a mobile base moves.
+    MOUNT = "mount"
 
 
 def rotation_dims(rotation: RotationFormat) -> int:
