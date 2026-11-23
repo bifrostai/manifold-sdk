@@ -19,6 +19,7 @@ from manifold.embodiments.aloha_agilex_joint_absolute import ALOHA_AGILEX_JOINT_
 from manifold.embodiments.droid_joint_absolute import DROID_JOINT_ABSOLUTE
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.embodiments.franka_joint_absolute import FRANKA_JOINT_ABSOLUTE
+from manifold.embodiments.franka_mobile_whole_body import FRANKA_MOBILE_WHOLE_BODY
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 from manifold.embodiments.rby1_wuji2_joint_absolute import RBY1_WUJI2_JOINT_ABSOLUTE
 from manifold.embodiments.widowx_ee_delta import WIDOWX_EE_DELTA
@@ -28,6 +29,7 @@ ALL = (
     DROID_JOINT_ABSOLUTE,
     FRANKA_EE_DELTA,
     FRANKA_JOINT_ABSOLUTE,
+    FRANKA_MOBILE_WHOLE_BODY,
     PANDA_OMRON_WHOLE_BODY,
     RBY1_WUJI2_JOINT_ABSOLUTE,
     WIDOWX_EE_DELTA,
@@ -39,6 +41,7 @@ __all__ = [
     "DROID_JOINT_ABSOLUTE",
     "FRANKA_EE_DELTA",
     "FRANKA_JOINT_ABSOLUTE",
+    "FRANKA_MOBILE_WHOLE_BODY",
     "PANDA_OMRON_WHOLE_BODY",
     "RBY1_WUJI2_JOINT_ABSOLUTE",
     "WIDOWX_EE_DELTA",

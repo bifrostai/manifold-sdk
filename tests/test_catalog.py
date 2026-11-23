@@ -4,11 +4,16 @@ import pkgutil
 import pytest
 
 import manifold.embodiments
-from manifold.core.conventions import GripperFormat
-from manifold.core.embodiment import CompositeActionSpace, EEActionSpace, Embodiment
+from manifold.core.conventions import Frame, GripperFormat
+from manifold.core.embodiment import (
+    BodyActionSpace,
+    CompositeActionSpace,
+    EEActionSpace,
+    Embodiment,
+)
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
-from manifold.embodiments import FRANKA_EE_DELTA, PANDA_OMRON_WHOLE_BODY
+from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_MOBILE_WHOLE_BODY, PANDA_OMRON_WHOLE_BODY
 
 # Read off the package directory, not off `ALL`, so a newly added file is checked
 # whether or not the catalog has been told about it.
@@ -58,6 +63,7 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
         "droid_joint_absolute",
         "franka_ee_delta",
         "franka_joint_absolute",
+        "franka_mobile_whole_body",
         "panda_omron_whole_body",
         "rby1_wuji2_joint_absolute",
         "widowx_ee_delta",
@@ -112,3 +118,13 @@ def test_panda_omron_declares_its_whole_body():
     ]
     widths = [getattr(proprio, field) for field in proprio.spec_fields()]
     assert sum(spec.expected_length() for spec in widths if spec is not None) == 24
+
+
+def test_the_mobile_franka_moves_its_base_from_the_mount_point_then_its_arm():
+    action = FRANKA_MOBILE_WHOLE_BODY.action
+
+    assert isinstance(action, CompositeActionSpace)
+    assert action.slices() == [("mobile_base", 0, 3), ("ee", 3, 10)]
+    base = action.groups[0]
+    assert isinstance(base, BodyActionSpace)
+    assert base.frame is Frame.MOUNT
