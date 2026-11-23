@@ -17,7 +17,7 @@ from manifold.lib.compat import assert_never
 from manifold.replay import ReplayMesh, ReplayScenePart
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     import numpy as np
 
@@ -38,6 +38,9 @@ ARM = "arm"
 GRIPPER = "gripper"
 HAND = "hand"
 
+# The colour of a part that has no colour of its own.
+GREY = (0.7, 0.7, 0.7, 1.0)
+
 
 def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
     """A box part that bounds `parts`, in the colour of the first part.
@@ -52,6 +55,35 @@ def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
         position=((low + high) / 2.0).astype(np.float32),
         color=parts[0].color,
     )
+
+
+def touches(
+    first: int,
+    second: int,
+    things: Mapping[int, tuple[str, bool]],
+    parts: Mapping[int, str],
+    pads: Mapping[int, str],
+) -> set[tuple[str, str]]:
+    """Each robot part or finger pad in a contact, with the name of the body it touches.
+
+    `first` and `second` are the contact's two bodies. `things` maps each body that a
+    robot part can touch to its name and to whether it is one of the task's objects.
+    `parts` maps a robot body to `ARM` or `GRIPPER`, and `pads` maps a finger pad's body
+    to the pad's body name. The result leaves out `GRIPPER` with one of the task's
+    objects, because the hooks record those contacts. It includes a finger pad's
+    contacts with those objects.
+    """
+    found = set()
+    for mine, other in ((first, second), (second, first)):
+        thing = things.get(other)
+        if thing is None:
+            continue
+        found.update(
+            (name, thing[0])
+            for name in (parts.get(mine), pads.get(mine))
+            if name is not None and not (name == GRIPPER and thing[1])
+        )
+    return found
 
 
 class Simulator(ABC):
@@ -172,6 +204,10 @@ class Simulator(ABC):
 
 def make_simulator(config: BenchmarkConfig) -> Simulator | None:
     """The simulator for `config.simulator`, or None for a config without one."""
+    from manifold.benchmark.simulators.genesis import (
+        BenchmarkGenesisSimulatorConfig,
+        GenesisSimulator,
+    )
     from manifold.benchmark.simulators.isaacsim import (
         BenchmarkIsaacSimSimulatorConfig,
         IsaacSimSimulator,
@@ -190,16 +226,22 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         return IsaacSimSimulator(simulator, config)
     if isinstance(simulator, BenchmarkSapienSimulatorConfig):
         return SapienSimulator(simulator)
+    if isinstance(simulator, BenchmarkGenesisSimulatorConfig):
+        return GenesisSimulator(
+            simulator, finger_pads=tuple(pad.body for pad in config.replay.finger_pads)
+        )
     return assert_never(simulator)
 
 
 __all__ = [
     "ARM",
     "BOX_VERTICES",
+    "GREY",
     "GRIPPER",
     "HAND",
     "TABLE",
     "Simulator",
     "bounding_box_part",
     "make_simulator",
+    "touches",
 ]

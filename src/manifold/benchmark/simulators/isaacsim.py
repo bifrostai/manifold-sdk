@@ -52,6 +52,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from manifold.benchmark.simulators import (
     BOX_VERTICES,
+    GREY,
     GRIPPER,
     TABLE,
     Simulator,
@@ -85,9 +86,6 @@ _FILE_LIMIT = 16384
 # The near plane that `IsaacSimSimulator.apply_settings` gives a camera without a clipping
 # range. A higher near plane would cut the gripper out of a wrist camera.
 _NEAR_CLIP_METRES = 0.01
-
-# The colour of a part with no material colour and no display colour.
-_GREY = (0.7, 0.7, 0.7, 1.0)
 
 # The shader inputs for a material's constant colour. A UsdPreviewSurface
 # names it `diffuseColor`, and Omniverse's MDL shaders use the other names.
@@ -1434,7 +1432,7 @@ class IsaacSimSimulator(Simulator):
         """The prim's first display colour, or grey when it has none."""
         values = geom.Gprim(prim).GetDisplayColorAttr().Get()
         if values is None or len(values) == 0:
-            return _GREY
+            return GREY
         red, green, blue = (float(channel) for channel in tuple(values[0])[:3])
         return red, green, blue, 1.0
 
