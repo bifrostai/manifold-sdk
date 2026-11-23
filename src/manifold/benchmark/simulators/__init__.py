@@ -204,6 +204,10 @@ class Simulator(ABC):
 
 def make_simulator(config: BenchmarkConfig) -> Simulator | None:
     """The simulator for `config.simulator`, or None for a config without one."""
+    from manifold.benchmark.simulators.genesis import (
+        BenchmarkGenesisSimulatorConfig,
+        GenesisSimulator,
+    )
     from manifold.benchmark.simulators.isaacsim import (
         BenchmarkIsaacSimSimulatorConfig,
         IsaacSimSimulator,
@@ -222,6 +226,10 @@ def make_simulator(config: BenchmarkConfig) -> Simulator | None:
         return IsaacSimSimulator(simulator, config)
     if isinstance(simulator, BenchmarkSapienSimulatorConfig):
         return SapienSimulator(simulator)
+    if isinstance(simulator, BenchmarkGenesisSimulatorConfig):
+        return GenesisSimulator(
+            simulator, finger_pads=tuple(pad.body for pad in config.replay.finger_pads)
+        )
     return assert_never(simulator)
 
 
