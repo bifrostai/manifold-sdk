@@ -57,6 +57,7 @@ class EmbodimentName(_Name):
 
     ALOHA_AGILEX_JOINT_ABSOLUTE = "aloha_agilex_joint_absolute"
     DROID_JOINT_ABSOLUTE = "droid_joint_absolute"
+    DUAL_FRANKA_EE_DELTA = "dual_franka_ee_delta"
     FRANKA_EE_DELTA = "franka_ee_delta"
     FRANKA_JOINT_ABSOLUTE = "franka_joint_absolute"
     FRANKA_MOBILE_WHOLE_BODY = "franka_mobile_whole_body"

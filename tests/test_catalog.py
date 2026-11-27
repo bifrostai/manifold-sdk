@@ -4,7 +4,7 @@ import pkgutil
 import pytest
 
 import manifold.embodiments
-from manifold.core.conventions import Frame, GripperFormat
+from manifold.core.conventions import Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     BodyActionSpace,
     CompositeActionSpace,
@@ -13,7 +13,12 @@ from manifold.core.embodiment import (
 )
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
-from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_MOBILE_WHOLE_BODY, PANDA_OMRON_WHOLE_BODY
+from manifold.embodiments import (
+    DUAL_FRANKA_EE_DELTA,
+    FRANKA_EE_DELTA,
+    FRANKA_MOBILE_WHOLE_BODY,
+    PANDA_OMRON_WHOLE_BODY,
+)
 
 # Read off the package directory, not off `ALL`, so a newly added file is checked
 # whether or not the catalog has been told about it.
@@ -61,6 +66,7 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
     assert {name.value for name in EmbodimentName} == {
         "aloha_agilex_joint_absolute",
         "droid_joint_absolute",
+        "dual_franka_ee_delta",
         "franka_ee_delta",
         "franka_joint_absolute",
         "franka_mobile_whole_body",
@@ -128,3 +134,12 @@ def test_the_mobile_franka_moves_its_base_from_the_mount_point_then_its_arm():
     base = action.groups[0]
     assert isinstance(base, BodyActionSpace)
     assert base.frame is Frame.MOUNT
+
+
+def test_the_dual_franka_drives_each_arm_in_turn_in_its_own_base_frame():
+    action = DUAL_FRANKA_EE_DELTA.action
+
+    assert isinstance(action, EEActionSpace)
+    assert (action.per_arm_length(), action.expected_length()) == (7, 14)
+    assert (action.rotation, action.gripper) == (RotationFormat.EULER_XYZ, GripperFormat.SIGNED)
+    assert (action.frame, action.delta) == (Frame.BASE, True)

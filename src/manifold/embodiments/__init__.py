@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from manifold.embodiments.aloha_agilex_joint_absolute import ALOHA_AGILEX_JOINT_ABSOLUTE
 from manifold.embodiments.droid_joint_absolute import DROID_JOINT_ABSOLUTE
+from manifold.embodiments.dual_franka_ee_delta import DUAL_FRANKA_EE_DELTA
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.embodiments.franka_joint_absolute import FRANKA_JOINT_ABSOLUTE
 from manifold.embodiments.franka_mobile_whole_body import FRANKA_MOBILE_WHOLE_BODY
@@ -27,6 +28,7 @@ from manifold.embodiments.widowx_ee_delta import WIDOWX_EE_DELTA
 ALL = (
     ALOHA_AGILEX_JOINT_ABSOLUTE,
     DROID_JOINT_ABSOLUTE,
+    DUAL_FRANKA_EE_DELTA,
     FRANKA_EE_DELTA,
     FRANKA_JOINT_ABSOLUTE,
     FRANKA_MOBILE_WHOLE_BODY,
@@ -39,6 +41,7 @@ __all__ = [
     "ALL",
     "ALOHA_AGILEX_JOINT_ABSOLUTE",
     "DROID_JOINT_ABSOLUTE",
+    "DUAL_FRANKA_EE_DELTA",
     "FRANKA_EE_DELTA",
     "FRANKA_JOINT_ABSOLUTE",
     "FRANKA_MOBILE_WHOLE_BODY",
