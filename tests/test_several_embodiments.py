@@ -2,15 +2,29 @@
 
 from __future__ import annotations
 
-from typing import Any
+import types
+from typing import Any, cast
 
 import pytest
 from pydantic import ValidationError
 
-from manifold.benchmark import BenchmarkConfig
+from manifold.benchmark import BenchmarkConfig, ResetResult, StepResult, _client
+from manifold.benchmark._client import _ClientPolicyConnection
+from manifold.benchmark._service import make_service
+from manifold.benchmark.simulators.genesis import GenesisSimulator
 from manifold.core.benchmark import Benchmark
 from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE
-from tests.test_benchmark_runtime import _raw_config
+from manifold.replay import EpisodeStartedEvent, read_replay_log
+from manifold.wire import FrameType
+from tests.test_benchmark_runtime import (
+    _LOGGER,
+    _observation,
+    _Policy,
+    _raw_config,
+    _run_client,
+    _Session,
+    _task,
+)
 
 _GENESIS = {
     "name": "genesis",
@@ -193,3 +207,224 @@ def test_the_replay_cameras_must_be_sensors_of_every_embodiment():
 
     with pytest.raises(ValidationError, match=r"in spec\.sensors: \['wrist'\]"):
         BenchmarkConfig.model_validate(raw)
+
+
+# The Client, run against a fake task session and fake policy connections.
+
+
+def _client_config(num_envs: int, **changes: Any) -> BenchmarkConfig:
+    """A config without a simulator, whose spec lists the two embodiments."""
+    raw = _raw_config({"type": "single"}, num_envs=num_envs)
+    raw["spec"] = _spec([_arm_entry(), _ee_entry()])
+    return BenchmarkConfig.model_validate(raw | changes)
+
+
+def _hooks(embodiment_of: Any) -> types.SimpleNamespace:
+    """Hooks whose episode `i` uses the embodiment `embodiment_of(i)` and succeeds at once."""
+
+    def on_reset(config, env, task_config, episode_idx, logger):
+        return ResetResult(
+            _observation(episode_idx),
+            instruction="lift the toy",
+            task_id=task_config["task_id"],
+            attributes={"seed": str(episode_idx)},
+            events=(),
+            max_steps=None,
+            embodiment=embodiment_of(episode_idx),
+        )
+
+    def on_step(config, env, task_config, action, logger):
+        return StepResult(_observation(0), success=True, done=True, events=())
+
+    return types.SimpleNamespace(
+        env_key=lambda config, task_config, logger: None,
+        on_load=lambda config, task_config, logger: types.SimpleNamespace(),
+        on_reset=on_reset,
+        on_step=on_step,
+    )
+
+
+class _NamedPolicy(_Policy):
+    """A fake policy connection that keeps the embodiment of its spec and counts its calls."""
+
+    def __init__(self, address: str, benchmark: Benchmark, image_format: str) -> None:
+        super().__init__(address, benchmark, image_format)
+        self.embodiment = str(benchmark.embodiment.name)
+        self.embodiments = benchmark.embodiments
+        self.infers = 0
+        self.closed = False
+
+    def infer(self, observation):
+        self.infers += 1
+        return super().infer(observation)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _by_parity(episode_idx: int) -> str:
+    return "franka_joint_absolute" if episode_idx % 2 == 0 else "franka_ee_delta"
+
+
+def test_the_client_opens_a_connection_for_each_env_and_embodiment(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0, 1, 2, 3)))
+
+    policies = _run_client(
+        _client_config(2), _hooks(_by_parity), session, monkeypatch, _NamedPolicy
+    )
+
+    assert [policy.embodiment for policy in policies] == [
+        "franka_joint_absolute",
+        "franka_ee_delta",
+        "franka_joint_absolute",
+        "franka_ee_delta",
+    ]
+    assert all(policy.embodiments is None for policy in policies)
+    assert all(policy.closed for policy in policies)
+
+
+def test_each_episode_runs_on_its_embodiments_connection_and_names_it(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0, 1, 2)))
+
+    policies = _run_client(
+        _client_config(1), _hooks(_by_parity), session, monkeypatch, _NamedPolicy
+    )
+
+    arm, ee = policies
+    assert (arm.resets, arm.infers, ee.resets, ee.infers) == (2, 2, 1, 1)
+    ((records, artifacts),) = session.completed
+    assert [record.attributes for record in records] == [
+        {"seed": "0", "embodiment": "franka_joint_absolute"},
+        {"seed": "1", "embodiment": "franka_ee_delta"},
+        {"seed": "2", "embodiment": "franka_joint_absolute"},
+    ]
+    started = read_replay_log(artifacts[1][0]).steps[0].events[0]
+    assert isinstance(started, EpisodeStartedEvent)
+    assert started.attributes == {"seed": "1", "embodiment": "franka_ee_delta"}
+
+
+def test_a_spec_of_one_robot_runs_each_episode_on_its_only_embodiment(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0,)))
+    raw = _raw_config({"type": "single"})
+
+    policies = _run_client(
+        BenchmarkConfig.model_validate(raw), _hooks(lambda _: None), session, monkeypatch
+    )
+
+    assert len(policies) == 1
+    ((records, _),) = session.completed
+    assert records[0].attributes == {"seed": "0", "embodiment": "franka_joint_absolute"}
+
+
+@pytest.mark.parametrize(
+    ("embodiment", "message"),
+    [
+        (None, "named no embodiment for task 'toy/clean'"),
+        ("widowx_ee_delta", "embodiment 'widowx_ee_delta' for task 'toy/clean', which the spec"),
+    ],
+)
+def test_an_episode_without_a_listed_embodiment_fails(tmp_path, monkeypatch, embodiment, message):
+    session = _Session(_task(tmp_path, (0,)))
+
+    with pytest.raises(ValueError, match=message):
+        _run_client(_client_config(1), _hooks(lambda _: embodiment), session, monkeypatch)
+
+    assert session.completed == []
+
+
+def test_a_refused_embodiment_fails_the_run_before_any_episode(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0,)))
+    opened: list[_NamedPolicy] = []
+    resets: list[int] = []
+    hooks = _hooks(_by_parity)
+    on_reset = hooks.on_reset
+
+    def refusing(address, benchmark, image_format):
+        if benchmark.embodiment.name == "franka_ee_delta":
+            raise RuntimeError("policy rejected the pairing with franka_ee_delta (no READY)")
+        opened.append(_NamedPolicy(address, benchmark, image_format))
+        return opened[-1]
+
+    def reset(config, env, task_config, episode_idx, logger):
+        resets.append(episode_idx)
+        return on_reset(config, env, task_config, episode_idx, logger)
+
+    hooks.on_reset = reset
+    with pytest.raises(RuntimeError, match="rejected the pairing with franka_ee_delta"):
+        _run_client(_client_config(1), hooks, session, monkeypatch, refusing)
+
+    assert [policy.closed for policy in opened] == [True]
+    assert resets == []
+    assert session.completed == []
+
+
+def test_the_replay_of_each_episode_has_its_embodiments_finger_pads(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0, 1)))
+    raw = _raw_config({"type": "single"})
+    raw["replay"] = {"cameras": ["agentview"], "finger_pads": _PADS}
+    config = _client_config(
+        1,
+        replay=raw["replay"],
+        embodiments={"franka_ee_delta": {"finger_pads": [], "simulator": {}}},
+    )
+
+    _run_client(config, _hooks(_by_parity), session, monkeypatch, _NamedPolicy)
+
+    ((_, artifacts),) = session.completed
+    arm, ee = (read_replay_log(artifacts[index][0]) for index in (0, 1))
+    assert [pad.body for pad in arm.finger_pads] == ["left_finger", "right_finger"]
+    assert ee.finger_pads == ()
+
+
+def test_the_live_view_gets_each_episodes_embodiment(tmp_path, monkeypatch):
+    session = _Session(_task(tmp_path, (0, 1)))
+    published: list[str] = []
+    live_view = types.SimpleNamespace(
+        publish=lambda observation, *, embodiment, **_: published.append(embodiment)
+    )
+
+    _run_client(_client_config(1), _hooks(_by_parity), session, monkeypatch, live_view=live_view)
+
+    assert published == ["franka_joint_absolute"] * 2 + ["franka_ee_delta"] * 2
+
+
+def test_the_hello_leaves_out_the_embodiments(monkeypatch):
+    sent = []
+    replies = [{"type": FrameType.READY, "payload": {}}]
+    channel = types.SimpleNamespace(
+        send=lambda *args: sent.append(args), recv=lambda: replies.pop(0)
+    )
+    monkeypatch.setattr(
+        _client.socket,
+        "create_connection",
+        lambda *_args: types.SimpleNamespace(close=lambda: None),
+    )
+    monkeypatch.setattr(_client.FrameChannel, "from_socket", staticmethod(lambda _s: channel))
+    spec = _client_config(1).spec
+
+    _ClientPolicyConnection("policy:9000", spec.for_embodiment("franka_ee_delta"), "raw")
+
+    ((_, payload),) = sent
+    assert "embodiments" not in payload["benchmark"]
+    assert payload["benchmark"]["embodiment"]["name"] == "franka_ee_delta"
+
+
+def test_the_service_attaches_the_simulator_of_each_embodiment_with_its_own_values(tmp_path):
+    raw = _several_config(
+        embodiments={
+            "franka_ee_delta": {"finger_pads": [], "simulator": {"robot": "agents.1.robot"}}
+        }
+    )
+    service = make_service(BenchmarkConfig.model_validate(raw), _hooks(_by_parity))
+
+    service.load(_task(tmp_path, (0,)))
+    service.reset({0: 0}, {0: _LOGGER})
+
+    arm = service.simulator_for("franka_joint_absolute")
+    ee = service.simulator_for("franka_ee_delta")
+    assert arm is service.simulator
+    assert isinstance(ee, GenesisSimulator)
+    assert ee is not arm
+    assert cast("Any", ee)._config.robot == "agents.1.robot"
+    assert cast("Any", ee)._finger_pads == ()
+    assert set(cast("Any", ee)._envs) == set(cast("Any", arm)._envs) == {0}

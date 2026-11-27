@@ -22,6 +22,8 @@ from manifold.core.sensor import Modality
 from manifold.wire import FrameChannel
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from manifold.core.benchmark import Benchmark
     from manifold.core.sensor import Camera
     from manifold.core.values import Observation
@@ -56,23 +58,28 @@ def live_view_publisher(
     """A publisher of `camera_name`'s frames to `server`, or None when `server` is None.
 
     `server` is the `host:port` address of the live view server. The function raises
-    ValueError if `camera_name` is None or is not an RGB camera of the benchmark, or if
-    `server` is not `host:port`.
+    ValueError if `camera_name` is None or is not an RGB camera of each embodiment of the
+    benchmark, or if `server` is not `host:port`.
     """
     if server is None:
         return nullcontext(None)
     if camera_name is None:
         raise ValueError("live_view_camera is required when live_view_server is set")
 
-    camera = benchmark.observation_space.camera(camera_name)
-    if camera is None:
-        raise ValueError(f"benchmark observation space does not include camera {camera_name!r}")
-    if camera.modality is not Modality.RGB:
-        raise ValueError(f"live-view camera {camera_name!r} must be RGB")
+    cameras: dict[str, Camera] = {}
+    for name in benchmark.embodiment_names:
+        camera = benchmark.for_embodiment(name).observation_space.camera(camera_name)
+        if camera is None:
+            raise ValueError(
+                f"benchmark observation space of {name} does not include camera {camera_name!r}"
+            )
+        if camera.modality is not Modality.RGB:
+            raise ValueError(f"live-view camera {camera_name!r} must be RGB")
+        cameras[name] = camera
     host, _, port = server.rpartition(":")
     if not host or not port:
         raise ValueError(f"server must be host:port, got {server!r}")
-    return LiveViewPublisher(host, int(port), camera)
+    return LiveViewPublisher(host, int(port), cameras)
 
 
 class LiveViewPublisher:
@@ -83,10 +90,11 @@ class LiveViewPublisher:
     before it sends the next.
     """
 
-    def __init__(self, host: str, port: int, camera: Camera) -> None:
+    def __init__(self, host: str, port: int, cameras: Mapping[str, Camera]) -> None:
         self._host = host
         self._port = port
-        self._camera = camera
+        # The camera that the live view shows, by embodiment name.
+        self._cameras = dict(cameras)
         self._condition = threading.Condition()
         self._latest: _PendingFrame | None = None
         # `publish` numbers the frames, because frames can arrive out of order. The live
@@ -115,6 +123,7 @@ class LiveViewPublisher:
         self,
         observation: Observation,
         *,
+        embodiment: str,
         episode_idx: int,
         step: int,
         task: str,
@@ -122,14 +131,16 @@ class LiveViewPublisher:
     ) -> None:
         """Copy the camera's frame from `observation` as the latest frame.
 
-        The method does no encoding or I/O, so the episode loop does not wait for it. The
-        live view shows the frame unchanged, so the caller turns it upright and into RGB
-        first.
+        `embodiment` is the name of the episode's embodiment, whose camera the frame is
+        checked against. The method does no encoding or I/O, so the episode loop does not
+        wait for it. The live view shows the frame unchanged, so the caller turns it upright
+        and into RGB first.
         """
-        image = observation.sensors.get(self._camera.name)
+        camera = self._cameras[embodiment]
+        image = observation.sensors.get(camera.name)
         if image is None:
             return
-        self._camera.validate_value(image)
+        camera.validate_value(image)
         copied = np.array(image, copy=True)
         with self._condition:
             self._sequence += 1

@@ -115,6 +115,10 @@ class ResetResult:
     benchmark sets `config.run.max_steps` to null. The Client raises an error if both
     the hooks and the config set a limit. A benchmark whose tasks use the config's
     limit passes None.
+
+    `embodiment` is the name of the episode's embodiment, one of `spec.embodiments`. It
+    is None for a spec of one robot. The Client runs the episode on that embodiment's
+    policy connection, and adds the name to `attributes` under `embodiment`.
     """
 
     observation: Observation
@@ -123,6 +127,7 @@ class ResetResult:
     attributes: dict[str, str]
     events: tuple[ManifoldEvent, ...]
     max_steps: int | None
+    embodiment: str | None = None
 
 
 def _log_unsupported_versions(simulator: Simulator) -> None:
@@ -161,6 +166,12 @@ class Service(ABC):
         # The simulator that the replay reads the scene and physics from. It is None for a
         # config without a simulator.
         self.simulator = make_simulator(config)
+        # The simulator of each embodiment that the config gives its own values, by
+        # embodiment name. The Service starts and stops only `simulator`, and attaches and
+        # steps each of them.
+        self._embodiment_simulators = {
+            name: make_simulator(config.for_embodiment(name)) for name in config.embodiments or {}
+        }
         self.num_envs = config.env.num_envs
         self.reset_together = (
             isinstance(config.service, BenchmarkBatchedServiceConfig)
@@ -173,6 +184,15 @@ class Service(ABC):
         # get the logger of the last task that loaded envs.
         self._container_logger = _HooksLogger("")
         self._task_logger = self._container_logger
+
+    def simulator_for(self, embodiment: str) -> Simulator | None:
+        """The simulator that the replay of an episode of `embodiment` reads."""
+        return self._embodiment_simulators.get(embodiment, self.simulator)
+
+    def _simulators(self) -> list[Simulator]:
+        """Each simulator that the Service attaches and steps."""
+        simulators = [self.simulator, *self._embodiment_simulators.values()]
+        return [simulator for simulator in simulators if simulator is not None]
 
     def start(self) -> None:
         """Start the simulator, then run the hooks' `on_start`.
@@ -225,9 +245,9 @@ class Service(ABC):
         """Run the hooks' `on_load` for `task`, and attach the simulator."""
 
     def _run_simulator_post_step(self) -> None:
-        """Run the simulator's `post_step`, after the hooks reset or step any env."""
-        if self.simulator is not None:
-            self.simulator.post_step()
+        """Run each simulator's `post_step`, after the hooks reset or step any env."""
+        for simulator in self._simulators():
+            simulator.post_step()
 
     @abstractmethod
     def _unload_envs(self) -> None:
@@ -261,9 +281,9 @@ class SingleService(Service):
             self.hooks.on_load(self.config, task.task_config, self._task_logger)
             for _ in range(self.num_envs)
         ]
-        if self.simulator is not None:
+        for simulator in self._simulators():
             for env_id, env in enumerate(self._envs):
-                self.simulator.attach(env, [env_id])
+                simulator.attach(env, [env_id])
 
     def reset(
         self, episodes: Mapping[int, int], loggers: Mapping[int, LoggerAdapter[Logger]]
@@ -313,8 +333,8 @@ class BatchedService(Service):
 
     def _load_envs(self, task: WorkerTask) -> None:
         self._env = self.hooks.on_load(self.config, task.task_config, self._task_logger)
-        if self.simulator is not None:
-            self.simulator.attach(self._env, list(range(self.num_envs)))
+        for simulator in self._simulators():
+            simulator.attach(self._env, list(range(self.num_envs)))
 
     def reset(
         self, episodes: Mapping[int, int], loggers: Mapping[int, LoggerAdapter[Logger]]

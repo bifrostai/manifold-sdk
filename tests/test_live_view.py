@@ -59,7 +59,14 @@ def test_the_publisher_sends_the_frame_as_a_jpeg_with_its_episode(monkeypatch):
     # act
     with live_view_publisher(benchmark, _SERVER, CameraName.AGENTVIEW) as publisher:
         assert publisher is not None
-        publisher.publish(_frame(source), episode_idx=7, step=0, task="pick", task_id="PickTask")
+        publisher.publish(
+            _frame(source),
+            embodiment="franka_ee_delta",
+            episode_idx=7,
+            step=0,
+            task="pick",
+            task_id="PickTask",
+        )
         assert received_frame.wait(timeout=2.0)
     receiver.join(timeout=2.0)
 
@@ -128,9 +135,23 @@ def test_the_publisher_does_not_repeat_a_frame_after_reconnecting(monkeypatch):
     # act
     with live_view_publisher(benchmark, _SERVER, CameraName.AGENTVIEW) as publisher:
         assert publisher is not None
-        publisher.publish(_frame(image), episode_idx=0, step=0, task="task", task_id="task")
+        publisher.publish(
+            _frame(image),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=0,
+            task="task",
+            task_id="task",
+        )
         assert publish_next.wait(timeout=2.0)
-        publisher.publish(_frame(image), episode_idx=0, step=1, task="task", task_id="task")
+        publisher.publish(
+            _frame(image),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=1,
+            task="task",
+            task_id="task",
+        )
         assert received_second.wait(timeout=2.0)
     receiver.join(timeout=2.0)
 
@@ -191,7 +212,14 @@ def test_the_publisher_sends_a_frame_again_when_sending_fails(monkeypatch):
 
     with live_view_publisher(benchmark, _SERVER, CameraName.AGENTVIEW) as publisher:
         assert publisher is not None
-        publisher.publish(_frame(image), episode_idx=0, step=0, task="task", task_id="task")
+        publisher.publish(
+            _frame(image),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=0,
+            task="task",
+            task_id="task",
+        )
         assert received_frame.wait(timeout=2.0)
     receiver.join(timeout=2.0)
 
@@ -222,7 +250,14 @@ def test_the_publisher_rejects_a_boolean_acknowledgement(monkeypatch):
 
     with live_view_publisher(benchmark, _SERVER, CameraName.AGENTVIEW) as publisher:
         assert publisher is not None
-        publisher.publish(_frame(image), episode_idx=0, step=0, task="task", task_id="task")
+        publisher.publish(
+            _frame(image),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=0,
+            task="task",
+            task_id="task",
+        )
         assert acknowledgement_rejected.wait(timeout=2.0)
     receiver.join(timeout=2.0)
 
@@ -262,7 +297,14 @@ def test_the_publisher_checks_a_frame_before_copying_it(monkeypatch):
         pytest.raises(ValueError, match="shape mismatch"),
     ):
         assert publisher is not None
-        publisher.publish(_frame(too_large), episode_idx=0, step=0, task="task", task_id="task")
+        publisher.publish(
+            _frame(too_large),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=0,
+            task="task",
+            task_id="task",
+        )
 
 
 def test_the_publisher_closes_its_socket_during_a_partial_control_frame(monkeypatch):
@@ -284,7 +326,14 @@ def test_the_publisher_closes_its_socket_during_a_partial_control_frame(monkeypa
 
     with live_view_publisher(benchmark, _SERVER, CameraName.AGENTVIEW) as publisher:
         assert publisher is not None
-        publisher.publish(_frame(image), episode_idx=0, step=0, task="task", task_id="task")
+        publisher.publish(
+            _frame(image),
+            embodiment="franka_ee_delta",
+            episode_idx=0,
+            step=0,
+            task="task",
+            task_id="task",
+        )
         assert partial_sent.wait(timeout=2.0)
     receiver.join(timeout=1.0)
 

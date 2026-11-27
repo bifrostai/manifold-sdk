@@ -122,7 +122,7 @@ class _ClientPolicyConnection:
     Client opens a connection to the policy for each env. Each connection sends the
     bridge's messages in the order that `serve` expects.
 
-    The constructor sends the benchmark's spec, and the policy server checks the
+    The constructor sends the spec of one embodiment, and the policy server checks the
     pairing before it answers. `reset` starts an episode, and the policy server then
     drops the actions that remain from the policy's last chunk. `infer` sends an
     observation and returns the action. It checks the action against the benchmark's
@@ -140,14 +140,16 @@ class _ClientPolicyConnection:
             HelloPayload(
                 protocol_version=BRIDGE_PROTOCOL_VERSION,
                 benchmark=benchmark.model_dump(
-                    mode="json", exclude={"gpu_architectures", "end_effectors"}
+                    mode="json", exclude={"gpu_architectures", "end_effectors", "embodiments"}
                 ),
             ).model_dump(),
         )
         reply = self._channel.recv()
         if reply is None or reply.get("type") != FrameType.READY:
             self._socket.close()
-            raise RuntimeError("policy rejected the pairing (no READY)")
+            raise RuntimeError(
+                f"policy rejected the pairing with {benchmark.embodiment.name} (no READY)"
+            )
 
     def reset(self) -> None:
         """Start an episode on this connection."""
@@ -221,7 +223,9 @@ class _ClientRunningEpisode:
     the instruction that the reset returned. The Client puts it on each observation of
     the episode. `initialization_sec` is the time from the reset to the policy's first
     action. It is None until that action arrives. `max_steps` is the step limit of the
-    episode: the limit of its task, or else the limit in the config.
+    episode: the limit of its task, or else the limit in the config. `embodiment` is the
+    name of the episode's embodiment, and `policy` is that embodiment's connection on the
+    episode's env.
     """
 
     episode_idx: int
@@ -237,12 +241,42 @@ class _ClientRunningEpisode:
     initialization_sec: float | None
     steps: int
     max_steps: int | None
+    embodiment: str
+    policy: _ClientPolicyConnection
+
+
+def _open_policy_connections(
+    address: str, config: BenchmarkConfig, num_envs: int
+) -> list[dict[str, _ClientPolicyConnection]]:
+    """Open a policy connection for each env and each embodiment of the spec.
+
+    Each connection sends the spec of its embodiment. If the policy refuses any of
+    them, the function closes the open connections and raises `RuntimeError`.
+    """
+    policies: list[dict[str, _ClientPolicyConnection]] = []
+    try:
+        for _ in range(num_envs):
+            connections: dict[str, _ClientPolicyConnection] = {}
+            policies.append(connections)
+            for name in config.spec.embodiment_names:
+                connections[name] = _ClientPolicyConnection(
+                    address, config.spec.for_embodiment(name), config.run.image_format
+                )
+    except BaseException:
+        for connections in policies:
+            for policy in connections.values():
+                policy.close()
+        raise
+    return policies
 
 
 class Client:
     """The episode loop of a benchmark container.
 
     The Client runs the container's tasks on the Service and asks the policy for actions.
+    Before the first episode, it opens a policy connection for each env and each
+    embodiment, so that a policy that refuses any embodiment fails the run before it
+    starts. Each episode runs on the connection of the embodiment that its reset names.
     """
 
     def __init__(
@@ -258,18 +292,24 @@ class Client:
         self._session = session
         self._live_view = live_view
         self._max_steps = config.run.max_steps
-        benchmark = config.spec
-        self._observation_space = benchmark.observation_space
-        self._upright_image_pipeline = _upright_image_pipeline(benchmark)
-        # The Client makes a replay recorder for each env and reuses it for the whole run.
+        names = config.spec.embodiment_names
+        specs = {name: config.spec.for_embodiment(name) for name in names}
+        self._observation_spaces = {name: spec.observation_space for name, spec in specs.items()}
+        self._upright_image_pipelines = {
+            name: _upright_image_pipeline(spec) for name, spec in specs.items()
+        }
+        # The Client makes a replay recorder for each env and embodiment, and reuses it for
+        # the whole run.
+        configs = {name: config.for_embodiment(name) for name in names}
         self._replays = [
-            _ReplayRecorder(config, service.simulator, env_id) for env_id in range(service.num_envs)
+            {
+                name: _ReplayRecorder(configs[name], service.simulator_for(name), env_id)
+                for name in names
+            }
+            for env_id in range(service.num_envs)
         ]
-        # The Client opens a policy connection for each env and reuses it for the whole run.
-        self._policies = [
-            _ClientPolicyConnection(policy_address, benchmark, config.run.image_format)
-            for _ in range(service.num_envs)
-        ]
+        # The Client reuses each policy connection for the whole run.
+        self._policies = _open_policy_connections(policy_address, config, service.num_envs)
         self._pool = ThreadPoolExecutor(max_workers=service.num_envs)
 
     def run(self) -> None:
@@ -289,8 +329,9 @@ class Client:
                 successes = sum(record.success for record in records)
                 print(f"task {task.task_id}: {successes}/{len(records)} succeeded", flush=True)
         finally:
-            for policy in self._policies:
-                policy.close()
+            for connections in self._policies:
+                for policy in connections.values():
+                    policy.close()
             self._pool.shutdown()
 
     def _run_task(self, task: WorkerTask) -> tuple[list[WorkerEpisodeRecord], dict[int, list]]:
@@ -303,7 +344,7 @@ class Client:
                 self._start_episodes(task, waiting, running)
                 env_ids = sorted(running)
                 infer = self._pool.map(
-                    lambda i: self._policies[i].infer(running[i].observation), env_ids
+                    lambda i: running[i].policy.infer(running[i].observation), env_ids
                 )
                 actions = dict(zip(env_ids, infer, strict=True))
                 answered = datetime.now(timezone.utc)
@@ -316,7 +357,9 @@ class Client:
                     episode.observation = replace(
                         result.observation, instruction=episode.instruction
                     )
-                    episode.upright_observation = self._upright_images(episode.observation)
+                    episode.upright_observation = self._upright_images(
+                        episode.observation, episode.embodiment
+                    )
                     out_of_steps = (
                         episode.max_steps is not None and episode.steps >= episode.max_steps
                     )
@@ -369,9 +412,11 @@ class Client:
         results = self._service.reset(episodes, loggers)
         for env_id, episode_idx in episodes.items():
             result = results[env_id]
+            embodiment = self._episode_embodiment(result)
+            policy = self._policies[env_id][embodiment]
             # The policy server stores the unused actions of the last chunk. A reset drops
             # them before the new episode.
-            self._policies[env_id].reset()
+            policy.reset()
             observation = replace(result.observation, instruction=result.instruction)
             episode = _ClientRunningEpisode(
                 episode_idx=episode_idx,
@@ -379,21 +424,23 @@ class Client:
                 task_name=result.instruction or self._config.spec.name,
                 instruction=result.instruction,
                 logger=loggers[env_id],
-                attributes=result.attributes,
+                attributes={**result.attributes, "embodiment": embodiment},
                 observation=observation,
-                upright_observation=self._upright_images(observation),
-                replay=self._replays[env_id],
+                upright_observation=self._upright_images(observation, embodiment),
+                replay=self._replays[env_id][embodiment],
                 started_at=began,
                 initialization_sec=None,
                 steps=0,
                 max_steps=self._episode_max_steps(result),
+                embodiment=embodiment,
+                policy=policy,
             )
             running[env_id] = episode
             episode.replay.begin(
                 task.output_dir,
                 episode_idx,
                 episode.upright_observation,
-                result.attributes,
+                episode.attributes,
                 self._events(result.events, episode.logger),
             )
             self._publish_live_view(env_id, episode)
@@ -422,10 +469,31 @@ class Client:
             )
         return result.max_steps
 
-    def _upright_images(self, observation: Observation) -> Observation:
-        """`observation` with each camera image upright and in RGB."""
-        return self._upright_image_pipeline.apply_observation(
-            observation, source=self._observation_space
+    def _episode_embodiment(self, result: ResetResult) -> str:
+        """The name of the episode's embodiment: the one that the hooks name, or the only one.
+
+        Raises:
+            ValueError: If the hooks name no embodiment for a spec with several, or name an
+                embodiment that the spec does not list.
+        """
+        names = self._config.spec.embodiment_names
+        if result.embodiment is None and len(names) > 1:
+            raise ValueError(
+                f"the hooks named no embodiment for task {result.task_id!r}, and the spec lists "
+                f"{list(names)}; return the episode's embodiment in ResetResult.embodiment"
+            )
+        embodiment = names[0] if result.embodiment is None else result.embodiment
+        if embodiment not in names:
+            raise ValueError(
+                f"the hooks named the embodiment {embodiment!r} for task {result.task_id!r}, "
+                f"which the spec does not list; it lists {list(names)}"
+            )
+        return embodiment
+
+    def _upright_images(self, observation: Observation, embodiment: str) -> Observation:
+        """`observation` with each camera image of `embodiment` upright and in RGB."""
+        return self._upright_image_pipelines[embodiment].apply_observation(
+            observation, source=self._observation_spaces[embodiment]
         )
 
     def _publish_live_view(self, env_id: int, episode: _ClientRunningEpisode) -> None:
@@ -437,6 +505,7 @@ class Client:
             return
         self._live_view.publish(
             episode.upright_observation,
+            embodiment=episode.embodiment,
             episode_idx=episode.episode_idx,
             step=episode.steps,
             task=episode.task_name,

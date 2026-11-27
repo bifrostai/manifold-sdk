@@ -780,7 +780,7 @@ def test_the_replay_records_the_gripper_commands_and_derives_each_grasp(tmp_path
 
     ((records, artifacts),) = session.completed
     log = read_replay_log(artifacts[0][0])
-    assert records[0].attributes == {"category": "camera"}
+    assert records[0].attributes == {"category": "camera", "embodiment": "franka_joint_absolute"}
     assert [[type(event).__name__ for event in step.events] for step in log.steps] == [
         ["EpisodeStartedEvent"],
         ["GripperTouchingEvent"],
@@ -788,7 +788,7 @@ def test_the_replay_records_the_gripper_commands_and_derives_each_grasp(tmp_path
         ["GripperCommandedEvent", "GraspedEvent", "EpisodeEndedEvent"],
     ]
     assert [step.text.get("events") for step in log.steps] == [
-        "episode started [category: camera]: lift the toy",
+        "episode started [category: camera, embodiment: franka_joint_absolute]: lift the toy",
         None,
         "gripper 0 close at step 2 / [INFO] sub-task passed / grasp: toy by gripper 0 at step 2",
         "gripper 0 open at step 3 / release: toy by gripper 0 at step 3"
@@ -1104,8 +1104,8 @@ def test_the_service_runs_the_simulators_post_step_after_the_hooks_reset_and_ste
 def test_the_client_sends_env_0_to_the_live_view(tmp_path, monkeypatch):
     published: list[tuple[int, int]] = []
     live_view = types.SimpleNamespace(
-        publish=lambda observation, *, episode_idx, step, task, task_id: published.append(
-            (episode_idx, step)
+        publish=lambda observation, *, embodiment, episode_idx, step, task, task_id: (
+            published.append((episode_idx, step))
         )
     )
     session = _Session(_task(tmp_path, (0, 1)))
