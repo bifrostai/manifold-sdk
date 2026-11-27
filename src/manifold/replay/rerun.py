@@ -9,7 +9,7 @@ event.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -23,6 +23,9 @@ from manifold.replay.events import (
     NavigatingEvent,
     NoteEvent,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 # The rows of the `Action` page, from the top: the gripper, then the arm, then the
 # arm's rotation. The viewer shows this page beside the 3D scene.
@@ -67,11 +70,16 @@ def rerun_scalars(name: str, tab: RerunTab, values: Any) -> list[RerunScalar]:
     ]
 
 
-def rerun_panel_line(event: ManifoldEvent, step: int) -> str | None:
+def rerun_panel_line(
+    event: ManifoldEvent, step: int, end_effector_types: Mapping[str, str] | None = None
+) -> str | None:
     """The line that a replay's events panel shows for `event` on `step`, or None.
 
     Other events show no line. The `Task` page charts the fact events.
+    `end_effector_types` maps each declared end effector's name to its type, such as
+    `left` to `hand`. An end effector that it leaves out reads `gripper`.
     """
+    types = end_effector_types or {}
     if isinstance(event, EpisodeStartedEvent):
         labels = ", ".join(f"{name}: {value}" for name, value in event.attributes.items())
         return (
@@ -82,12 +90,14 @@ def rerun_panel_line(event: ManifoldEvent, step: int) -> str | None:
     if isinstance(event, EpisodeEndedEvent):
         return f"episode ended at step {step}: {'SUCCESS' if event.success else 'FAILURE'}"
     if isinstance(event, GripperCommandedEvent):
-        return f"gripper {event.gripper} {event.action.value} at step {step}"
+        kind = types.get(event.gripper, "gripper")
+        return f"{kind} {event.gripper} {event.action.value} at step {step}"
     if isinstance(event, NavigatingEvent):
         return f"navigating {'started' if event.is_active else 'stopped'} at step {step}"
     if isinstance(event, GraspedEvent):
         verb = "grasp" if event.is_active else "release"
-        return f"{verb}: {event.object} by gripper {event.gripper} at step {step}"
+        kind = types.get(event.gripper, "gripper")
+        return f"{verb}: {event.object} by {kind} {event.gripper} at step {step}"
     if isinstance(event, NoteEvent):
         return f"[{event.severity.value.upper()}] {event.text}"
     return None

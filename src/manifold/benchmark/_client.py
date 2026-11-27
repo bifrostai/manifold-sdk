@@ -139,7 +139,9 @@ class _ClientPolicyConnection:
             FrameType.HELLO,
             HelloPayload(
                 protocol_version=BRIDGE_PROTOCOL_VERSION,
-                benchmark=benchmark.model_dump(mode="json", exclude={"gpu_architectures"}),
+                benchmark=benchmark.model_dump(
+                    mode="json", exclude={"gpu_architectures", "end_effectors"}
+                ),
             ).model_dump(),
         )
         reply = self._channel.recv()

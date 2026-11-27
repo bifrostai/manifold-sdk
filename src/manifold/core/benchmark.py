@@ -151,6 +151,25 @@ class ActionRange(BaseModel):
         return self
 
 
+class EndEffectorType(StrEnum):
+    """What ends one of the robot's arms."""
+
+    GRIPPER = "gripper"
+    HAND = "hand"
+
+
+class EndEffector(BaseModel):
+    """One end effector of the robot, such as the `left` hand.
+
+    `name` tells the robot's end effectors apart, such as `left` and `right`.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str = Field(min_length=1)
+    end_effector_type: EndEffectorType
+
+
 class Benchmark(BaseModel):
     """An embodiment in a task, with the sensors it publishes.
 
@@ -176,6 +195,11 @@ class Benchmark(BaseModel):
     or a higher one. A name with an `a` suffix runs only on that exact compute capability,
     and one with an `f` suffix only on GPUs of the same family. It is None when the
     benchmark does not declare the list. The benchmark does not send it to the policy.
+
+    `end_effectors` lists what ends each of the robot's arms, such as a gripper or a
+    dexterous hand. An empty list declares a robot with none. It is None when the
+    benchmark does not declare them. The benchmark does not send it to the policy, so a
+    policy on an older SDK never receives a type that it does not know.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -189,6 +213,7 @@ class Benchmark(BaseModel):
     max_steps: int | None = Field(default=None, ge=1)
     image_format: ImageFormat | None = None
     gpu_architectures: tuple[GpuArchitecture, ...] | None = Field(default=None, min_length=1)
+    end_effectors: tuple[EndEffector, ...] | None = None
 
     @field_validator("gpu_architectures")
     @classmethod
@@ -197,6 +222,18 @@ class Benchmark(BaseModel):
     ) -> tuple[GpuArchitecture, ...] | None:
         """Keep the first of each repeated GPU architecture."""
         return tuple(dict.fromkeys(gpu_architectures)) if gpu_architectures is not None else None
+
+    @field_validator("end_effectors")
+    @classmethod
+    def _require_distinct_end_effector_names(
+        cls, end_effectors: tuple[EndEffector, ...] | None
+    ) -> tuple[EndEffector, ...] | None:
+        """Refuse two end effectors with one name."""
+        names = [end_effector.name for end_effector in end_effectors or ()]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"end effector names {repeated} appear more than once")
+        return end_effectors
 
     @model_validator(mode="after")
     def _check_action_range_length(self) -> Benchmark:

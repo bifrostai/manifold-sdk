@@ -36,6 +36,7 @@ TABLE = "table"
 # The robot parts in a contact.
 ARM = "arm"
 GRIPPER = "gripper"
+HAND = "hand"
 
 
 def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
@@ -183,6 +184,7 @@ __all__ = [
     "ARM",
     "BOX_VERTICES",
     "GRIPPER",
+    "HAND",
     "TABLE",
     "Simulator",
     "bounding_box_part",

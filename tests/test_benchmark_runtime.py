@@ -30,7 +30,7 @@ from manifold.benchmark._client import (
     _upright_image_pipeline,
     request_policy_cameras,
 )
-from manifold.benchmark._replay import _boxed, _ReplayRecorder
+from manifold.benchmark._replay import _boxed, _plot_name, _ReplayRecorder
 from manifold.benchmark._service import _log_unsupported_versions, make_service
 from manifold.benchmark.hooks import _check_hooks, _fill_optional_hooks
 from manifold.benchmark.simulators import Simulator
@@ -249,7 +249,7 @@ def test_the_spec_may_leave_out_the_gpu_architectures():
     assert spec.gpu_architectures == ("sm_86", "compute_86")
 
 
-def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
+def test_the_hello_leaves_out_the_gpu_architectures_and_end_effectors(monkeypatch):
     sent = []
     replies = [{"type": FrameType.READY, "payload": {}}]
     channel = types.SimpleNamespace(
@@ -262,7 +262,11 @@ def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
     )
     monkeypatch.setattr(_client.FrameChannel, "from_socket", staticmethod(lambda _s: channel))
     raw = _raw_config({"type": "single"})
-    raw["spec"] = {**raw["spec"], "gpu_architectures": ["sm_86"]}
+    raw["spec"] = {
+        **raw["spec"],
+        "gpu_architectures": ["sm_86"],
+        "end_effectors": [{"name": "gripper", "end_effector_type": "gripper"}],
+    }
     benchmark = BenchmarkConfig.model_validate(raw).spec
 
     _ClientPolicyConnection("policy:9000", benchmark, "raw")
@@ -270,6 +274,7 @@ def test_the_hello_leaves_out_the_gpu_architectures(monkeypatch):
     ((frame_type, payload),) = sent
     assert frame_type is FrameType.HELLO
     assert "gpu_architectures" not in payload["benchmark"]
+    assert "end_effectors" not in payload["benchmark"]
 
 
 def test_a_hooks_file_must_define_its_services_hooks():
@@ -1498,9 +1503,16 @@ _HAND_LINKS = {
 }
 
 
-def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[Any]]:
-    """Record `steps` steps with the hand links, and return each frame's events."""
+_HANDS = [
+    {"name": "left", "end_effector_type": "hand"},
+    {"name": "right", "end_effector_type": "hand"},
+]
+
+
+def _hand_config(end_effectors: list[dict[str, str]] | None = _HANDS) -> dict[str, Any]:
+    """A raw config with the hand links, which declares `end_effectors`."""
     raw = _raw_config({"type": "single"})
+    raw["spec"]["end_effectors"] = end_effectors
     raw["simulator"] = {
         "name": "isaacsim",
         "path": "env.unwrapped",
@@ -1511,7 +1523,12 @@ def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[An
         "camera_far_clip": None,
         "touch_links": _HAND_LINKS,
     }
-    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(raw), simulator, 0)
+    return raw
+
+
+def _hand_steps(tmp_path, simulator: _HandSimulator, steps: int) -> list[list[Any]]:
+    """Record `steps` steps with the hand links, and return each frame's events."""
+    recorder = _ReplayRecorder(BenchmarkConfig.model_validate(_hand_config()), simulator, 0)
     recorder.begin(tmp_path, 0, _observation(0), {}, ())
     for step in range(1, steps + 1):
         recorder.record(None, _observation(step), (), success=False, done=step == steps)
@@ -1528,9 +1545,11 @@ def _grasps(frames: list[list[Any]]) -> list[tuple[int, str, bool]]:
     ]
 
 
-def test_a_hands_touch_of_an_object_is_the_gripper_touching_it(tmp_path):
+def test_a_hands_touches_are_named_by_the_hand(tmp_path):
     simulator = _HandSimulator()
-    simulator.hand_contacts = [frozenset({("left_index", "cube"), ("left_index", "table")})]
+    simulator.hand_contacts = [
+        frozenset({("left_index", "cube"), ("left_index", "table"), ("right_thumb", "table")})
+    ]
 
     frames = _hand_steps(tmp_path, simulator, 2)
 
@@ -1542,16 +1561,18 @@ def test_a_hands_touch_of_an_object_is_the_gripper_touching_it(tmp_path):
         [],
         [
             GripperTouchingEvent(gripper="left", object="cube", is_active=True),
-            TouchingEvent(object="gripper", reference="table", is_active=True),
+            TouchingEvent(object="hand", reference="table", end_effector="left", is_active=True),
+            TouchingEvent(object="hand", reference="table", end_effector="right", is_active=True),
         ],
         [
             GripperTouchingEvent(gripper="left", object="cube", is_active=False),
-            TouchingEvent(object="gripper", reference="table", is_active=False),
+            TouchingEvent(object="hand", reference="table", end_effector="left", is_active=False),
+            TouchingEvent(object="hand", reference="table", end_effector="right", is_active=False),
         ],
     ]
 
 
-def test_a_hands_touch_of_a_soft_object_is_the_gripper_touching_it(tmp_path):
+def test_a_hands_touch_of_a_soft_object_is_that_hand_touching_it(tmp_path):
     simulator = _HandSimulator()
     simulator.soft_objects = ("bag",)
     simulator.hand_contacts = [frozenset({("left_index", "bag")})]
@@ -1567,6 +1588,22 @@ def test_a_hands_touch_of_a_soft_object_is_the_gripper_touching_it(tmp_path):
         [GripperTouchingEvent(gripper="left", object="bag", is_active=True)],
         [GripperTouchingEvent(gripper="left", object="bag", is_active=False)],
     ]
+
+
+def test_a_declared_hands_chart_reads_hand():
+    event = GripperTouchingEvent(gripper="left", object="cube", is_active=True)
+
+    assert _plot_name(event, {"left": "hand"}) == "cube_hand_touching_left"
+    assert _plot_name(event, {}) == "cube_gripper_touching_left"
+
+
+def test_a_config_refuses_a_touch_link_hand_that_it_does_not_declare():
+    with pytest.raises(ValidationError, match=r"names the hands \['right'\]"):
+        BenchmarkConfig.model_validate(_hand_config(_HANDS[:1]))
+
+
+def test_a_config_that_declares_no_end_effectors_may_have_hand_links():
+    BenchmarkConfig.model_validate(_hand_config(None))
 
 
 def test_the_replay_header_lists_the_configs_fingertip_pads_and_step_length(tmp_path):
