@@ -12,6 +12,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from pydantic import BaseModel, ConfigDict
 
 from manifold.lib.compat import assert_never
 from manifold.replay import ReplayMesh, ReplayScenePart
@@ -40,6 +41,15 @@ HAND = "hand"
 
 # The colour of a part that has no colour of its own.
 GREY = (0.7, 0.7, 0.7, 1.0)
+
+
+class BenchmarkHandTouchLinkConfig(BaseModel):
+    """A touch link of a dexterous hand, with the hand it belongs to and whether it is the thumb."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    hand: str
+    thumb: bool
 
 
 def bounding_box_part(parts: list[ReplayScenePart]) -> ReplayScenePart:
@@ -240,6 +250,7 @@ __all__ = [
     "GRIPPER",
     "HAND",
     "TABLE",
+    "BenchmarkHandTouchLinkConfig",
     "Simulator",
     "bounding_box_part",
     "make_simulator",

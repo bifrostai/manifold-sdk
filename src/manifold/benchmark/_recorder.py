@@ -277,7 +277,7 @@ class _ReplayRecorder:
         self._succeeded = False
         self._previous: tuple[np.ndarray, np.ndarray] | None = None
         self._touching: frozenset[tuple[str, str, str]] = frozenset()
-        touch_links = getattr(config.simulator, "touch_links", None) or {}
+        touch_links = getattr(config.simulator, "scene_touch_links", None) or {}
         # The hand and the thumb flag of each hand link. When the config has hand links,
         # the recorder records each hand's touches and grasps of the task's objects as that
         # hand's, named by the hand, and the hooks record none of the grippers' touches or

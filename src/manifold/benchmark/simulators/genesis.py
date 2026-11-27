@@ -22,6 +22,7 @@ and imports without it.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -32,6 +33,7 @@ from manifold.benchmark.simulators import (
     BOX_VERTICES,
     GREY,
     TABLE,
+    BenchmarkHandTouchLinkConfig,
     Simulator,
     bounding_box_part,
     touches,
@@ -79,21 +81,45 @@ class _GenesisEpisodeCache:
     robots: tuple[tuple[Any, np.ndarray, np.ndarray], ...]
 
 
-def _follow(start: Any, path: str) -> Any:
-    """The value at `path` from `start`, where a step that is a number indexes a list.
+# A path step that picks the item of a list whose attribute has a value, such as
+# `agents[uid=panda_leaphand_left]`.
+_SELECTOR = re.compile(r"^(\w+)\[(\w+)=([^\]]+)\]$")
 
-    For example, `agent.agents.1.robot` reads the robot of the second agent in the list
-    `agent.agents`.
+
+def _follow(start: Any, path: str) -> Any:
+    """The value at `path` from `start`, one attribute for each step.
+
+    A step that is a number indexes a list, and a step `name[key=value]` takes the item of
+    the list `name` whose attribute `key` is `value`. For example, `agent.agents.1.robot`
+    reads the robot of the second agent in the list `agent.agents`, and
+    `agent.agents[uid=panda_leaphand].robot` the robot of the agent whose `uid` is
+    `panda_leaphand`.
+
+    Raises:
+        ValueError: If a selector step matches no item, or more than one.
     """
     value = start
     for step in path.split("."):
-        value = value[int(step)] if step.isdigit() else getattr(value, step)
+        selector = _SELECTOR.match(step)
+        if selector is None:
+            value = value[int(step)] if step.isdigit() else getattr(value, step)
+            continue
+        name, key, wanted = selector.groups()
+        matches = [item for item in getattr(value, name) if str(getattr(item, key)) == wanted]
+        if len(matches) != 1:
+            raise ValueError(f"{len(matches)} items of {name} have {key} {wanted}, not one")
+        value = matches[0]
     return value
+
+
+def _scene_link_name_of(name: str, robot_index: int) -> str:
+    """The scene's name for the link `name` of the robot at `robot_index` in the config's robots."""
+    return name if robot_index == 0 else f"{name}_{robot_index}"
 
 
 def _scene_link_name(link: Any, robot_index: int) -> str:
     """The scene's name for a link of the robot at `robot_index` in the config's robots."""
-    return link.name if robot_index == 0 else f"{link.name}_{robot_index}"
+    return _scene_link_name_of(link.name, robot_index)
 
 
 class BenchmarkGenesisRobotConfig(BaseModel):
@@ -108,7 +134,7 @@ class BenchmarkGenesisRobotConfig(BaseModel):
     robot: str
     arm_joints: tuple[str, ...]
     gripper_joints: tuple[str, ...]
-    touch_links: dict[str, Literal["arm", "gripper"]]
+    touch_links: dict[str, Literal["arm", "gripper"] | BenchmarkHandTouchLinkConfig]
 
 
 class BenchmarkGenesisSimulatorConfig(BaseModel):
@@ -122,9 +148,13 @@ class BenchmarkGenesisSimulatorConfig(BaseModel):
     `gripper_joints` list the names of the arm's and the gripper's joints, in the order
     that the replay plots them.
 
-    `touch_links` maps each robot link whose touches the replay records to `arm` or
-    `gripper`, by the link's name. The replay records a `gripper` link's touches of
-    fixtures only, because the hooks record the gripper's touches of the task's objects.
+    `touch_links` maps each robot link whose touches the replay records to `arm`,
+    `gripper` or a hand link, by the link's name. The replay records a `gripper` link's
+    touches of fixtures only, because the hooks record the gripper's touches of the task's
+    objects. A hand link, such as `{"hand": "0", "thumb": false}`, is a link of a dexterous
+    hand on a robot that has no gripper command. The replay records its touches as touches
+    by that hand, and records a grasp from which links of which hand touch an object.
+    `gripper_joints` then lists the hand's joints.
 
     `other_robots` lists the robots of the scene after the first, such as the second arm
     of a robot that ManiLadder builds from two Pandas. The replay names each of their
@@ -140,7 +170,7 @@ class BenchmarkGenesisSimulatorConfig(BaseModel):
     robot: str
     arm_joints: tuple[str, ...]
     gripper_joints: tuple[str, ...]
-    touch_links: dict[str, Literal["arm", "gripper"]]
+    touch_links: dict[str, Literal["arm", "gripper"] | BenchmarkHandTouchLinkConfig]
     other_robots: tuple[BenchmarkGenesisRobotConfig, ...] = ()
 
     @property
@@ -153,6 +183,15 @@ class BenchmarkGenesisSimulatorConfig(BaseModel):
             touch_links=self.touch_links,
         )
         return (first, *self.other_robots)
+
+    @property
+    def scene_touch_links(self) -> dict[str, str | BenchmarkHandTouchLinkConfig]:
+        """Each robot's touch links, by each link's name in the replay's scene."""
+        return {
+            _scene_link_name_of(link, index): part
+            for index, robot in enumerate(self.robots)
+            for link, part in robot.touch_links.items()
+        }
 
 
 class GenesisSimulator(Simulator):
@@ -255,7 +294,7 @@ class GenesisSimulator(Simulator):
             if missing:
                 raise ValueError(f"the robot {config.robot} has no link {', '.join(missing)}")
             parts.update(
-                (link.idx, config.touch_links[link.name])
+                (link.idx, self._part_name(config.touch_links[link.name], link, index))
                 for link in robot.links
                 if link.name in config.touch_links
             )
@@ -359,6 +398,11 @@ class GenesisSimulator(Simulator):
             for name, tab, values in named:
                 scalars += rerun_scalars(f"{name}{suffix}", tab, values)
         return scalars
+
+    @staticmethod
+    def _part_name(part: str | BenchmarkHandTouchLinkConfig, link: Any, robot_index: int) -> str:
+        """The name of a touch link in a touch: `ARM`, `GRIPPER`, or a hand link's scene name."""
+        return part if isinstance(part, str) else _scene_link_name(link, robot_index)
 
     @staticmethod
     def _robot_dofs(

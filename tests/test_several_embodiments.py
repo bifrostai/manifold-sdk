@@ -905,3 +905,21 @@ def test_each_gripper_grasps_only_what_both_of_its_own_pads_touch(tmp_path, monk
         if isinstance(event, GraspedEvent)
     ]
     assert grasps == [("1", True)]
+
+
+def test_the_config_refuses_a_second_robots_hand_that_the_spec_does_not_declare():
+    raw = _several_config()
+    raw["simulator"] = {
+        **_GENESIS,
+        "other_robots": [
+            {
+                "robot": "agent.agents.1.robot",
+                "arm_joints": ["joint1"],
+                "gripper_joints": [],
+                "touch_links": {"palm": {"hand": "1", "thumb": False}},
+            }
+        ],
+    }
+
+    with pytest.raises(ValidationError, match=r"names the hands \['1'\]"):
+        BenchmarkConfig.model_validate(raw)

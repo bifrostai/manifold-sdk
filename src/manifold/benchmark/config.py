@@ -247,12 +247,12 @@ class BenchmarkConfig(_BenchmarkConfigBase):
 
     @model_validator(mode="after")
     def _check_hands_are_declared(self) -> BenchmarkConfig:
-        """Require each hand of `simulator.touch_links` to be a declared hand.
+        """Require each hand of the simulator's touch links to be a declared hand.
 
         A config that declares no end effectors is not checked.
         """
         declared = self.spec.end_effectors
-        touch_links = getattr(self.simulator, "touch_links", None) or {}
+        touch_links = getattr(self.simulator, "scene_touch_links", None) or {}
         if declared is None:
             return self
         hands = {e.name for e in declared if e.end_effector_type is EndEffectorType.HAND}

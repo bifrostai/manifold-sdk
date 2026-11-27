@@ -55,6 +55,7 @@ from manifold.benchmark.simulators import (
     GREY,
     GRIPPER,
     TABLE,
+    BenchmarkHandTouchLinkConfig,
     Simulator,
     bounding_box_part,
 )
@@ -142,15 +143,6 @@ class _IsaacSimEpisodeCache:
     cameras: tuple[str, ...]
 
 
-class _HandTouchLink(BaseModel):
-    """A touch link of a dexterous hand, with the hand it belongs to and whether it is the thumb."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    hand: str
-    thumb: bool
-
-
 class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     """Where an Isaac Lab env is, and how Isaac Sim is launched.
 
@@ -190,7 +182,12 @@ class BenchmarkIsaacSimSimulatorConfig(BaseModel):
     max_position_iterations: int | None = Field(ge=1, le=255)
     env_spacing: float | None = Field(gt=0)
     camera_far_clip: float | None = Field(gt=0)
-    touch_links: dict[str, Literal["arm", "gripper"] | _HandTouchLink] | None
+    touch_links: dict[str, Literal["arm", "gripper"] | BenchmarkHandTouchLinkConfig] | None
+
+    @property
+    def scene_touch_links(self) -> dict[str, str | BenchmarkHandTouchLinkConfig]:
+        """Each touch link by its name in the replay's scene, which is its name here."""
+        return dict(self.touch_links or {})
 
 
 def _take_sigsegv() -> None:
@@ -546,7 +543,8 @@ class IsaacSimSimulator(Simulator):
                 if force >= _PART_TOUCH_NEWTONS
             ]
             touching.update(
-                (link if isinstance(part, _HandTouchLink) else part, name) for name in touched
+                (link if isinstance(part, BenchmarkHandTouchLinkConfig) else part, name)
+                for name in touched
             )
         return frozenset(touching)
 
@@ -1086,7 +1084,7 @@ class IsaacSimSimulator(Simulator):
         name, part = link
         if part == GRIPPER and thing != TABLE:
             return None
-        return (name if isinstance(part, _HandTouchLink) else part, thing)
+        return (name if isinstance(part, BenchmarkHandTouchLinkConfig) else part, thing)
 
     def _contact_sides(self, isaac: Any, solver: Any) -> dict[int, tuple[str, Any] | str]:
         """The touch link or scene body of each MuJoCo geom of env row 0, by geom index.

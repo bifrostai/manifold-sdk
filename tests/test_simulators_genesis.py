@@ -8,7 +8,14 @@ import numpy as np
 import pytest
 
 from manifold.benchmark.config import BenchmarkConfig
-from manifold.benchmark.simulators import ARM, BOX_VERTICES, GRIPPER, TABLE, make_simulator
+from manifold.benchmark.simulators import (
+    ARM,
+    BOX_VERTICES,
+    GRIPPER,
+    TABLE,
+    BenchmarkHandTouchLinkConfig,
+    make_simulator,
+)
 from manifold.benchmark.simulators.genesis import (
     BenchmarkGenesisRobotConfig,
     BenchmarkGenesisSimulatorConfig,
@@ -379,3 +386,71 @@ def test_a_touch_link_that_a_second_robot_lacks_stops_the_episode():
 
     with pytest.raises(ValueError, match=r"agent\.agents\.1\.robot has no link wrist"):
         simulator.replay_bodies(0)
+
+
+def _two_hand_scene(contacts: dict[str, np.ndarray] | None = None) -> SimpleNamespace:
+    """The two-arm scene with each agent named by a `uid`, the second arm listed first."""
+    env = _two_arm_scene(contacts)
+    first, second = env.gym_env.unwrapped.agent.agents
+    first.uid, second.uid = "right_hand", "left_hand"
+    env.gym_env.unwrapped.agent.agents = [second, first]
+    return env
+
+
+_TWO_HANDS = _TWO_ARMS.model_copy(
+    update={
+        "robot": "agent.agents[uid=right_hand].robot",
+        "touch_links": {
+            "link1": "arm",
+            "hand": BenchmarkHandTouchLinkConfig(hand="0", thumb=False),
+        },
+        "other_robots": (
+            _TWO_ARMS.other_robots[0].model_copy(
+                update={
+                    "robot": "agent.agents[uid=left_hand].robot",
+                    "touch_links": {
+                        "left_finger": BenchmarkHandTouchLinkConfig(hand="1", thumb=True)
+                    },
+                }
+            ),
+        ),
+    }
+)
+
+
+def test_a_robot_is_found_by_an_attribute_of_its_item_in_a_list():
+    simulator = GenesisSimulator(_TWO_HANDS)
+    simulator.attach(_two_hand_scene(), [0])
+
+    bodies = {body.name for body in simulator.replay_bodies(0)}
+
+    # The robot whose uid is `right_hand` is the first robot, so its links keep their names.
+    assert {"hand", "link1", "hand_1", "link1_1"} <= bodies
+    scalars = {scalar.name: scalar.value for scalar in simulator.replay_scalars(0, None)}
+    assert (scalars["joints/0"], scalars["joints_1/0"]) == (0.5, 0.2)
+
+
+def test_a_selector_that_matches_no_item_stops_the_episode():
+    config = _TWO_HANDS.model_copy(update={"robot": "agent.agents[uid=missing].robot"})
+    simulator = GenesisSimulator(config)
+    simulator.attach(_two_hand_scene(), [0])
+
+    with pytest.raises(ValueError, match="0 items of agents have uid missing"):
+        simulator.replay_bodies(0)
+
+
+def test_a_hand_links_touch_is_named_by_the_links_name_in_the_scene():
+    # The first hand's `hand` link touches the cube, and the second hand's left finger the table.
+    simulator = GenesisSimulator(_TWO_HANDS)
+    simulator.attach(_two_hand_scene(_contacts((2, 4, 1.0), (14, 7, 1.0))), [0])
+    simulator.replay_bodies(0)
+
+    assert simulator.replay_contacts(0) == {("hand", "cube"), ("left_finger_1", "table")}
+
+
+def test_the_scene_touch_links_name_each_robots_links_as_the_scene_does():
+    assert _TWO_HANDS.scene_touch_links == {
+        "link1": "arm",
+        "hand": BenchmarkHandTouchLinkConfig(hand="0", thumb=False),
+        "left_finger_1": BenchmarkHandTouchLinkConfig(hand="1", thumb=True),
+    }
