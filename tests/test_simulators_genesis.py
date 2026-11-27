@@ -10,6 +10,7 @@ import pytest
 from manifold.benchmark.config import BenchmarkConfig
 from manifold.benchmark.simulators import ARM, BOX_VERTICES, GRIPPER, TABLE, make_simulator
 from manifold.benchmark.simulators.genesis import (
+    BenchmarkGenesisRobotConfig,
     BenchmarkGenesisSimulatorConfig,
     GenesisSimulator,
 )
@@ -291,3 +292,90 @@ def test_make_simulator_gives_a_genesis_simulator_the_configs_finger_pads():
 
     assert isinstance(simulator, GenesisSimulator)
     assert simulator.replay_finger_pads() == ("left_finger", "right_finger")
+
+
+def _two_arm_scene(contacts: dict[str, np.ndarray] | None = None) -> SimpleNamespace:
+    """The scene with a second arm, links 11 to 14, and both arms in a list of agents."""
+    env = _scene(contacts)
+    task_env = env.gym_env.unwrapped
+    first = task_env.agent.robot
+    second = _entity(
+        8,
+        [
+            _link(11, "link0", fixed=True),
+            _link(12, "link1"),
+            _link(13, "hand"),
+            _link(14, "left_finger"),
+        ],
+    )
+    joints = {"joint1": [0], "finger_joint1": [1], "finger_joint2": [2]}
+    second.get_joint = lambda name: SimpleNamespace(dofs_idx_local=joints[name])
+    second.get_dofs_position = lambda: np.array([0.2, 0.01, 0.02])
+    second.get_dofs_velocity = lambda: np.array([0.0, 0.0, 0.0])
+    second.get_dofs_control_force = lambda: np.array([3.0, 0.0, 0.0])
+    task_env.scene.rigid_solver.entities.append(second)
+    positions = np.arange(45, dtype=np.float64).reshape(15, 3)
+    task_env.scene.rigid_solver.get_links_pos = lambda: positions
+    task_env.scene.rigid_solver.get_links_quat = lambda: np.tile([1.0, 0.0, 0.0, 0.0], (15, 1))
+    task_env.agent = SimpleNamespace(
+        robot=None, agents=[SimpleNamespace(robot=first), SimpleNamespace(robot=second)]
+    )
+    return env
+
+
+_TWO_ARMS = _CONFIG.model_copy(
+    update={
+        "robot": "agent.agents.0.robot",
+        "other_robots": (
+            BenchmarkGenesisRobotConfig(
+                robot="agent.agents.1.robot",
+                arm_joints=("joint1",),
+                gripper_joints=("finger_joint1", "finger_joint2"),
+                touch_links={"link1": "arm", "hand": "gripper"},
+            ),
+        ),
+    }
+)
+
+
+def test_each_link_of_a_second_robot_is_a_body_named_with_its_robots_suffix():
+    simulator = GenesisSimulator(_TWO_ARMS, finger_pads=("left_finger", "left_finger_1"))
+    simulator.attach(_two_arm_scene(), [0])
+
+    bodies = {body.name: body for body in simulator.replay_bodies(0)}
+
+    assert {"hand", "left_finger", "hand_1", "left_finger_1", "link1_1"} <= set(bodies)
+    assert (bodies["hand_1"].role, bodies["hand_1"].object) == (ReplaySceneBodyRole.ROBOT, None)
+
+
+def test_the_second_robots_touches_and_pads_are_read_from_its_own_links():
+    contacts = _contacts(
+        # The second arm touches the table, and its left finger, a pad, touches the cube.
+        (12, 7, 1.0),
+        (14, 4, 1.0),
+    )
+    simulator = GenesisSimulator(_TWO_ARMS, finger_pads=("left_finger", "left_finger_1"))
+    simulator.attach(_two_arm_scene(contacts), [0])
+    simulator.replay_bodies(0)
+
+    assert simulator.replay_contacts(0) == {(ARM, "table"), ("left_finger_1", "cube")}
+
+
+def test_the_readings_of_a_second_robot_end_in_its_suffix():
+    simulator = GenesisSimulator(_TWO_ARMS)
+    simulator.attach(_two_arm_scene(), [0])
+    simulator.replay_bodies(0)
+
+    scalars = {scalar.name: scalar.value for scalar in simulator.replay_scalars(0, None)}
+
+    assert (scalars["joints/0"], scalars["joints_1/0"]) == (0.5, 0.2)
+    assert scalars["joint_torques_1/0"] == 3.0
+
+
+def test_a_touch_link_that_a_second_robot_lacks_stops_the_episode():
+    other = _TWO_ARMS.other_robots[0].model_copy(update={"touch_links": {"wrist": "arm"}})
+    simulator = GenesisSimulator(_TWO_ARMS.model_copy(update={"other_robots": (other,)}))
+    simulator.attach(_two_arm_scene(), [0])
+
+    with pytest.raises(ValueError, match=r"agent\.agents\.1\.robot has no link wrist"):
+        simulator.replay_bodies(0)

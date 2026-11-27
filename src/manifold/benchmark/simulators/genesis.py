@@ -10,6 +10,8 @@ Genesis entities have no names, so a task's entities are named by the attributes
 its env that hold them: `self.cube` is `cube`, and the second entity of the list
 `self._blocks` is `blocks_1`. A link of an entity with several links is named
 `<entity>_<link>`, and each link of the robot by its own name, such as `left_finger`.
+A scene with several robots, such as two arms, names each link of the second robot
+`<link>_1`, of the third `<link>_2`, and so on.
 
 The simulator reads rigid entities only. A soft body, such as Genesis' MPM, PBD or FEM
 entities, is not in the scene, and the replay records no touch of it.
@@ -21,7 +23,6 @@ and imports without it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from operator import attrgetter
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -65,9 +66,9 @@ class _GenesisEpisodeCache:
     each scene body to its link's index in the rigid solver. `parts` maps the solver
     index of each touch link to its kind, `ARM` or `GRIPPER`, and `pads` maps the
     solver index of each finger pad's link to the pad's body name. `things` maps the
-    solver index of each link outside the robot that has a name to that name and to
-    whether the link is an object. `robot` is the robot's entity, and `arm_dofs` and
-    `gripper_dofs` index its degrees of freedom.
+    solver index of each link outside the robots that has a name to that name and to
+    whether the link is an object. `robots` holds each robot's entity and the indices of
+    its arm's and gripper's degrees of freedom, in the order of the config's robots.
     """
 
     scene: Any
@@ -75,9 +76,39 @@ class _GenesisEpisodeCache:
     parts: dict[int, str]
     pads: dict[int, str]
     things: dict[int, tuple[str, bool]]
-    robot: Any
-    arm_dofs: np.ndarray
-    gripper_dofs: np.ndarray
+    robots: tuple[tuple[Any, np.ndarray, np.ndarray], ...]
+
+
+def _follow(start: Any, path: str) -> Any:
+    """The value at `path` from `start`, where a step that is a number indexes a list.
+
+    For example, `agent.agents.1.robot` reads the robot of the second agent in the list
+    `agent.agents`.
+    """
+    value = start
+    for step in path.split("."):
+        value = value[int(step)] if step.isdigit() else getattr(value, step)
+    return value
+
+
+def _scene_link_name(link: Any, robot_index: int) -> str:
+    """The scene's name for a link of the robot at `robot_index` in the config's robots."""
+    return link.name if robot_index == 0 else f"{link.name}_{robot_index}"
+
+
+class BenchmarkGenesisRobotConfig(BaseModel):
+    """One robot of a Genesis scene: its path from the task's env, its joints and touch links.
+
+    Each field means what the field of the same name on `BenchmarkGenesisSimulatorConfig`
+    means.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    robot: str
+    arm_joints: tuple[str, ...]
+    gripper_joints: tuple[str, ...]
+    touch_links: dict[str, Literal["arm", "gripper"]]
 
 
 class BenchmarkGenesisSimulatorConfig(BaseModel):
@@ -86,13 +117,19 @@ class BenchmarkGenesisSimulatorConfig(BaseModel):
     `path` is the attribute path from the env that `on_load` returns to the task's env,
     such as `gym_env.unwrapped`. The task's env holds the Genesis scene in `scene`, and
     holds each of the task's entities in an attribute. `robot` is the attribute path from
-    the task's env to the robot's entity, such as `agent.robot`. `arm_joints` and
+    the task's env to the robot's entity, such as `agent.robot`. A step of the path that
+    is a number indexes a list, such as `agent.agents.0.robot`. `arm_joints` and
     `gripper_joints` list the names of the arm's and the gripper's joints, in the order
     that the replay plots them.
 
     `touch_links` maps each robot link whose touches the replay records to `arm` or
     `gripper`, by the link's name. The replay records a `gripper` link's touches of
     fixtures only, because the hooks record the gripper's touches of the task's objects.
+
+    `other_robots` lists the robots of the scene after the first, such as the second arm
+    of a robot that ManiLadder builds from two Pandas. The replay names each of their
+    links with its robot's position in the list after it, from `_1`, and plots each of
+    their joints with the same suffix. It is empty for a scene with one robot.
     """
 
     # A config states every value, so an unknown key is an error.
@@ -104,6 +141,18 @@ class BenchmarkGenesisSimulatorConfig(BaseModel):
     arm_joints: tuple[str, ...]
     gripper_joints: tuple[str, ...]
     touch_links: dict[str, Literal["arm", "gripper"]]
+    other_robots: tuple[BenchmarkGenesisRobotConfig, ...] = ()
+
+    @property
+    def robots(self) -> tuple[BenchmarkGenesisRobotConfig, ...]:
+        """Each robot of the scene: the first from the config's own fields, then the others."""
+        first = BenchmarkGenesisRobotConfig(
+            robot=self.robot,
+            arm_joints=self.arm_joints,
+            gripper_joints=self.gripper_joints,
+            touch_links=self.touch_links,
+        )
+        return (first, *self.other_robots)
 
 
 class GenesisSimulator(Simulator):
@@ -155,23 +204,28 @@ class GenesisSimulator(Simulator):
         and caches them for the episode.
 
         Raises:
-            ValueError: If the scene was built for several envs, or if the robot has no
-                link named after a configured touch link or finger pad.
+            ValueError: If the scene was built for several envs, if a robot has no link
+                named after one of its touch links, or if no robot has a link named after
+                a finger pad.
         """
         import genesis as gs  # ty: ignore[unresolved-import]
 
-        task_env = attrgetter(self._config.path)(self._envs[env_id])
+        task_env = _follow(self._envs[env_id], self._config.path)
         scene = task_env.scene
         solver = scene.rigid_solver
         if solver.n_envs != 0:
             raise ValueError(f"the replay reads a scene of one env, not {solver.n_envs} envs")
-        robot = attrgetter(self._config.robot)(task_env)
+        configs = self._config.robots
+        robots = [_follow(task_env, config.robot) for config in configs]
+        # The position of each robot's entity in the config's robots, by the entity's id.
+        robot_indices = {id(robot): index for index, robot in enumerate(robots)}
         names = self._entity_names(task_env, solver.entities)
         bodies: dict[str, int] = {}
         scene_bodies = []
         things: dict[int, tuple[str, bool]] = {}
         for entity in solver.entities:
-            is_robot = entity is robot
+            robot_index = robot_indices.get(id(entity))
+            is_robot = robot_index is not None
             entity_name = names.get(id(entity))
             for link in entity.links:
                 role, label = self._link_label(link, entity_name, is_robot=is_robot)
@@ -179,7 +233,11 @@ class GenesisSimulator(Simulator):
                     things[link.idx] = (label, role is ReplaySceneBodyRole.OBJECT)
                 if isinstance(entity.morph, gs.morphs.Plane) or not link.vgeoms:
                     continue
-                name = self._body_name(entity, link, entity_name, is_robot=is_robot)
+                name = (
+                    _scene_link_name(link, robot_index)
+                    if robot_index is not None
+                    else self._body_name(entity, link, entity_name)
+                )
                 name = name if name not in bodies else f"{name}#{link.idx}"
                 bodies[name] = link.idx
                 scene_bodies.append(
@@ -190,26 +248,35 @@ class GenesisSimulator(Simulator):
                         object=label,
                     )
                 )
-        touch_links = self._config.touch_links
-        missing = sorted(
-            (set(touch_links) | set(self._finger_pads)) - {link.name for link in robot.links}
-        )
+        parts: dict[int, str] = {}
+        pads: dict[int, str] = {}
+        for index, (robot, config) in enumerate(zip(robots, configs, strict=True)):
+            missing = sorted(set(config.touch_links) - {link.name for link in robot.links})
+            if missing:
+                raise ValueError(f"the robot {config.robot} has no link {', '.join(missing)}")
+            parts.update(
+                (link.idx, config.touch_links[link.name])
+                for link in robot.links
+                if link.name in config.touch_links
+            )
+            pads.update(
+                (link.idx, _scene_link_name(link, index))
+                for link in robot.links
+                if _scene_link_name(link, index) in self._finger_pads
+            )
+        missing = sorted(set(self._finger_pads) - set(pads.values()))
         if missing:
             raise ValueError(f"the robot has no link {', '.join(missing)}")
-        parts: dict[int, str] = {
-            link.idx: touch_links[link.name] for link in robot.links if link.name in touch_links
-        }
-        pads = {link.idx: link.name for link in robot.links if link.name in self._finger_pads}
-        arm_dofs, gripper_dofs = self._robot_dofs(robot)
         self._caches[env_id] = _GenesisEpisodeCache(
             scene=scene,
             bodies=bodies,
             parts=parts,
             pads=pads,
             things=things,
-            robot=robot,
-            arm_dofs=arm_dofs,
-            gripper_dofs=gripper_dofs,
+            robots=tuple(
+                (robot, *self._robot_dofs(robot, config))
+                for robot, config in zip(robots, configs, strict=True)
+            ),
         )
         return tuple(scene_bodies)
 
@@ -263,32 +330,40 @@ class GenesisSimulator(Simulator):
         return frozenset(touching)
 
     def replay_scalars(self, env_id: int, ee_position: np.ndarray | None) -> list[RerunScalar]:
-        """The arm's and the gripper's joints and torques, from the robot's degrees of freedom.
+        """Each robot's arm and gripper joints and torques, from its degrees of freedom.
 
         The torques are the forces that the robot's commands give its degrees of freedom
-        in the current state, within each degree of freedom's force range.
+        in the current state, within each degree of freedom's force range. The scalars of
+        each robot after the first end in the robot's suffix, such as `joints_1`.
         """
-        cache = self._caches[env_id]
-        robot = cache.robot
-        qpos = self._numpy(robot.get_dofs_position())
-        qvel = self._numpy(robot.get_dofs_velocity())
-        forces = self._numpy(robot.get_dofs_control_force())
-        angles = qpos[cache.arm_dofs]
-        return [
-            *rerun_scalars("joints", RerunTab.ROBOT, angles),
-            *rerun_scalars("joints_vel", RerunTab.ROBOT, qvel[cache.arm_dofs]),
-            *rerun_scalars("joint_pos_cos", RerunTab.ROBOT, np.cos(angles)),
-            *rerun_scalars("joint_pos_sin", RerunTab.ROBOT, np.sin(angles)),
-            *rerun_scalars("gripper_qvel", RerunTab.ROBOT, qvel[cache.gripper_dofs]),
-            *rerun_scalars("joint_torques", RerunTab.PHYSICS, forces[cache.arm_dofs]),
-            *rerun_scalars("gripper_torques", RerunTab.PHYSICS, forces[cache.gripper_dofs]),
-            *rerun_scalars("qpos_robot", RerunTab.PHYSICS, angles),
-            *rerun_scalars("qvel_robot", RerunTab.PHYSICS, qvel[cache.arm_dofs]),
-            *rerun_scalars("qpos_gripper", RerunTab.PHYSICS, qpos[cache.gripper_dofs]),
-            *rerun_scalars("qvel_gripper", RerunTab.PHYSICS, qvel[cache.gripper_dofs]),
-        ]
+        scalars: list[RerunScalar] = []
+        for index, (robot, arm_dofs, gripper_dofs) in enumerate(self._caches[env_id].robots):
+            suffix = "" if index == 0 else f"_{index}"
+            qpos = self._numpy(robot.get_dofs_position())
+            qvel = self._numpy(robot.get_dofs_velocity())
+            forces = self._numpy(robot.get_dofs_control_force())
+            angles = qpos[arm_dofs]
+            named = [
+                ("joints", RerunTab.ROBOT, angles),
+                ("joints_vel", RerunTab.ROBOT, qvel[arm_dofs]),
+                ("joint_pos_cos", RerunTab.ROBOT, np.cos(angles)),
+                ("joint_pos_sin", RerunTab.ROBOT, np.sin(angles)),
+                ("gripper_qvel", RerunTab.ROBOT, qvel[gripper_dofs]),
+                ("joint_torques", RerunTab.PHYSICS, forces[arm_dofs]),
+                ("gripper_torques", RerunTab.PHYSICS, forces[gripper_dofs]),
+                ("qpos_robot", RerunTab.PHYSICS, angles),
+                ("qvel_robot", RerunTab.PHYSICS, qvel[arm_dofs]),
+                ("qpos_gripper", RerunTab.PHYSICS, qpos[gripper_dofs]),
+                ("qvel_gripper", RerunTab.PHYSICS, qvel[gripper_dofs]),
+            ]
+            for name, tab, values in named:
+                scalars += rerun_scalars(f"{name}{suffix}", tab, values)
+        return scalars
 
-    def _robot_dofs(self, robot: Any) -> tuple[np.ndarray, np.ndarray]:
+    @staticmethod
+    def _robot_dofs(
+        robot: Any, config: BenchmarkGenesisRobotConfig
+    ) -> tuple[np.ndarray, np.ndarray]:
         """The robot's degrees of freedom of the config's arm joints and gripper joints.
 
         Each is an index into the robot's degrees of freedom, in the order of
@@ -299,7 +374,7 @@ class GenesisSimulator(Simulator):
                 [dof for name in joints for dof in robot.get_joint(name).dofs_idx_local],
                 dtype=np.int64,
             )
-            for joints in (self._config.arm_joints, self._config.gripper_joints)
+            for joints in (config.arm_joints, config.gripper_joints)
         )
         return arm, gripper
 
@@ -342,15 +417,13 @@ class GenesisSimulator(Simulator):
         return ReplaySceneBodyRole.OBJECT, entity_name
 
     @staticmethod
-    def _body_name(entity: Any, link: Any, entity_name: str | None, *, is_robot: bool) -> str:
-        """The scene's name for a link.
+    def _body_name(entity: Any, link: Any, entity_name: str | None) -> str:
+        """The scene's name for a link outside the robots.
 
-        A robot link has its own name. A link of a named entity with one link has the
-        entity's name, and a link of a named entity with several links has the entity's
-        name and the link's. A link of an unnamed entity is `entity<index>_<link>`.
+        A link of a named entity with one link has the entity's name, and a link of a
+        named entity with several links has the entity's name and the link's. A link of an
+        unnamed entity is `entity<index>_<link>`.
         """
-        if is_robot:
-            return link.name
         stem = entity_name or f"entity{entity.idx}"
         return stem if entity_name is not None and len(entity.links) == 1 else f"{stem}_{link.name}"
 
@@ -401,6 +474,7 @@ class GenesisSimulator(Simulator):
 
 
 __all__ = [
+    "BenchmarkGenesisRobotConfig",
     "BenchmarkGenesisSimulatorConfig",
     "GenesisSimulator",
 ]

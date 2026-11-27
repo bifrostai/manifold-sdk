@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from manifold.benchmark.simulators.genesis import BenchmarkGenesisSimulatorConfig
 from manifold.benchmark.simulators.isaacsim import BenchmarkIsaacSimSimulatorConfig
@@ -123,22 +123,36 @@ class BenchmarkFingerPadConfig(_BenchmarkConfigBase):
     offset: tuple[float, float, float]
 
 
+def _check_pad_pairs(
+    pads: tuple[BenchmarkFingerPadConfig, ...],
+) -> tuple[BenchmarkFingerPadConfig, ...]:
+    """Require two pads for each gripper."""
+    if len(pads) % 2:
+        raise ValueError(f"finger_pads must list two pads for each gripper, and lists {len(pads)}")
+    return pads
+
+
+# The fingertip pads of the robot's grippers: two for each gripper, in the grippers' order.
+_FingerPads = Annotated[tuple[BenchmarkFingerPadConfig, ...], AfterValidator(_check_pad_pairs)]
+
+
 class BenchmarkReplayConfig(_BenchmarkConfigBase):
-    """The cameras that each replay frame contains, and the gripper's fingertip pads.
+    """The cameras that each replay frame contains, and the grippers' fingertip pads.
 
     `cameras` lists camera names from the spec, and the live view streams `cameras[0]`.
-    `finger_pads` lists the gripper's two fingertip pads for each replay's header, and is
-    empty when the gripper has no pads or the replay has no scene. A MuJoCo or Genesis
+    `finger_pads` lists two fingertip pads for each gripper, in the order of the grippers
+    in the action, for each replay's header. One pair serves every gripper. The list is
+    empty when the grippers have no pads or the replay has no scene. A MuJoCo or Genesis
     simulator also reports each pad's contacts. The replay then counts a grasp only when
-    both pads touch the object, and the episode stops if the model has no body with a
-    pad's name.
+    both pads of the gripper touch the object, and the episode stops if the model has no
+    body with a pad's name.
     `failure_types` lists
     the failure types that the hooks can record as `FailureEvent`s. Each replay's header
     holds a copy of the list, and the replay log rejects a `FailureEvent` of any other type.
     """
 
     cameras: tuple[str, ...] = Field(min_length=1)
-    finger_pads: tuple[()] | tuple[BenchmarkFingerPadConfig, BenchmarkFingerPadConfig]
+    finger_pads: _FingerPads
     failure_types: tuple[FailureType, ...] = ()
 
 
@@ -150,7 +164,7 @@ class BenchmarkEmbodimentConfig(_BenchmarkConfigBase):
     `{}` when the simulator's values hold.
     """
 
-    finger_pads: tuple[()] | tuple[BenchmarkFingerPadConfig, BenchmarkFingerPadConfig]
+    finger_pads: _FingerPads
     simulator: dict[str, Any]
 
 

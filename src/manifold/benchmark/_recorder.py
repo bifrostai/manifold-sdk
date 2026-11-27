@@ -62,7 +62,7 @@ from manifold.replay import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from manifold.benchmark.config import BenchmarkConfig
@@ -155,6 +155,28 @@ def _grippers(action: Any) -> tuple[_Gripper, ...]:
                 grippers.append(_Gripper(str(position), index, space.gripper))
             position += 1
     return tuple(grippers)
+
+
+def _gripper_pads(
+    pads: Sequence[str], grippers: tuple[_Gripper, ...]
+) -> dict[str, tuple[str, str]]:
+    """The two finger pads of each gripper, by the gripper's name.
+
+    `pads` lists two pads for each gripper, in the grippers' order. One pair serves every
+    gripper.
+
+    Raises:
+        ValueError: If `pads` lists more than one pair, and not one pair for each gripper.
+    """
+    pairs = [(pads[index], pads[index + 1]) for index in range(0, len(pads), 2)]
+    if len(pairs) == 1:
+        return {gripper.name: pairs[0] for gripper in grippers}
+    if pairs and len(pairs) != len(grippers):
+        raise ValueError(
+            f"the config lists {len(pairs)} pairs of finger pads for {len(grippers)} grippers; "
+            "list one pair that serves every gripper, or a pair for each gripper"
+        )
+    return {gripper.name: pair for gripper, pair in zip(grippers, pairs, strict=False)}
 
 
 def _arm_action(action: Any) -> tuple[EEActionSpace | JointActionSpace, slice] | None:
@@ -266,11 +288,13 @@ class _ReplayRecorder:
             if not isinstance(part, str)
         }
         self._hands = sorted({hand for hand, _ in self._hand_links.values()})
-        # The gripper's finger pads, if the simulator reports their contacts. With pads, a
-        # gripper grasps an object only when both pads touch it. Without them, it grasps
-        # whatever its `GripperTouchingEvent` says it touches. The config lists one pair of
-        # pads, and the rule uses that pair for every gripper.
+        # The finger pads, if the simulator reports their contacts. With pads, a gripper
+        # grasps an object only when both of its pads touch it. Without them, it grasps
+        # whatever its `GripperTouchingEvent` says it touches.
         self._pads = frozenset(simulator.replay_finger_pads() if simulator is not None else ())
+        self._gripper_pads = _gripper_pads(
+            simulator.replay_finger_pads() if simulator is not None else (), self._grippers
+        )
         # The task's object for each object body in the episode's scene, set by `begin`.
         self._object_bodies: dict[str, str] = {}
         self._objects: frozenset[str] = frozenset()
@@ -633,31 +657,33 @@ class _ReplayRecorder:
             return values[:position], float("nan")
         return values[:position], _yaw(quaternion)
 
-    def _pinched(self, pad_touches: frozenset[tuple[str, str]]) -> frozenset[str]:
-        """The names of the things that both finger pads touch.
+    def _pinched(self, pad_touches: frozenset[tuple[str, str]]) -> dict[str, frozenset[str]]:
+        """The names of the things that both finger pads of each gripper touch, by gripper.
 
         The result is empty when the simulator reports no finger pads.
         """
-        if not self._pads:
-            return frozenset()
-        return frozenset.intersection(
-            *(frozenset(thing for part, thing in pad_touches if part == pad) for pad in self._pads)
-        )
+        return {
+            gripper: frozenset.intersection(
+                *(frozenset(thing for part, thing in pad_touches if part == pad) for pad in pads)
+            )
+            for gripper, pads in self._gripper_pads.items()
+        }
 
     def _events_to_write(
         self,
         events: tuple[ManifoldEvent, ...],
         action: Any,
-        pinched: frozenset[str] = frozenset(),
+        pinched: Mapping[str, frozenset[str]] | None = None,
     ) -> list[ManifoldEvent]:
         """The fact events that changed, the other events, and `GraspedEvent`.
 
         This method writes a `FactEvent` on the first frame if it is active, and later
-        when its `is_active` changes. A gripper grasps an object while the policy tells it
-        to close and both of its finger pads touch the object, as `pinched` lists. When the
-        simulator reports no finger pads, a gripper grasps an object while the policy tells
-        it to close and its `GripperTouchingEvent` for the object is active. This method
-        writes a `GraspedEvent` each time a gripper starts or stops grasping an object.
+        when its `is_active` changes. A gripper grasps an object while the policy tells
+        it to close and both of its finger pads touch the object, as `pinched` lists by
+        gripper. When the simulator reports no finger pads, a gripper grasps an object
+        while the policy tells it to close and its `GripperTouchingEvent` for the object
+        is active. This method writes a `GraspedEvent` each time a gripper starts or
+        stops grasping an object.
 
         Raises:
             ValueError: If a gripper event names a gripper that the action and the hands
@@ -682,7 +708,11 @@ class _ReplayRecorder:
         for latest in self._latest.values():
             if not isinstance(latest, GripperTouchingEvent):
                 continue
-            held = latest.object in pinched if self._pads else latest.is_active
+            held = (
+                latest.object in (pinched or {}).get(latest.gripper, frozenset())
+                if self._pads
+                else latest.is_active
+            )
             grasped = held and self._commanded_shut.get(latest.gripper, False)
             recorded += self._grasp_change(latest.gripper, latest.object, grasped=grasped)
         return recorded

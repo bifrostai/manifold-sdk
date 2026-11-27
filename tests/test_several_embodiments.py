@@ -20,15 +20,18 @@ from manifold.benchmark._client import (
     _ClientPolicyConnection,
     request_policy_cameras,
 )
+from manifold.benchmark._recorder import _Gripper as _ActionGripper
+from manifold.benchmark._recorder import _gripper_pads
 from manifold.benchmark._service import make_service
 from manifold.benchmark.hooks import _fill_optional_hooks
 from manifold.benchmark.simulators.genesis import GenesisSimulator
 from manifold.core.benchmark import Benchmark
+from manifold.core.conventions import GripperFormat
 from manifold.core.names import CameraName
 from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
 from manifold.core.values import Action, Observation
-from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE
+from manifold.embodiments import DUAL_FRANKA_EE_DELTA, FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE
 from manifold.recipes import (
     Pairing,
     launch_server,
@@ -37,12 +40,13 @@ from manifold.recipes import (
     serve,
     serving,
 )
-from manifold.replay import EpisodeStartedEvent, read_replay_log
+from manifold.replay import EpisodeStartedEvent, GraspedEvent, GripperTouchingEvent, read_replay_log
 from manifold.sensors import agentview, wrist
 from manifold.wire import FrameType
 from tests.test_benchmark_runtime import (
     _LOGGER,
     _observation,
+    _PadSimulator,
     _Policy,
     _raw_config,
     _run_client,
@@ -181,6 +185,7 @@ def test_the_config_of_an_embodiment_takes_its_finger_pads_and_simulator_values(
         "gripper_joints": ("finger_joint1", "finger_joint2"),
         "robot": "agents.1.robot",
         "touch_links": {"hand": "gripper", "link7": "arm"},
+        "other_robots": (),
     }
     assert ee.embodiments is None
     assert arm.simulator == config.simulator
@@ -801,3 +806,102 @@ def test_a_server_without_a_pairing_for_one_embodiment_fails_the_run_at_start_up
 
     assert hooks.envs == []
     assert session.completed == []
+
+
+# Each gripper of a robot with two arms grasps with its own finger pads.
+
+
+def _two_grippers() -> tuple[_ActionGripper, ...]:
+    return (
+        _ActionGripper("0", 6, GripperFormat.SIGNED),
+        _ActionGripper("1", 13, GripperFormat.SIGNED),
+    )
+
+
+def test_a_pair_of_pads_for_each_gripper_belongs_to_that_gripper():
+    pads = _gripper_pads(("l0", "r0", "l1", "r1"), _two_grippers())
+
+    assert pads == {"0": ("l0", "r0"), "1": ("l1", "r1")}
+
+
+def test_one_pair_of_pads_serves_every_gripper():
+    assert _gripper_pads(("l", "r"), _two_grippers()) == {"0": ("l", "r"), "1": ("l", "r")}
+    assert _gripper_pads((), _two_grippers()) == {}
+
+
+def test_pairs_of_pads_that_do_not_match_the_grippers_are_refused():
+    with pytest.raises(ValueError, match="3 pairs of finger pads for 2 grippers"):
+        _gripper_pads(("a", "b", "c", "d", "e", "f"), _two_grippers())
+
+
+def test_the_config_refuses_an_odd_number_of_finger_pads():
+    raw = _raw_config({"type": "single"})
+    raw["replay"]["finger_pads"] = _PADS[:1]
+
+    with pytest.raises(ValidationError, match="two pads for each gripper, and lists 1"):
+        BenchmarkConfig.model_validate(raw)
+
+
+class _TwoArmPadSimulator(_PadSimulator):
+    """A simulator whose two grippers each report their own pair of pads."""
+
+    def replay_finger_pads(self):
+        return ("left_pad", "right_pad", "left_pad_1", "right_pad_1")
+
+
+class _ShutTwoArms(_Policy):
+    """Tells both grippers to close at every step."""
+
+    def infer(self, observation):
+        return Action(values=np.full(14, -1.0, dtype=np.float32))
+
+
+def test_each_gripper_grasps_only_what_both_of_its_own_pads_touch(tmp_path, monkeypatch):
+    def on_reset(config, env, task_config, episode_idx, logger):
+        return ResetResult(
+            _observation(0),
+            instruction="lift the toy",
+            task_id=task_config["task_id"],
+            attributes={},
+            events=(),
+            max_steps=None,
+        )
+
+    def on_step(config, env, task_config, action, logger):
+        env.steps = getattr(env, "steps", 0) + 1
+        touching = tuple(
+            GripperTouchingEvent(gripper=gripper, object="toy", is_active=True)
+            for gripper in ("0", "1")
+        )
+        done = env.steps == 3
+        return StepResult(_observation(0), success=done, done=done, events=touching)
+
+    hooks = types.SimpleNamespace(
+        on_load=lambda config, task_config, logger: types.SimpleNamespace(),
+        on_reset=on_reset,
+        on_step=on_step,
+    )
+    raw = _raw_config({"type": "single"})
+    raw["spec"]["embodiment"] = DUAL_FRANKA_EE_DELTA.model_dump(mode="json")
+    simulator = _TwoArmPadSimulator()
+    # Only the second gripper's pads pinch the toy.
+    simulator.pad_contacts = [frozenset({("left_pad_1", "toy"), ("right_pad_1", "toy")})] * 3
+    session = _Session(_task(tmp_path, (0,)))
+
+    _run_client(
+        BenchmarkConfig.model_validate(raw),
+        hooks,
+        session,
+        monkeypatch,
+        _ShutTwoArms,
+        simulator=simulator,
+    )
+
+    ((_, artifacts),) = session.completed
+    grasps = [
+        (event.gripper, event.is_active)
+        for step in read_replay_log(artifacts[0][0]).steps
+        for event in step.events
+        if isinstance(event, GraspedEvent)
+    ]
+    assert grasps == [("1", True)]
