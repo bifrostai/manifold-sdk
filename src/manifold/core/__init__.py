@@ -16,6 +16,7 @@ from manifold.core.adapter import (
 from manifold.core.benchmark import (
     ActionRange,
     Benchmark,
+    BenchmarkEmbodiment,
     EndEffector,
     EndEffectorType,
     GpuArchitecture,
@@ -84,6 +85,7 @@ __all__ = [
     "Assemble",
     "BatchAxis",
     "Benchmark",
+    "BenchmarkEmbodiment",
     "BodyActionSpace",
     "BodyPart",
     "Camera",

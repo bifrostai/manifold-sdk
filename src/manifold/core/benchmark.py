@@ -170,6 +170,20 @@ class EndEffector(BaseModel):
     end_effector_type: EndEffectorType
 
 
+class BenchmarkEmbodiment(BaseModel):
+    """One robot of a benchmark that lists several: its embodiment, cameras, range and ends.
+
+    Each field means what the field of the same name on `Benchmark` means.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    embodiment: Embodiment
+    sensors: list[Camera]
+    action_range: ActionRange | None = None
+    end_effectors: tuple[EndEffector, ...] | None = None
+
+
 class Benchmark(BaseModel):
     """An embodiment in a task, with the sensors it publishes.
 
@@ -200,6 +214,13 @@ class Benchmark(BaseModel):
     dexterous hand. An empty list declares a robot with none. It is None when the
     benchmark does not declare them. The benchmark does not send it to the policy, so a
     policy on an older SDK never receives a type that it does not know.
+
+    `embodiments` lists each robot of a benchmark whose tasks use several robots, and is
+    None for a benchmark with one robot. No two entries share an embodiment name. The
+    top-level `embodiment`, `sensors`, `action_range` and `end_effectors` equal the first
+    entry, so that a reader that does not know `embodiments` reads a valid spec of one
+    robot. `for_embodiment` returns the spec of one entry. The other values hold for
+    every entry.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -214,6 +235,7 @@ class Benchmark(BaseModel):
     image_format: ImageFormat | None = None
     gpu_architectures: tuple[GpuArchitecture, ...] | None = Field(default=None, min_length=1)
     end_effectors: tuple[EndEffector, ...] | None = None
+    embodiments: tuple[BenchmarkEmbodiment, ...] | None = Field(default=None, min_length=1)
 
     @field_validator("gpu_architectures")
     @classmethod
@@ -244,6 +266,27 @@ class Benchmark(BaseModel):
                 f"action_range has {len(self.action_range.low)} values and the action "
                 f"has {expected}"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _check_embodiments(self) -> Benchmark:
+        """Require distinct embodiment names, a top level equal to the first, and valid entries."""
+        if self.embodiments is None:
+            return self
+        names = [entry.embodiment.name for entry in self.embodiments]
+        repeated = sorted({name for name in names if names.count(name) > 1})
+        if repeated:
+            raise ValueError(f"embodiment names {repeated} appear more than once")
+        first = self.embodiments[0]
+        differing = [
+            field
+            for field in ("embodiment", "sensors", "action_range", "end_effectors")
+            if getattr(self, field) != getattr(first, field)
+        ]
+        if differing:
+            raise ValueError(f"{differing} must equal the first entry of embodiments")
+        for name in names[1:]:
+            self.for_embodiment(name)
         return self
 
     @classmethod
@@ -326,6 +369,28 @@ class Benchmark(BaseModel):
             raise TypeError(f"{self!r} has no gripper action to target")
         return gripper
 
+    @property
+    def embodiment_names(self) -> tuple[str, ...]:
+        """The name of each embodiment, in the order of `embodiments`."""
+        if self.embodiments is None:
+            return (self.embodiment.name,)
+        return tuple(entry.embodiment.name for entry in self.embodiments)
+
+    def for_embodiment(self, name: str) -> Benchmark:
+        """The spec of the embodiment `name` alone, with `embodiments` None.
+
+        A spec of one robot returns itself for its own embodiment. A name that the spec
+        does not list raises `ValueError`.
+        """
+        if name not in self.embodiment_names:
+            raise ValueError(
+                f"{self.name} has no embodiment {name!r}; it has {list(self.embodiment_names)}"
+            )
+        if self.embodiments is None:
+            return self
+        entry = next(entry for entry in self.embodiments if entry.embodiment.name == name)
+        return Benchmark.model_validate({**dict(self), **dict(entry), "embodiments": None})
+
     def with_sensors(self, names: set[CameraName]) -> Benchmark:
         """The same benchmark publishing only the sensors in `names`, in its own order.
 
@@ -343,4 +408,5 @@ class Benchmark(BaseModel):
 __all__ = [
     "ActionRange",
     "Benchmark",
+    "BenchmarkEmbodiment",
 ]

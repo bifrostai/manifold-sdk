@@ -17,6 +17,7 @@ from manifold.benchmark._worker import WorkerEpisodeRecord, WorkerSession, Worke
 from manifold.benchmark.config import (
     BenchmarkBatchedServiceConfig,
     BenchmarkConfig,
+    BenchmarkEmbodimentConfig,
     BenchmarkEnvConfig,
     BenchmarkReplayConfig,
     BenchmarkRunConfig,
@@ -42,6 +43,7 @@ __all__ = [
     "Benchmark",
     "BenchmarkBatchedServiceConfig",
     "BenchmarkConfig",
+    "BenchmarkEmbodimentConfig",
     "BenchmarkEnvConfig",
     "BenchmarkReplayConfig",
     "BenchmarkRunConfig",

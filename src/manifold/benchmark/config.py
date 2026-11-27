@@ -142,6 +142,18 @@ class BenchmarkReplayConfig(_BenchmarkConfigBase):
     failure_types: tuple[FailureType, ...] = ()
 
 
+class BenchmarkEmbodimentConfig(_BenchmarkConfigBase):
+    """The values of one embodiment of `spec.embodiments` that differ from the config's.
+
+    `finger_pads` takes the place of `replay.finger_pads`. `simulator` is a JSON Merge
+    Patch on `simulator`, such as the path to the embodiment's robot and its joints, or
+    `{}` when the simulator's values hold.
+    """
+
+    finger_pads: tuple[()] | tuple[BenchmarkFingerPadConfig, BenchmarkFingerPadConfig]
+    simulator: dict[str, Any]
+
+
 class BenchmarkConfig(_BenchmarkConfigBase):
     """A benchmark's config file: its values, its Service, and its spec.
 
@@ -153,6 +165,12 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     `extras` contains the values that only the hooks read, under upstream's names. An
     example is a count of warm-up steps from upstream's eval script. A value that
     several benchmarks use gets its own key in the config.
+
+    `embodiments` maps an embodiment name of `spec.embodiments` to the values that it does
+    not share with the config, such as its finger pads and its robot's joints. An
+    embodiment that the map leaves out uses the config's values. It is None for a config
+    whose values hold for every embodiment. `for_embodiment` returns the config of one
+    embodiment.
     """
 
     benchmark: BenchmarkVersionConfig
@@ -176,6 +194,7 @@ class BenchmarkConfig(_BenchmarkConfigBase):
     )
     replay: BenchmarkReplayConfig
     spec: Benchmark
+    embodiments: dict[str, BenchmarkEmbodimentConfig] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -234,6 +253,27 @@ class BenchmarkConfig(_BenchmarkConfigBase):
         return self
 
     @model_validator(mode="after")
+    def _check_embodiments(self) -> BenchmarkConfig:
+        """Require `embodiments` to list only embodiments of the spec, and each config to hold.
+
+        An Isaac Sim simulator reads one robot for the whole container, so its config
+        cannot give values for each embodiment.
+        """
+        listed = set(self.embodiments or {})
+        unknown = sorted(listed - set(self.spec.embodiment_names))
+        if unknown:
+            raise ValueError(
+                f"embodiments lists {unknown}, which spec.embodiments does not list; it lists "
+                f"{list(self.spec.embodiment_names)}"
+            )
+        if listed and isinstance(self.simulator, BenchmarkIsaacSimSimulatorConfig):
+            raise ValueError("an isaacsim simulator reads one robot, so embodiments must be null")
+        if self.spec.embodiments is not None:
+            for name in self.spec.embodiment_names:
+                self.for_embodiment(name)
+        return self
+
+    @model_validator(mode="after")
     def _check_replay_cameras(self) -> BenchmarkConfig:
         names = {sensor.name for sensor in self.spec.sensors}
         unknown = [camera for camera in self.replay.cameras if camera not in names]
@@ -242,6 +282,31 @@ class BenchmarkConfig(_BenchmarkConfigBase):
                 f"replay.cameras lists cameras that are not in spec.sensors: {unknown}"
             )
         return self
+
+    def for_embodiment(self, name: str) -> BenchmarkConfig:
+        """The config of the embodiment `name` alone, with the values that `embodiments` gives it.
+
+        Its spec is `spec.for_embodiment(name)`, and its `embodiments` is None.
+
+        Raises:
+            pydantic.ValidationError: If the embodiment's values break a rule of the config.
+            ValueError: If the spec does not list `name`.
+        """
+        values = (self.embodiments or {}).get(name)
+        replay, simulator = self.replay, self.simulator
+        if values is not None:
+            replay = replay.model_copy(update={"finger_pads": values.finger_pads})
+            dumped = simulator.model_dump(mode="json") if simulator is not None else None
+            simulator = _merge_patch(dumped, values.simulator) if values.simulator else simulator
+        return BenchmarkConfig.model_validate(
+            {
+                **dict(self),
+                "spec": self.spec.for_embodiment(name),
+                "replay": replay,
+                "simulator": simulator,
+                "embodiments": None,
+            }
+        )
 
 
 def _merge_patch(target: Any, patch: Any) -> Any:
@@ -289,6 +354,7 @@ def load_config(path: Path) -> BenchmarkConfig:
 __all__ = [
     "BenchmarkBatchedServiceConfig",
     "BenchmarkConfig",
+    "BenchmarkEmbodimentConfig",
     "BenchmarkEnvConfig",
     "BenchmarkFingerPadConfig",
     "BenchmarkReplayConfig",
