@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import threading
 import types
 from typing import Any, cast
 
@@ -9,12 +11,21 @@ import pytest
 from pydantic import ValidationError
 
 from manifold.benchmark import BenchmarkConfig, ResetResult, StepResult, _client
-from manifold.benchmark._client import _ClientPolicyConnection
+from manifold.benchmark.__main__ import _render_only_policy_cameras
+from manifold.benchmark._client import (
+    PolicyCameras,
+    _ClientPolicyConnection,
+    request_policy_cameras,
+)
 from manifold.benchmark._service import make_service
 from manifold.benchmark.simulators.genesis import GenesisSimulator
 from manifold.core.benchmark import Benchmark
+from manifold.core.names import CameraName
+from manifold.core.policy import PolicySignature
 from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE
+from manifold.recipes import serve
 from manifold.replay import EpisodeStartedEvent, read_replay_log
+from manifold.sensors import agentview, wrist
 from manifold.wire import FrameType
 from tests.test_benchmark_runtime import (
     _LOGGER,
@@ -428,3 +439,124 @@ def test_the_service_attaches_the_simulator_of_each_embodiment_with_its_own_valu
     assert cast("Any", ee)._config.robot == "agents.1.robot"
     assert cast("Any", ee)._finger_pads == ()
     assert set(cast("Any", ee)._envs) == set(cast("Any", arm)._envs) == {0}
+
+
+# Each embodiment renders only the cameras that its pairing reads.
+
+
+def _camera_config() -> BenchmarkConfig:
+    """Two embodiments that each publish the agentview, the wrist and a right shoulder."""
+    cameras = [
+        {"name": "agentview", "shape": [4, 4, 3]},
+        {"name": "wrist", "shape": [4, 4, 3]},
+        {"name": "over_shoulder_right", "shape": [4, 4, 3]},
+    ]
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = _spec([_arm_entry() | {"sensors": cameras}, _ee_entry() | {"sensors": cameras}])
+    return BenchmarkConfig.model_validate(raw)
+
+
+def _rendered(config: BenchmarkConfig, reply: PolicyCameras | None, monkeypatch) -> list[list[str]]:
+    """The cameras that each embodiment renders after the policy sends `reply`."""
+    monkeypatch.setattr("manifold.benchmark.__main__.request_policy_cameras", lambda address: reply)
+    spec = _render_only_policy_cameras(config, "ws://policy:1").spec
+    return [
+        [str(sensor.name) for sensor in spec.for_embodiment(name).sensors]
+        for name in spec.embodiment_names
+    ]
+
+
+_ALL = ["agentview", "wrist", "over_shoulder_right"]
+
+
+def test_each_embodiment_renders_the_cameras_of_its_pairing_and_the_replay(monkeypatch):
+    reply = PolicyCameras(
+        cameras=frozenset({"wrist"}),
+        by_embodiment={
+            "franka_joint_absolute": frozenset({"agentview"}),
+            "franka_ee_delta": frozenset({"wrist", "over_shoulder_right"}),
+        },
+    )
+
+    assert _rendered(_camera_config(), reply, monkeypatch) == [["agentview"], _ALL]
+
+
+@pytest.mark.parametrize(
+    "by_embodiment",
+    [
+        None,
+        {"franka_joint_absolute": frozenset({"wrist"})},
+        {"franka_joint_absolute": frozenset({"wrist"}), "franka_ee_delta": frozenset({"head"})},
+    ],
+    ids=[
+        "a reply without signatures",
+        "no pairing for the embodiment",
+        "a pairing that reads a camera the embodiment does not publish",
+    ],
+)
+def test_an_embodiment_renders_every_camera(monkeypatch, by_embodiment):
+    reply = PolicyCameras(cameras=frozenset({"wrist"}), by_embodiment=by_embodiment)
+
+    rendered = _rendered(_camera_config(), reply, monkeypatch)
+
+    assert rendered[1] == _ALL
+    assert rendered[0] == (_ALL if by_embodiment is None else ["agentview", "wrist"])
+
+
+def test_a_spec_of_one_robot_renders_the_cameras_of_its_pairing_before_the_signature(
+    monkeypatch,
+):
+    raw = _raw_config({"type": "single"})
+    raw["spec"] = _spec([_arm_entry() | {"sensors": _camera_config().spec.sensors}]) | {
+        "embodiments": None
+    }
+    config = BenchmarkConfig.model_validate(raw)
+    paired = PolicyCameras(
+        cameras=frozenset({"wrist"}),
+        by_embodiment={"franka_joint_absolute": frozenset({"over_shoulder_right"})},
+    )
+    unpaired = PolicyCameras(cameras=frozenset({"wrist"}), by_embodiment={})
+
+    assert _rendered(config, paired, monkeypatch) == [["agentview", "over_shoulder_right"]]
+    assert _rendered(config, unpaired, monkeypatch) == [["agentview", "wrist"]]
+
+
+def test_with_embodiment_sensors_keeps_the_top_level_equal_to_the_first_entry():
+    spec = _camera_config().spec
+
+    narrowed = spec.with_embodiment_sensors({"franka_joint_absolute": {CameraName.WRIST}})
+
+    assert [str(sensor.name) for sensor in narrowed.sensors] == ["wrist"]
+    assert narrowed.for_embodiment("franka_joint_absolute").sensors == narrowed.sensors
+    assert narrowed.for_embodiment("franka_ee_delta").sensors == spec.sensors
+
+
+def test_the_signature_reply_carries_each_embodiments_signature():
+    arm = PolicySignature(
+        action_space=FRANKA_EE_DELTA.action, cameras=[agentview((8, 8, 3))], instruction=False
+    )
+    both = arm.model_copy(update={"cameras": [agentview((8, 8, 3)), wrist((8, 8, 3))]})
+    endpoint = types.SimpleNamespace(signature=arm, session=None)
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    listening = threading.Event()
+    threading.Thread(
+        target=serve,
+        args=(endpoint,),
+        kwargs={
+            "port": port,
+            "signatures": {"franka_joint_absolute": arm, "franka_ee_delta": both},
+            "on_event": lambda event: event.startswith("listening on") and listening.set(),
+        },
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+
+    assert request_policy_cameras(f"127.0.0.1:{port}") == PolicyCameras(
+        cameras=frozenset({"agentview"}),
+        by_embodiment={
+            "franka_joint_absolute": frozenset({"agentview"}),
+            "franka_ee_delta": frozenset({"agentview", "wrist"}),
+        },
+    )

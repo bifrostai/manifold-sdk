@@ -293,7 +293,8 @@ class FrameType(StrEnum):
 
     Before HELLO, a peer may send GET_SIGNATURE. The policy replies SIGNATURE
     with its `PolicySignature` and the SDK version, and keeps the connection
-    open. The Manifold CLI
+    open. A policy that serves several pairings adds `signatures`, the
+    signature of each pairing by its embodiment name. The Manifold CLI
     asks when serve starts, then closes the connection. A benchmark may ask to
     learn which cameras the policy reads, then send HELLO.
     """

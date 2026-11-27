@@ -57,38 +57,73 @@ def _log_by_level() -> None:
     )
 
 
+# `python -m` names this module `__main__`, which is outside the `manifold` loggers
+# that show INFO.
+_logger = logging.getLogger("manifold.benchmark")
+
+
 def _render_only_policy_cameras(config: BenchmarkConfig, policy_address: str) -> BenchmarkConfig:
-    """Return `config` with a spec that publishes only the cameras that the run needs.
+    """Return `config` with a spec whose embodiments publish only the cameras the run needs.
 
     Those are the cameras that the policy reads and the cameras of the replay. The
-    spec stays whole when the policy does not answer GET_SIGNATURE. It also stays
-    whole when the policy reads a camera that the spec does not publish, because the
-    policy's adapter may read that camera from a spec camera with another name.
+    spec stays whole when the policy does not answer GET_SIGNATURE.
+
+    For a spec of one robot, the policy reads the cameras of the signature that it pairs
+    with the robot's embodiment, or else the cameras of its signature. For a spec of
+    several robots, each embodiment keeps every camera when the reply pairs no
+    signature with it, as the reply of a policy on an older SDK does not.
     """
-    # `python -m` names this module `__main__`, which is outside the `manifold`
-    # loggers that show INFO.
-    logger = logging.getLogger("manifold.benchmark")
-    published = [str(sensor.name) for sensor in config.spec.sensors]
-    logger.info("the spec publishes the cameras %s", _names(published))
-    cameras = request_policy_cameras(policy_address)
-    if cameras is None:
-        logger.info("the policy sent no signature, so every camera is rendered")
-        return config
-    logger.info("the policy reads the cameras %s", _names(sorted(cameras)))
+    reply = request_policy_cameras(policy_address)
+    names = config.spec.embodiment_names
+    several = len(names) > 1
+    kept: dict[str, set[CameraName]] = {}
+    for name in names:
+        prefix = f"{name}: " if several else ""
+        spec = config.spec.for_embodiment(name)
+        published = [str(sensor.name) for sensor in spec.sensors]
+        _logger.info("%sthe spec publishes the cameras %s", prefix, _names(published))
+        if reply is None:
+            _logger.info("the policy sent no signature, so every camera is rendered")
+            return config
+        cameras = (reply.by_embodiment or {}).get(name)
+        if cameras is None and several:
+            _logger.info(
+                "%sno signature of the policy pairs with it, so every camera is rendered", prefix
+            )
+            continue
+        cameras = reply.cameras if cameras is None else cameras
+        narrowed = _narrowed_cameras(prefix, published, cameras, config.replay.cameras)
+        if narrowed is not None:
+            kept[name] = narrowed
+    return config.model_copy(update={"spec": config.spec.with_embodiment_sensors(kept)})
+
+
+def _narrowed_cameras(
+    prefix: str, published: list[str], cameras: frozenset[str], replay: tuple[str, ...]
+) -> set[CameraName] | None:
+    """The cameras to render of the `published` ones, or None to render every camera.
+
+    Every camera is rendered when the policy reads a camera that is not published,
+    because the policy's adapter may read that camera from a published camera with
+    another name.
+    """
+    _logger.info("%sthe policy reads the cameras %s", prefix, _names(sorted(cameras)))
     unpublished = sorted(set(cameras) - set(published))
     if unpublished:
-        logger.info(
-            "the spec does not publish %s, so every camera is rendered", _names(unpublished)
+        _logger.info(
+            "%sthe spec does not publish %s, so every camera is rendered",
+            prefix,
+            _names(unpublished),
         )
-        return config
-    kept = {*cameras, *config.replay.cameras}
-    spec = config.spec.with_sensors({CameraName(camera) for camera in kept})
-    logger.info(
-        "rendering %s, and dropping %s",
-        _names(str(sensor.name) for sensor in spec.sensors),
+        return None
+    kept = {*cameras, *replay}
+    _logger.info(
+        "%srendering %s, and dropping %s",
+        prefix,
+        _names(camera for camera in published if camera in kept),
         _names(camera for camera in published if camera not in kept),
     )
-    return config.model_copy(update={"spec": spec})
+    return {CameraName(camera) for camera in kept}
 
 
 def _names(cameras: Iterable[str]) -> str:

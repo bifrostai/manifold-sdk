@@ -26,6 +26,7 @@ from manifold.benchmark import (
 from manifold.benchmark.__main__ import _log_by_level, _render_only_policy_cameras, main
 from manifold.benchmark._client import (
     Client,
+    PolicyCameras,
     _ClientPolicyConnection,
     _upright_image_pipeline,
     request_policy_cameras,
@@ -1172,7 +1173,7 @@ def _sensor_names(config: BenchmarkConfig) -> list[str]:
 def test_the_spec_keeps_the_cameras_that_the_policy_and_the_replay_read(monkeypatch, caplog):
     monkeypatch.setattr(
         "manifold.benchmark.__main__.request_policy_cameras",
-        lambda address: frozenset({"wrist"}),
+        lambda address: PolicyCameras(frozenset({"wrist"}), None),
     )
 
     with caplog.at_level(logging.INFO, logger="manifold"):
@@ -1190,7 +1191,11 @@ def test_the_spec_keeps_the_cameras_that_the_policy_and_the_replay_read(monkeypa
 
 @pytest.mark.parametrize(
     "cameras",
-    [None, frozenset({"wrist", "head"}), frozenset({"wrist", "thermal"})],
+    [
+        None,
+        PolicyCameras(frozenset({"wrist", "head"}), None),
+        PolicyCameras(frozenset({"wrist", "thermal"}), None),
+    ],
     ids=[
         "a policy that sends no signature",
         "a listed camera that the spec does not publish",
@@ -1222,7 +1227,7 @@ def test_the_hooks_start_with_the_cameras_that_the_policy_reads(tmp_path, monkey
     monkeypatch.setenv("MANIFOLD_SERVER_URL", "ws://policy:1")
     monkeypatch.setattr(
         "manifold.benchmark.__main__.request_policy_cameras",
-        lambda address: frozenset({"over_shoulder_right"}),
+        lambda address: PolicyCameras(frozenset({"over_shoulder_right"}), None),
     )
 
     with pytest.raises(SystemExit) as stopped:
@@ -1256,7 +1261,9 @@ def test_policy_cameras_returns_the_cameras_in_the_policy_signature():
     ).start()
     assert listening.wait(timeout=5), "the server never bound its port"
 
-    assert request_policy_cameras(f"ws://127.0.0.1:{port}") == {"wrist"}
+    assert request_policy_cameras(f"ws://127.0.0.1:{port}") == PolicyCameras(
+        frozenset({"wrist"}), None
+    )
 
 
 def test_policy_cameras_returns_none_when_the_policy_closes_the_connection():

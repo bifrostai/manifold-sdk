@@ -53,7 +53,7 @@ from manifold.wire import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from manifold.benchmark import ResetResult, StepResult
     from manifold.core.native_layout import NativeLayout
@@ -189,6 +189,7 @@ def _is_inside(path: Path, roots: tuple[Path, ...]) -> bool:
 def _serve_connection(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    signatures: Mapping[str, PolicySignature] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
     addr: Any,
@@ -208,7 +209,7 @@ def _serve_connection(
     """
     try:
         with conn:
-            spoke = _serve_session(endpoint, pipeline, script, conn, addr, emit)
+            spoke = _serve_session(endpoint, pipeline, signatures, script, conn, addr, emit)
         if spoke:
             emit(f"connection from {addr} closed")
     except Exception as exc:  # one shard's failure must not kill the server.
@@ -227,9 +228,28 @@ def _received_benchmark(payload: dict[str, Any], emit: Callable[[str], None]) ->
     return benchmark
 
 
+def _signature_reply(
+    endpoint: PolicyEndpoint,
+    signatures: Mapping[str, PolicySignature] | None,
+    script: dict[str, str] | None,
+) -> dict[str, Any]:
+    """The payload of a SIGNATURE reply, with `signatures` only when the server has them."""
+    reply: dict[str, Any] = {
+        "signature": endpoint.signature.model_dump(mode="json"),
+        "sdk_version": _sdk_commit(),
+        "script": script,
+    }
+    if signatures is not None:
+        reply["signatures"] = {
+            name: signature.model_dump(mode="json") for name, signature in signatures.items()
+        }
+    return reply
+
+
 def _serve_session(
     endpoint: PolicyEndpoint,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    signatures: Mapping[str, PolicySignature] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
     addr: Any,
@@ -253,14 +273,7 @@ def _serve_session(
     # A peer may send GET_SIGNATURE before HELLO. The CLI closes the connection
     # after the reply, and a benchmark sends HELLO next.
     while hello is not None and hello.get("type") == FrameType.GET_SIGNATURE:
-        channel.send(
-            FrameType.SIGNATURE,
-            {
-                "signature": endpoint.signature.model_dump(mode="json"),
-                "sdk_version": _sdk_commit(),
-                "script": script,
-            },
-        )
+        channel.send(FrameType.SIGNATURE, _signature_reply(endpoint, signatures, script))
         hello = channel.recv()
     if hello is None:
         return False
@@ -585,6 +598,7 @@ def serve(
     endpoint: PolicyEndpoint,
     *,
     pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
+    signatures: Mapping[str, PolicySignature] | None = None,
     host: str = "127.0.0.1",
     port: int,
     # TODO: max_workers is now ignored, but kept for backwards compatibility. Remove it
@@ -607,8 +621,11 @@ def serve(
 
     `pipeline` may be None (empty pipeline), a callable invoked per connection with
     the benchmark (the dynamic-injection hook — the pipeline arrives with the job),
-    or a `Pipeline` used as-is. `on_event` is called from worker threads, so a custom
-    sink must be concurrency-safe.
+    or a `Pipeline` used as-is. `signatures` maps an embodiment name to the signature
+    that the server pairs with that embodiment, and the reply to GET_SIGNATURE carries it
+    under `signatures`, so that a benchmark renders only the cameras that each of its
+    embodiments needs. The reply leaves the key out when `signatures` is None. `on_event`
+    is called from worker threads, so a custom sink must be concurrency-safe.
     """
     emit = on_event
     script = _serving_script()
@@ -625,7 +642,7 @@ def serve(
                 conn, addr = listener.accept()
                 worker = threading.Thread(
                     target=_serve_connection,
-                    args=(endpoint, pipeline, script, conn, addr, emit),
+                    args=(endpoint, pipeline, signatures, script, conn, addr, emit),
                     daemon=True,
                 )
                 workers.append(worker)
@@ -709,6 +726,22 @@ def evaluate(
         session.close()
 
 
+def _signatures_by_embodiment(pairings: Sequence[Pairing]) -> dict[str, PolicySignature]:
+    """The signature of each pairing, by the name of its benchmark's embodiment.
+
+    An embodiment that two pairings pair with different signatures is left out, because
+    a benchmark asks for the signatures before it says which benchmark it is.
+    """
+    by_embodiment: dict[str, PolicySignature] = {}
+    differing: set[str] = set()
+    for pairing in pairings:
+        name = pairing.benchmark.embodiment.name
+        signature = pairing.profile.signature
+        if by_embodiment.setdefault(name, signature) != signature:
+            differing.add(name)
+    return {name: s for name, s in by_embodiment.items() if name not in differing}
+
+
 def launch_server(
     pairings: Sequence[Pairing],
     *,
@@ -742,6 +775,7 @@ def launch_server(
     serve(
         endpoint,
         pipeline=pipeline,
+        signatures=_signatures_by_embodiment(pairings),
         host=host,
         port=port,
         on_event=on_event,

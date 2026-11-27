@@ -89,8 +89,29 @@ def _parse_policy_address(url: str) -> tuple[str, int]:
     return host, int(port)
 
 
-def request_policy_cameras(address: str) -> frozenset[str] | None:
-    """Ask the policy at `address` for its signature, and return the cameras that it reads.
+@dataclass(frozen=True)
+class PolicyCameras:
+    """The cameras that a policy reads, from its reply to GET_SIGNATURE.
+
+    `cameras` are the cameras of the policy's signature. `by_embodiment` maps an
+    embodiment name to the cameras of the signature that the policy pairs with that
+    embodiment. It is None when the reply has no `signatures`, as the reply of a policy
+    on an older SDK does not.
+
+    The names stay strings, because a newer policy may read a camera that this SDK does
+    not list.
+    """
+
+    cameras: frozenset[str]
+    by_embodiment: dict[str, frozenset[str]] | None
+
+
+def _signature_cameras(signature: dict[str, Any]) -> frozenset[str]:
+    return frozenset(camera["name"] for camera in signature["cameras"])
+
+
+def request_policy_cameras(address: str) -> PolicyCameras | None:
+    """Ask the policy at `address` for its signatures, and return the cameras that they read.
 
     The benchmark asks before it builds its scene, so that it builds only those cameras.
     The function returns None when the policy closes the connection, as a policy on an
@@ -110,9 +131,14 @@ def request_policy_cameras(address: str) -> frozenset[str] | None:
         raise RuntimeError(
             f"policy replied to GET_SIGNATURE with {reply.get('type')!r}, not a signature"
         )
-    # The names stay strings, because a newer policy may read a camera that this SDK
-    # does not list.
-    return frozenset(camera["name"] for camera in reply["payload"]["signature"]["cameras"])
+    payload = reply["payload"]
+    signatures = payload.get("signatures")
+    return PolicyCameras(
+        cameras=_signature_cameras(payload["signature"]),
+        by_embodiment=None
+        if signatures is None
+        else {name: _signature_cameras(signature) for name, signature in signatures.items()},
+    )
 
 
 class _ClientPolicyConnection:

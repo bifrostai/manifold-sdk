@@ -404,6 +404,30 @@ class Benchmark(BaseModel):
         sensors = [sensor for sensor in self.sensors if sensor.name in names]
         return self.model_copy(update={"sensors": sensors})
 
+    def with_embodiment_sensors(self, names: Mapping[str, set[CameraName]]) -> Benchmark:
+        """The same benchmark with each embodiment in `names` publishing only those sensors.
+
+        `names` maps an embodiment name to the sensors that the embodiment keeps, in the
+        same way as `with_sensors`. An embodiment that `names` leaves out keeps every
+        sensor.
+        """
+        if self.embodiments is None:
+            kept = names.get(self.embodiment.name)
+            return self if kept is None else self.with_sensors(kept)
+        entries = tuple(
+            entry.model_copy(
+                update={
+                    "sensors": self.for_embodiment(entry.embodiment.name)
+                    .with_sensors(names[entry.embodiment.name])
+                    .sensors
+                }
+            )
+            if entry.embodiment.name in names
+            else entry
+            for entry in self.embodiments
+        )
+        return self.model_copy(update={"sensors": entries[0].sensors, "embodiments": entries})
+
 
 __all__ = [
     "ActionRange",

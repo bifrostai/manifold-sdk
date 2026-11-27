@@ -87,7 +87,11 @@ def test_close_is_a_noop_for_the_stateless_base():
 # --- launch_server ----------------------------------------------------------------
 
 
-def _pairing(profile, benchmark="B", pipeline="PIPE"):
+# A stand-in benchmark that has only the embodiment name that the launcher reads.
+_BENCHMARK = SimpleNamespace(embodiment=SimpleNamespace(name="franka_ee_delta"))
+
+
+def _pairing(profile, benchmark=_BENCHMARK, pipeline="PIPE"):
     # Build via read_pairing so the fake (str) benchmark/pipeline launder through the
     # module's Any-typed attributes, rather than constructing the typed Pairing with
     # mismatched literals.
@@ -112,6 +116,7 @@ def test_launch_server_loads_the_shared_profile_and_serves_the_single_pipeline(m
     sentinel_endpoint = object()
     profile = SimpleNamespace(
         default_weights="DEFAULT",
+        signature="SIGNATURE",
         load=lambda weights, device: (
             captured.update(weights=weights, device=device) or sentinel_endpoint
         ),
@@ -121,6 +126,7 @@ def test_launch_server_loads_the_shared_profile_and_serves_the_single_pipeline(m
 
     assert captured["endpoint"] is sentinel_endpoint
     assert captured["pipeline"] == "PIPE"  # a single pairing serves its own pipeline
+    assert captured["signatures"] == {"franka_ee_delta": "SIGNATURE"}
     assert captured["weights"] == "DEFAULT"  # weights=None -> the profile's default
     assert captured["port"] == 9000
 
@@ -132,6 +138,7 @@ def test_launch_server_honors_an_explicit_weights_override(monkeypatch):
     monkeypatch.setattr(serving, "serve", lambda endpoint, **kw: None)
     profile = SimpleNamespace(
         default_weights="DEFAULT",
+        signature="SIGNATURE",
         load=lambda weights, device: captured.update(weights=weights) or object(),
     )
 
@@ -648,7 +655,7 @@ def test_a_server_refuses_a_benchmark_newer_than_its_protocol(monkeypatch) -> No
     events: list[str] = []
     # The endpoint and socket are never touched: the refusal comes before either.
     closed = serving._serve_session(
-        cast(Any, _Unreachable()), None, None, cast(Any, None), "peer", events.append
+        cast(Any, _Unreachable()), None, None, None, cast(Any, None), "peer", events.append
     )
     assert closed is True
     assert any("newer than this server" in event for event in events)
