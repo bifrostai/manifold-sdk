@@ -62,6 +62,12 @@ if TYPE_CHECKING:
     from manifold.core.values import Action, Observation
     from manifold.recipes.pairing import Pairing
 
+    # What `serve` and `evaluate` take as `pipeline`: None, a `Pipeline`, or a matchmaker
+    # that returns the pipeline for a benchmark, with or without its signature.
+    _PipelineSource = (
+        Pipeline | Callable[[Benchmark], Pipeline | tuple[Pipeline, PolicySignature]] | None
+    )
+
 
 def _emit(message: str) -> None:
     """Print one progress line, flushing so it appears under a redirected stdout.
@@ -188,7 +194,7 @@ def _is_inside(path: Path, roots: tuple[Path, ...]) -> bool:
 
 def _serve_connection(
     endpoint: PolicyEndpoint,
-    pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    pipeline: _PipelineSource,
     signatures: Mapping[str, PolicySignature] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
@@ -248,7 +254,7 @@ def _signature_reply(
 
 def _serve_session(
     endpoint: PolicyEndpoint,
-    pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    pipeline: _PipelineSource,
     signatures: Mapping[str, PolicySignature] | None,
     script: dict[str, str] | None,
     conn: socket.socket,
@@ -296,8 +302,7 @@ def _serve_session(
     payload = HelloPayload.model_validate(hello["payload"])
     benchmark = _received_benchmark(payload.benchmark, emit)
 
-    signature = endpoint.signature
-    resolved = _resolve_pipeline(pipeline, benchmark)
+    resolved, signature = _resolve_pipeline(pipeline, benchmark, endpoint.signature)
     if not _gate(signature, benchmark, resolved, emit):
         return True
 
@@ -392,15 +397,20 @@ def _gate(
 
 
 def _resolve_pipeline(
-    pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None,
+    pipeline: _PipelineSource,
     benchmark: Benchmark,
-) -> Pipeline:
-    """Turn the `pipeline` argument into a concrete Pipeline for this benchmark."""
+    signature: PolicySignature,
+) -> tuple[Pipeline, PolicySignature]:
+    """The pipeline for this benchmark and the signature that the pairing check uses.
+
+    The signature is the matchmaker's, or else `signature`, the endpoint's.
+    """
     if pipeline is None:
-        return Pipeline()
+        return Pipeline(), signature
     if isinstance(pipeline, Pipeline):
-        return pipeline
-    return pipeline(benchmark)
+        return pipeline, signature
+    resolved = pipeline(benchmark)
+    return (resolved, signature) if isinstance(resolved, Pipeline) else resolved
 
 
 @runtime_checkable
@@ -597,7 +607,7 @@ class BenchmarkResult:
 def serve(
     endpoint: PolicyEndpoint,
     *,
-    pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
+    pipeline: _PipelineSource = None,
     signatures: Mapping[str, PolicySignature] | None = None,
     host: str = "127.0.0.1",
     port: int,
@@ -619,13 +629,15 @@ def serve(
     One connection's failure is confined to its worker thread. A KeyboardInterrupt
     stops accepting and gives all in-flight workers one second in total to finish.
 
-    `pipeline` may be None (empty pipeline), a callable invoked per connection with
-    the benchmark (the dynamic-injection hook — the pipeline arrives with the job),
-    or a `Pipeline` used as-is. `signatures` maps an embodiment name to the signature
-    that the server pairs with that embodiment, and the reply to GET_SIGNATURE carries it
-    under `signatures`, so that a benchmark renders only the cameras that each of its
-    embodiments needs. The reply leaves the key out when `signatures` is None. `on_event`
-    is called from worker threads, so a custom sink must be concurrency-safe.
+    `pipeline` may be None (empty pipeline), a callable invoked per connection with the
+    benchmark (the dynamic-injection hook — the pipeline arrives with the job), or a
+    `Pipeline` used as-is. A callable may return the pipeline with the signature that
+    the pairing check uses in place of the endpoint's. `signatures` maps an embodiment
+    name to the signature that the server pairs with that embodiment, and the reply to
+    GET_SIGNATURE carries it under `signatures`, so that a benchmark renders only the
+    cameras that each of its embodiments needs. The reply leaves the key out when
+    `signatures` is None. `on_event` is called from worker threads, so a custom sink
+    must be concurrency-safe.
     """
     emit = on_event
     script = _serving_script()
@@ -665,7 +677,7 @@ def evaluate(
     reset: Callable[[], ResetResult],
     step: Callable[[Action], StepResult],
     *,
-    pipeline: Pipeline | Callable[[Benchmark], Pipeline] | None = None,
+    pipeline: _PipelineSource = None,
     episodes: int,
     max_steps: int,
     on_event: Callable[[str], None] = _emit,
@@ -691,8 +703,7 @@ def evaluate(
             the connection without READY in the same case.
     """
     emit = on_event
-    resolved = _resolve_pipeline(pipeline, benchmark)
-    signature = endpoint.signature
+    resolved, signature = _resolve_pipeline(pipeline, benchmark, endpoint.signature)
     if not _gate(signature, benchmark, resolved, emit):
         raise ValueError("policy rejected the pairing (incompatible)")
     emit("policy confirmed the pairing (ready)")
@@ -736,7 +747,7 @@ def _signatures_by_embodiment(pairings: Sequence[Pairing]) -> dict[str, PolicySi
     differing: set[str] = set()
     for pairing in pairings:
         name = pairing.benchmark.embodiment.name
-        signature = pairing.profile.signature
+        signature = pairing.checked_signature
         if by_embodiment.setdefault(name, signature) != signature:
             differing.add(name)
     return {name: s for name, s in by_embodiment.items() if name not in differing}
@@ -756,22 +767,25 @@ def launch_server(
 ) -> None:
     """Build the shared policy from one-or-more pairings and serve it.
 
-    The reusable launcher body, factored out of any CLI: assert every pairing shares
-    one profile (one loaded model serves them all), build the endpoint once (falling
-    back to `default_weights` when `weights` is None), resolve the pipeline (a single
-    pairing serves its own; several build the benchmark->pipeline matchmaker), and hand
-    it to `serve`. Raises `ValueError` (from `assert_shared_profile`) rather than
-    calling `sys.exit`, so a CLI can translate it to its own exit code.
+    The reusable launcher body, factored out of any CLI: assert every pairing shares one
+    profile (one loaded model serves them all), build the endpoint once (falling back to
+    `default_weights` when `weights` is None), resolve the pipeline (a single pairing
+    without its own signature serves its own pipeline; otherwise the matchmaker picks
+    each benchmark's pipeline and signature), and hand it to `serve`. Raises
+    `ValueError` (from `assert_shared_profile`) rather than calling `sys.exit`, so a CLI
+    can translate it to its own exit code.
 
     All `pairings` must share the same profile. `weights` falls back to that profile's
     `default_weights` when None; `device` autodetects when None.
     """
     profile = assert_shared_profile(p.profile for p in pairings)
     endpoint = profile.load(weights if weights is not None else profile.default_weights, device)
-    if len(pairings) == 1:
+    if len(pairings) == 1 and pairings[0].signature is None:
         pipeline = pairings[0].pipeline
     else:
-        pipeline = multi_pairing_pipeline((p.benchmark, p.pipeline) for p in pairings)
+        pipeline = multi_pairing_pipeline(
+            (p.benchmark, p.pipeline, p.checked_signature) for p in pairings
+        )
     serve(
         endpoint,
         pipeline=pipeline,

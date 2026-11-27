@@ -8,7 +8,9 @@ library rather than in any consumer. `read_pairing` reads the triple off an
 already-imported module that exports module-level `PROFILE`/`BENCHMARK`/`PIPELINE` —
 the authoring convention for a "pairing module" — and is namespace-agnostic: the
 caller imports the module however it likes (a launcher de-duplicating its own bundled
-pairings, or a third party launching a policy module by import path).
+pairings, or a third party launching a policy module by import path). A module that
+pairs one model with several embodiments of a benchmark exports `PAIRINGS`, a list of
+`Pairing`, and `read_pairings` reads either form.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ if TYPE_CHECKING:
 
     from manifold.core.benchmark import Benchmark
     from manifold.core.pipeline import Pipeline
+    from manifold.core.policy import PolicySignature
     from manifold.recipes.serving import PolicyProfile
 
 _REQUIRED = ("PROFILE", "BENCHMARK", "PIPELINE")
@@ -34,11 +37,21 @@ class Pairing:
     what the runner advertises, and `pipeline` bridges the two. Naming it as a typed
     value lets the launcher and the matchmaker work against `.profile`/`.benchmark`/
     `.pipeline` rather than raw, unchecked module attributes.
+
+    `signature` is the signature that the pairing check compares with `benchmark`, such
+    as a signature with a second wrist camera for a robot with two arms. It is None when
+    the pairing uses the profile's signature.
     """
 
     profile: PolicyProfile
     benchmark: Benchmark
     pipeline: Pipeline
+    signature: PolicySignature | None = None
+
+    @property
+    def checked_signature(self) -> PolicySignature:
+        """The signature that the pairing check uses: `signature`, or else the profile's."""
+        return self.signature if self.signature is not None else self.profile.signature
 
 
 def read_pairing(module: ModuleType) -> Pairing:
@@ -64,4 +77,20 @@ def read_pairing(module: ModuleType) -> Pairing:
     return Pairing(module.PROFILE, module.BENCHMARK, module.PIPELINE)
 
 
-__all__ = ["Pairing", "read_pairing"]
+def read_pairings(module: ModuleType) -> list[Pairing]:
+    """The pairings of a module: its `PAIRINGS`, or else the one that `read_pairing` reads.
+
+    Raises:
+        ValueError: If `PAIRINGS` is empty or holds a value that is not a `Pairing`.
+        AttributeError: If the module exports no `PAIRINGS` and not all of PROFILE /
+            BENCHMARK / PIPELINE.
+    """
+    if not hasattr(module, "PAIRINGS"):
+        return [read_pairing(module)]
+    pairings = list(module.PAIRINGS)
+    if not pairings or not all(isinstance(pairing, Pairing) for pairing in pairings):
+        raise ValueError(f"{module.__name__}.PAIRINGS must be a non-empty list of Pairing")
+    return pairings
+
+
+__all__ = ["Pairing", "read_pairing", "read_pairings"]

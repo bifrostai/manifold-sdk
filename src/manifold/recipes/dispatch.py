@@ -1,4 +1,4 @@
-"""Build the `Callable[[Benchmark], Pipeline]` matchmaker that `serve` consumes."""
+"""Build the matchmaker that `serve` consumes: a benchmark to its pipeline and signature."""
 
 from __future__ import annotations
 
@@ -10,17 +10,20 @@ from manifold.core.pipeline import Pipeline
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
 
+    from manifold.core.policy import PolicySignature
+
 _Profile = TypeVar("_Profile")
 
 
 def multi_pairing_pipeline(
-    pairings: Iterable[tuple[Benchmark, Pipeline]],
-) -> Callable[[Benchmark], Pipeline]:
-    """Build a `Callable[[Benchmark], Pipeline]` dispatching by advertised benchmark.
+    pairings: Iterable[tuple[Benchmark, Pipeline, PolicySignature]],
+) -> Callable[[Benchmark], tuple[Pipeline, PolicySignature]]:
+    """Build a matchmaker dispatching by advertised benchmark.
 
-    Given the `(benchmark, pipeline)` values that one server mounts, return the
-    matchmaker `serve` invokes per connection: it reads the benchmark the runner
-    advertised on HELLO and returns the pipeline that bridges it.
+    Given the `(benchmark, pipeline, signature)` values that one server mounts, return
+    the matchmaker `serve` invokes per connection: it reads the benchmark the runner
+    advertised on HELLO and returns the pipeline that bridges it, with the signature
+    that the pairing check compares with it.
 
     The dispatch keys on the FULLER `(benchmark.name, benchmark.embodiment.name)`
     identity rather than `benchmark.name` alone. Keying on the name alone silently
@@ -32,15 +35,15 @@ def multi_pairing_pipeline(
     collide on the same `(name, embodiment)` key (an ambiguous mount the dispatcher
     could not resolve deterministically).
 
-    `pairings` is the `(benchmark, pipeline)` values this server mounts; each
+    `pairings` is the `(benchmark, pipeline, signature)` values this server mounts; each
     benchmark's `(name, embodiment.name)` must be unique across the set. The returned
-    callable maps an advertised `Benchmark` to its `Pipeline`, raising `ValueError`
-    for an unknown benchmark. `multi_pairing_pipeline` itself raises `ValueError` if
-    `pairings` is empty, or if two pairings collide on the same `(name,
-    embodiment.name)` key.
+    callable maps an advertised `Benchmark` to its `Pipeline` and `PolicySignature`,
+    raising `ValueError` for an unknown benchmark. `multi_pairing_pipeline` itself
+    raises `ValueError` if `pairings` is empty, or if two pairings collide on the same
+    `(name, embodiment.name)` key.
     """
-    by_identity: dict[tuple[str, str], Pipeline] = {}
-    for benchmark, pipeline in pairings:
+    by_identity: dict[tuple[str, str], tuple[Pipeline, PolicySignature]] = {}
+    for benchmark, pipeline, signature in pairings:
         key = (benchmark.name, benchmark.embodiment.name)
         if key in by_identity:
             raise ValueError(
@@ -48,22 +51,22 @@ def multi_pairing_pipeline(
                 f"{key[0]!r}/{key[1]!r}; the dispatcher could not resolve which "
                 "pipeline to use. Mount each (benchmark, embodiment) at most once."
             )
-        by_identity[key] = pipeline
+        by_identity[key] = (pipeline, signature)
 
     if not by_identity:
-        raise ValueError("multi_pairing_pipeline needs at least one (benchmark, pipeline) pair")
+        raise ValueError("multi_pairing_pipeline needs at least one pairing")
 
-    def dispatch(benchmark: Benchmark) -> Pipeline:
+    def dispatch(benchmark: Benchmark) -> tuple[Pipeline, PolicySignature]:
         key = (benchmark.name, benchmark.embodiment.name)
-        pipeline = by_identity.get(key)
-        if pipeline is None:
+        paired = by_identity.get(key)
+        if paired is None:
             known = ", ".join(f"{n!r}/{e!r}" for n, e in sorted(by_identity))
             raise ValueError(
                 f"Runner advertised benchmark {benchmark.name!r} "
                 f"(embodiment {benchmark.embodiment.name!r}) but no pairing covers "
                 f"it. Known (benchmark, embodiment) pairs for this server: {known}"
             )
-        return pipeline
+        return paired
 
     return dispatch
 

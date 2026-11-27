@@ -6,7 +6,7 @@ from manifold.recipes.dispatch import assert_shared_profile, multi_pairing_pipel
 from manifold.recipes.inspect import Recorder, describe, dump, load
 from manifold.recipes.lerobot import SignatureSuggestion, from_lerobot_checkpoint
 from manifold.recipes.local import serve as serve_function
-from manifold.recipes.pairing import Pairing, read_pairing
+from manifold.recipes.pairing import Pairing, read_pairing, read_pairings
 from manifold.recipes.resolve import resolve
 from manifold.recipes.serving import (
     ActionQueue,
@@ -33,6 +33,7 @@ __all__ = [
     "load",
     "multi_pairing_pipeline",
     "read_pairing",
+    "read_pairings",
     "resolve",
     "serve",
     "serve_function",

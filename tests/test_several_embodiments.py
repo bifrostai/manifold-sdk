@@ -5,25 +5,38 @@ from __future__ import annotations
 import socket
 import threading
 import types
+from types import ModuleType
 from typing import Any, cast
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
 from manifold.benchmark import BenchmarkConfig, ResetResult, StepResult, _client
 from manifold.benchmark.__main__ import _render_only_policy_cameras
 from manifold.benchmark._client import (
+    Client,
     PolicyCameras,
     _ClientPolicyConnection,
     request_policy_cameras,
 )
 from manifold.benchmark._service import make_service
+from manifold.benchmark.hooks import _fill_optional_hooks
 from manifold.benchmark.simulators.genesis import GenesisSimulator
 from manifold.core.benchmark import Benchmark
 from manifold.core.names import CameraName
+from manifold.core.pipeline import Pipeline
 from manifold.core.policy import PolicySignature
+from manifold.core.values import Action, Observation
 from manifold.embodiments import FRANKA_EE_DELTA, FRANKA_JOINT_ABSOLUTE
-from manifold.recipes import serve
+from manifold.recipes import (
+    Pairing,
+    launch_server,
+    multi_pairing_pipeline,
+    read_pairings,
+    serve,
+    serving,
+)
 from manifold.replay import EpisodeStartedEvent, read_replay_log
 from manifold.sensors import agentview, wrist
 from manifold.wire import FrameType
@@ -560,3 +573,231 @@ def test_the_signature_reply_carries_each_embodiments_signature():
             "franka_ee_delta": frozenset({"agentview", "wrist"}),
         },
     )
+
+
+# A policy server that pairs one model with each embodiment, each with its own signature.
+
+
+def _signature(benchmark: Benchmark) -> PolicySignature:
+    """A signature written out for `benchmark`'s embodiment, with the cameras it reads."""
+    embodiment = benchmark.embodiment
+    cameras = [agentview((4, 4, 3))]
+    if embodiment.name == "franka_ee_delta":
+        cameras.append(wrist((4, 4, 3)))
+    return PolicySignature(
+        action_space=embodiment.action,
+        proprioception=embodiment.proprioception,
+        cameras=cameras,
+        instruction=True,
+    )
+
+
+def test_a_pairing_checks_its_own_signature_or_else_the_profiles():
+    spec = _client_config(1).spec
+    ee = spec.for_embodiment("franka_ee_delta")
+    profile = cast("Any", types.SimpleNamespace(signature=_signature(spec)))
+
+    own = Pairing(profile, ee, Pipeline(), signature=_signature(ee))
+    shared = Pairing(profile, spec, Pipeline())
+
+    assert own.checked_signature == _signature(ee)
+    assert shared.checked_signature == _signature(spec)
+
+
+def test_read_pairings_reads_a_modules_pairings_or_its_one_pairing():
+    one = Pairing(cast("Any", "P"), cast("Any", "B"), Pipeline())
+    listing = cast(ModuleType, types.SimpleNamespace(__name__="listing", PAIRINGS=[one, one]))
+    single = cast(
+        ModuleType,
+        types.SimpleNamespace(__name__="single", PROFILE="P", BENCHMARK="B", PIPELINE="X"),
+    )
+    empty = cast(ModuleType, types.SimpleNamespace(__name__="empty", PAIRINGS=[]))
+
+    assert read_pairings(listing) == [one, one]
+    assert [pairing.pipeline for pairing in read_pairings(single)] == ["X"]
+    with pytest.raises(ValueError, match=r"empty\.PAIRINGS must be a non-empty list"):
+        read_pairings(empty)
+
+
+def test_the_matchmaker_returns_the_pipeline_and_signature_of_each_embodiment():
+    spec = _client_config(1).spec
+    arm, ee = (spec.for_embodiment(name) for name in spec.embodiment_names)
+    arm_pipeline, ee_pipeline = Pipeline(), Pipeline()
+
+    match = multi_pairing_pipeline(
+        [(arm, arm_pipeline, _signature(arm)), (ee, ee_pipeline, _signature(ee))]
+    )
+
+    assert match(ee) == (ee_pipeline, _signature(ee))
+    assert match(arm)[0] is arm_pipeline
+
+
+def test_the_signature_reply_leaves_out_an_embodiment_paired_with_two_signatures():
+    spec = _client_config(1).spec
+    ee = spec.for_embodiment("franka_ee_delta")
+    profile = cast("Any", types.SimpleNamespace(signature=_signature(spec)))
+    pairings = [
+        Pairing(profile, spec.for_embodiment("franka_joint_absolute"), Pipeline()),
+        Pairing(profile, ee, Pipeline(), signature=_signature(ee)),
+        Pairing(profile, ee.model_copy(update={"name": "other"}), Pipeline()),
+    ]
+
+    assert serving._signatures_by_embodiment(pairings) == {
+        "franka_joint_absolute": _signature(spec)
+    }
+
+
+class _SlicingSession:
+    """A session whose model answers with zeros as wide as the action of the observation's robot.
+
+    The joint-position robot reports `joint_pos` and takes 8 values. The end-effector
+    robot reports only `ee_pose` and takes 7.
+    """
+
+    def reset(self) -> None:
+        pass
+
+    def infer(self, observation: Observation) -> Action:
+        width = 8 if "joint_pos" in observation.state else 7
+        return Action(values=np.zeros(width, dtype=np.float32))
+
+    def close(self) -> None:
+        pass
+
+
+def _launch(pairings: list[Pairing]) -> int:
+    """Serve `pairings` on a free port in a background thread, and return the port."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    listening = threading.Event()
+    threading.Thread(
+        target=launch_server,
+        args=(pairings,),
+        kwargs={
+            "host": "127.0.0.1",
+            "port": port,
+            "on_event": lambda event: event.startswith("listening on") and listening.set(),
+        },
+        daemon=True,
+    ).start()
+    assert listening.wait(timeout=5), "the server never bound its port"
+    return port
+
+
+def _pairings(spec: Benchmark, names: tuple[str, ...]) -> list[Pairing]:
+    """A pairing for each of `names`, each with its own signature, over one loaded model."""
+    endpoint = types.SimpleNamespace(signature=_signature(spec), session=_SlicingSession)
+    profile = cast(
+        "Any",
+        types.SimpleNamespace(
+            default_weights="weights",
+            signature=_signature(spec),
+            load=lambda weights, device: endpoint,
+        ),
+    )
+    return [
+        Pairing(
+            profile,
+            spec.for_embodiment(name),
+            Pipeline(),
+            signature=_signature(spec.for_embodiment(name)),
+        )
+        for name in names
+    ]
+
+
+def _end_to_end_hooks() -> types.SimpleNamespace:
+    """Hooks whose even episodes use the joint-position robot and succeed at the second step."""
+
+    def observation(embodiment: str) -> Observation:
+        image = np.zeros((4, 4, 3), dtype=np.uint8)
+        if embodiment == "franka_joint_absolute":
+            return Observation(
+                sensors={"agentview": image},
+                state={
+                    "joint_pos": np.zeros(8, dtype=np.float32),
+                    "ee_pose": np.zeros(6, dtype=np.float32),
+                },
+            )
+        return Observation(
+            sensors={"agentview": image, "wrist": image},
+            state={"ee_pose": np.zeros(9, dtype=np.float32)},
+        )
+
+    def on_reset(config, env, task_config, episode_idx, logger):
+        env.embodiment = _by_parity(episode_idx)
+        env.steps = 0
+        return ResetResult(
+            observation(env.embodiment),
+            instruction="lift the toy",
+            task_id=task_config["task_id"],
+            attributes={},
+            events=(),
+            max_steps=None,
+            embodiment=env.embodiment,
+        )
+
+    def on_step(config, env, task_config, action, logger):
+        env.steps += 1
+        env.widths = [*getattr(env, "widths", []), len(action.values)]
+        done = env.steps == 2
+        return StepResult(observation(env.embodiment), success=done, done=done, events=())
+
+    envs: list[types.SimpleNamespace] = []
+    hooks = types.SimpleNamespace(
+        on_load=lambda config, task_config, logger: (
+            envs.append(types.SimpleNamespace()) or envs[-1]
+        ),
+        on_reset=on_reset,
+        on_step=on_step,
+        envs=envs,
+    )
+    _fill_optional_hooks(hooks)
+    return hooks
+
+
+def test_a_two_embodiment_benchmark_runs_against_a_two_pairing_server(tmp_path):
+    config = _client_config(1)
+    port = _launch(_pairings(config.spec, config.spec.embodiment_names))
+    hooks = _end_to_end_hooks()
+    session = _Session(_task(tmp_path, (0, 1)))
+    service = make_service(config, hooks)
+
+    cameras = request_policy_cameras(f"127.0.0.1:{port}")
+    service.start()
+    try:
+        Client(config, service, cast("Any", session), f"ws://127.0.0.1:{port}", None).run()
+    finally:
+        service.stop()
+
+    assert cameras is not None
+    assert cameras.by_embodiment == {
+        "franka_joint_absolute": frozenset({"agentview"}),
+        "franka_ee_delta": frozenset({"agentview", "wrist"}),
+    }
+    ((records, _),) = session.completed
+    assert [(record.success, record.attributes["embodiment"]) for record in records] == [
+        (True, "franka_joint_absolute"),
+        (True, "franka_ee_delta"),
+    ]
+    (env,) = hooks.envs
+    assert env.widths == [8, 8, 7, 7]
+
+
+def test_a_server_without_a_pairing_for_one_embodiment_fails_the_run_at_start_up(tmp_path):
+    config = _client_config(1)
+    port = _launch(_pairings(config.spec, ("franka_joint_absolute",)))
+    hooks = _end_to_end_hooks()
+    session = _Session(_task(tmp_path, (0, 1)))
+    service = make_service(config, hooks)
+
+    service.start()
+    try:
+        with pytest.raises(RuntimeError, match="rejected the pairing with franka_ee_delta"):
+            Client(config, service, cast("Any", session), f"127.0.0.1:{port}", None).run()
+    finally:
+        service.stop()
+
+    assert hooks.envs == []
+    assert session.completed == []
