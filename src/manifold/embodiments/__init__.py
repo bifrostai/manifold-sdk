@@ -18,8 +18,17 @@ from __future__ import annotations
 from manifold.embodiments.aloha_agilex_joint_absolute import ALOHA_AGILEX_JOINT_ABSOLUTE
 from manifold.embodiments.droid_joint_absolute import DROID_JOINT_ABSOLUTE
 from manifold.embodiments.dual_franka_ee_delta import DUAL_FRANKA_EE_DELTA
+from manifold.embodiments.dual_franka_leap_ee_delta import DUAL_FRANKA_LEAP_EE_DELTA
+from manifold.embodiments.dual_franka_mobile_leap_whole_body import (
+    DUAL_FRANKA_MOBILE_LEAP_WHOLE_BODY,
+)
+from manifold.embodiments.dual_franka_mobile_whole_body import DUAL_FRANKA_MOBILE_WHOLE_BODY
+from manifold.embodiments.dual_franka_right_leap_ee_delta import DUAL_FRANKA_RIGHT_LEAP_EE_DELTA
+from manifold.embodiments.franka_allegro_joint_delta import FRANKA_ALLEGRO_JOINT_DELTA
 from manifold.embodiments.franka_ee_delta import FRANKA_EE_DELTA
 from manifold.embodiments.franka_joint_absolute import FRANKA_JOINT_ABSOLUTE
+from manifold.embodiments.franka_leap_ee_delta import FRANKA_LEAP_EE_DELTA
+from manifold.embodiments.franka_mobile_leap_whole_body import FRANKA_MOBILE_LEAP_WHOLE_BODY
 from manifold.embodiments.franka_mobile_whole_body import FRANKA_MOBILE_WHOLE_BODY
 from manifold.embodiments.panda_omron_whole_body import PANDA_OMRON_WHOLE_BODY
 from manifold.embodiments.rby1_wuji2_joint_absolute import RBY1_WUJI2_JOINT_ABSOLUTE
@@ -29,8 +38,15 @@ ALL = (
     ALOHA_AGILEX_JOINT_ABSOLUTE,
     DROID_JOINT_ABSOLUTE,
     DUAL_FRANKA_EE_DELTA,
+    DUAL_FRANKA_LEAP_EE_DELTA,
+    DUAL_FRANKA_MOBILE_LEAP_WHOLE_BODY,
+    DUAL_FRANKA_MOBILE_WHOLE_BODY,
+    DUAL_FRANKA_RIGHT_LEAP_EE_DELTA,
+    FRANKA_ALLEGRO_JOINT_DELTA,
     FRANKA_EE_DELTA,
     FRANKA_JOINT_ABSOLUTE,
+    FRANKA_LEAP_EE_DELTA,
+    FRANKA_MOBILE_LEAP_WHOLE_BODY,
     FRANKA_MOBILE_WHOLE_BODY,
     PANDA_OMRON_WHOLE_BODY,
     RBY1_WUJI2_JOINT_ABSOLUTE,
@@ -42,8 +58,15 @@ __all__ = [
     "ALOHA_AGILEX_JOINT_ABSOLUTE",
     "DROID_JOINT_ABSOLUTE",
     "DUAL_FRANKA_EE_DELTA",
+    "DUAL_FRANKA_LEAP_EE_DELTA",
+    "DUAL_FRANKA_MOBILE_LEAP_WHOLE_BODY",
+    "DUAL_FRANKA_MOBILE_WHOLE_BODY",
+    "DUAL_FRANKA_RIGHT_LEAP_EE_DELTA",
+    "FRANKA_ALLEGRO_JOINT_DELTA",
     "FRANKA_EE_DELTA",
     "FRANKA_JOINT_ABSOLUTE",
+    "FRANKA_LEAP_EE_DELTA",
+    "FRANKA_MOBILE_LEAP_WHOLE_BODY",
     "FRANKA_MOBILE_WHOLE_BODY",
     "PANDA_OMRON_WHOLE_BODY",
     "RBY1_WUJI2_JOINT_ABSOLUTE",

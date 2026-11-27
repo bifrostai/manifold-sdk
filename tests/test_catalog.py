@@ -4,12 +4,14 @@ import pkgutil
 import pytest
 
 import manifold.embodiments
+import manifold.embodiments as embodiments
 from manifold.core.conventions import Frame, GripperFormat, RotationFormat
 from manifold.core.embodiment import (
     BodyActionSpace,
     CompositeActionSpace,
     EEActionSpace,
     Embodiment,
+    JointActionSpace,
 )
 from manifold.core.names import ControlMode, EmbodimentName
 from manifold.embodiments import ALL as EMBODIMENTS
@@ -67,8 +69,15 @@ def test_embodiment_names_keep_the_strings_that_registered_versions_pair_on():
         "aloha_agilex_joint_absolute",
         "droid_joint_absolute",
         "dual_franka_ee_delta",
+        "dual_franka_leap_ee_delta",
+        "dual_franka_mobile_leap_whole_body",
+        "dual_franka_mobile_whole_body",
+        "dual_franka_right_leap_ee_delta",
+        "franka_allegro_joint_delta",
         "franka_ee_delta",
         "franka_joint_absolute",
+        "franka_leap_ee_delta",
+        "franka_mobile_leap_whole_body",
         "franka_mobile_whole_body",
         "panda_omron_whole_body",
         "rby1_wuji2_joint_absolute",
@@ -143,3 +152,53 @@ def test_the_dual_franka_drives_each_arm_in_turn_in_its_own_base_frame():
     assert (action.per_arm_length(), action.expected_length()) == (7, 14)
     assert (action.rotation, action.gripper) == (RotationFormat.EULER_XYZ, GripperFormat.SIGNED)
     assert (action.frame, action.delta) == (Frame.BASE, True)
+
+
+@pytest.mark.parametrize(
+    ("embodiment", "slices"),
+    [
+        (embodiments.FRANKA_LEAP_EE_DELTA, [("ee", 0, 6), ("joint", 6, 22)]),
+        (
+            embodiments.DUAL_FRANKA_LEAP_EE_DELTA,
+            [("ee0", 0, 6), ("joint0", 6, 22), ("ee1", 22, 28), ("joint1", 28, 44)],
+        ),
+        (
+            embodiments.DUAL_FRANKA_RIGHT_LEAP_EE_DELTA,
+            [("ee0", 0, 6), ("joint0", 6, 22), ("ee1", 22, 28), ("joint1", 28, 44)],
+        ),
+        (
+            embodiments.FRANKA_MOBILE_LEAP_WHOLE_BODY,
+            [("mobile_base", 0, 3), ("ee", 3, 9), ("joint", 9, 25)],
+        ),
+        (
+            embodiments.DUAL_FRANKA_MOBILE_LEAP_WHOLE_BODY,
+            [
+                ("mobile_base0", 0, 3),
+                ("ee0", 3, 9),
+                ("joint0", 9, 25),
+                ("mobile_base1", 25, 28),
+                ("ee1", 28, 34),
+                ("joint1", 34, 50),
+            ],
+        ),
+        (
+            embodiments.DUAL_FRANKA_MOBILE_WHOLE_BODY,
+            [("mobile_base0", 0, 3), ("ee0", 3, 10), ("mobile_base1", 10, 13), ("ee1", 13, 20)],
+        ),
+    ],
+    ids=lambda value: value.name if isinstance(value, Embodiment) else "",
+)
+def test_each_maniladder_robot_reads_its_groups_in_the_order_of_its_controllers(
+    embodiment: Embodiment, slices: list[tuple[str, int, int]]
+) -> None:
+    action = embodiment.action
+
+    assert isinstance(action, CompositeActionSpace)
+    assert action.slices() == slices
+
+
+def test_the_allegro_hand_takes_its_sixteen_joint_deltas_alone():
+    action = embodiments.FRANKA_ALLEGRO_JOINT_DELTA.action
+
+    assert isinstance(action, JointActionSpace)
+    assert (action.dof, action.gripper, action.delta) == (16, None, True)
